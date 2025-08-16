@@ -1,7 +1,7 @@
 [package]
-name = "eframe_template"
+name = "simu"
 version = "0.1.0"
-authors = ["Emil Ernerfeldt <emil.ernerfeldt@gmail.com>"]
+authors = [""]
 edition = "2024"
 include = ["LICENSE-APACHE", "LICENSE-MIT", "**/*.rs", "Cargo.toml"]
 rust-version = "1.85"
@@ -13,17 +13,19 @@ targets = ["x86_64-unknown-linux-gnu", "wasm32-unknown-unknown"]
 [dependencies]
 egui = "0.32"
 eframe = { version = "0.32", default-features = false, features = [
-    "accesskit",     # Make egui compatible with screen readers. NOTE: adds a lot of dependencies.
-    "default_fonts", # Embed the default egui fonts.
-    "glow",          # Use the glow rendering backend. Alternative: "wgpu".
-    "persistence",   # Enable restoring app state when restarting the app.
-    "wayland",       # To support Linux (and CI)
-    "x11",           # To support older Linux distributions (restores one of the default features)
+  "accesskit",     # Make egui compatible with screen readers. NOTE: adds a lot of dependencies.
+  "default_fonts", # Embed the default egui fonts.
+  "glow",          # Use the glow rendering backend. Alternative: "wgpu".
+  "persistence",   # Enable restoring app state when restarting the app.
+  "wayland",       # To support Linux (and CI)
+  "x11",           # To support older Linux distributions (restores one of the default features)
 ] }
 log = "0.4.27"
 
 # You only need serde if you want app persistence:
 serde = { version = "1.0.219", features = ["derive"] }
+egui_extras = { version = "0.32.1", features = ["all_loaders"] }
+image = "0.25.6"
 
 # native:
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
@@ -53,9 +55,13 @@ opt-level = 2
 # eframe = { path = "../egui/crates/eframe" }
 
 
-
 # ----------------------------------------------------------------------------------------
 # Lints:
+
+[features]
+default = []
+wasm = []
+
 
 [lints]
 workspace = true
@@ -96,12 +102,12 @@ cloned_instead_of_copied = "warn"
 dbg_macro = "warn"
 debug_assert_with_mut_call = "warn"
 derive_partial_eq_without_eq = "warn"
-disallowed_macros = "warn"                  # See clippy.toml
-disallowed_methods = "warn"                 # See clippy.toml
-disallowed_names = "warn"                   # See clippy.toml
-disallowed_script_idents = "warn"           # See clippy.toml
-disallowed_types = "warn"                   # See clippy.toml
-doc_include_without_cfg  = "warn"
+disallowed_macros = "warn"                   # See clippy.toml
+disallowed_methods = "warn"                  # See clippy.toml
+disallowed_names = "warn"                    # See clippy.toml
+disallowed_script_idents = "warn"            # See clippy.toml
+disallowed_types = "warn"                    # See clippy.toml
+doc_include_without_cfg = "warn"
 doc_link_with_quotes = "warn"
 doc_markdown = "warn"
 empty_enum = "warn"
@@ -236,5 +242,5 @@ wildcard_dependencies = "warn"
 wildcard_imports = "warn"
 zero_sized_map_values = "warn"
 
-manual_range_contains = "allow"       # this is better on 'allow'
-map_unwrap_or = "allow"               # this is better on 'allow'
+manual_range_contains = "allow" # this is better on 'allow'
+map_unwrap_or = "allow"         # this is better on 'allow'
