@@ -1,0 +1,2 @@
+- Figure out the image sizing
+- Structure for adding different gates and pins
