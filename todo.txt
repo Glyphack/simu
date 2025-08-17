@@ -1,2 +1,3 @@
-- Figure out the image sizing
+- Add current
+- Add wires
 - Structure for adding different gates and pins
