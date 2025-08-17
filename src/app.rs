@@ -1,6 +1,5 @@
 use egui::{
-    Align, AtomExt, Button, Color32, ImageSource, Layout, Pos2, Sense, Ui, Vec2, include_image,
-    pos2, vec2,
+    Align, Button, Color32, ImageSource, Layout, Pos2, Sense, Ui, Vec2, Widget, include_image, vec2,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -16,14 +15,13 @@ pub struct PinInfo {
 }
 
 pub struct GateGraphics {
+    // TODO: Figure out what is the correct way to deal with images
     pub svg: ImageSource<'static>,
-    pub svg_path: &'static str,
     pub pins: &'static [PinInfo],
 }
 
 pub static NAND_GRAPHICS: GateGraphics = GateGraphics {
     svg: include_image!("../assets/nand.svg"),
-    svg_path: "file://assets/nand.svg",
     pins: &[
         PinInfo {
             kind: PinKind::Input,
@@ -55,14 +53,17 @@ pub struct GateInstance {
 #[derive(serde::Deserialize, serde::Serialize, Default)]
 #[serde(default)]
 pub struct TemplateApp {
-    /// Currently dragged gate from palette
-    dragged_gate: Option<LogicGate>,
+    /// State
     /// Gates placed on the canvas
     canvas_gates: Vec<GateInstance>,
-    /// Temporary drag position if dragging palette-gate
-    drag_position: Option<Pos2>,
     /// Next unique ID for gates
     next_gate_id: u32,
+
+    /// Dragging from panel
+    panel_dragged_gate: Option<LogicGate>,
+    /// Temporary drag position if dragging palette-gate
+    panel_drag_position: Option<Pos2>,
+
     /// Currently dragged gate id from canvas
     dragged_canvas_gate: Option<u32>,
     /// Offset from mouse pointer to gate center at drag start
@@ -71,12 +72,6 @@ pub struct TemplateApp {
 
 impl TemplateApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        // let texture = cc.egui_ctx.try_load_texture(
-        //     NAND_GRAPHICS.svg_path,
-        //     egui::TextureOptions::NEAREST,
-        //     egui::SizeHint::default(),
-        // );
-        // Register all supported image loaders
         egui_extras::install_image_loaders(&cc.egui_ctx);
         if let Some(storage) = cc.storage {
             eframe::get_value(storage, eframe::APP_KEY).unwrap_or_default()
@@ -100,19 +95,23 @@ impl TemplateApp {
     }
 
     fn draw_palette(&mut self, ui: &mut Ui) {
-        // TODO: Figure out what is the correct way to deal with images
-        let svg_scaled = NAND_GRAPHICS.svg.clone();
-        let response = ui.add(egui::ImageButton::new(svg_scaled).sense(Sense::click_and_drag()));
+        let image = egui::Image::new(NAND_GRAPHICS.svg.clone()).max_height(70.0);
+        let response = ui.add(egui::ImageButton::new(image).sense(Sense::click_and_drag()));
+
         if response.drag_started() {
-            self.dragged_gate = Some(LogicGate::Nand);
-            self.drag_position = None;
+            self.panel_dragged_gate = Some(LogicGate::Nand);
+            self.panel_drag_position = None;
         }
         if response.dragged() {
             if let Some(pointer_pos) = ui.ctx().pointer_interact_pos() {
-                self.drag_position = Some(pointer_pos);
+                self.panel_drag_position = Some(pointer_pos);
             }
         }
-        if ui.button("Clear Canvas").clicked() {
+        if Button::new("Clear Canvas")
+            .min_size(vec2(48.0, 30.0))
+            .ui(ui)
+            .clicked()
+        {
             self.canvas_gates.clear();
             self.dragged_canvas_gate = None;
             self.drag_offset = None;
@@ -120,18 +119,18 @@ impl TemplateApp {
     }
 
     fn draw_canvas(&mut self, ui: &mut Ui) {
-        let (resp, painter) = ui.allocate_painter(ui.available_size(), Sense::hover());
+        let (resp, _painter) = ui.allocate_painter(ui.available_size(), Sense::hover());
         let rect = resp.rect;
 
         // handle dragging from panel
-        if let (Some(gate_type), Some(pos)) = (&self.dragged_gate, self.drag_position) {
+        if let (Some(gate_type), Some(pos)) = (&self.panel_dragged_gate, self.panel_drag_position) {
             if rect.contains(pos) {
                 Self::draw_gate_svg_with_pins(ui, gate_type, pos, Color32::YELLOW);
             }
         }
 
         // spawn a new gate
-        if let (Some(gate_type), Some(pos)) = (&self.dragged_gate, self.drag_position) {
+        if let (Some(gate_type), Some(pos)) = (&self.panel_dragged_gate, self.panel_drag_position) {
             if rect.contains(pos) && ui.ctx().input(|i| i.pointer.any_released()) {
                 self.canvas_gates.push(GateInstance {
                     id: self.next_gate_id,
@@ -139,15 +138,18 @@ impl TemplateApp {
                     position: pos,
                 });
                 self.next_gate_id += 1;
-                self.dragged_gate = None;
-                self.drag_position = None;
+                self.panel_dragged_gate = None;
+                self.panel_drag_position = None;
             }
         }
 
         let pointer_pos = ui.input(|i| i.pointer.interact_pos());
         let pointer_pressed = ui.input(|i| i.pointer.primary_down());
         let pointer_any_up = ui.input(|i| i.pointer.any_released());
-        if self.dragged_gate.is_none() && self.dragged_canvas_gate.is_none() && pointer_pressed {
+        if self.panel_dragged_gate.is_none()
+            && self.dragged_canvas_gate.is_none()
+            && pointer_pressed
+        {
             if let Some(mouse_pos) = pointer_pos {
                 for gate in self.canvas_gates.iter().rev() {
                     let size = Vec2::new(48.0, 36.0);
@@ -189,17 +191,15 @@ impl TemplateApp {
     }
 
     fn draw_gate_svg_with_pins(ui: &mut Ui, gate_type: &LogicGate, pos: Pos2, _tint: Color32) {
-        let size = Vec2::new(48.0, 36.0);
-        let rect = egui::Rect::from_center_size(pos, size);
-
-        match gate_type {
-            LogicGate::Nand => {
-                ui.put(rect, egui::Image::new(NAND_GRAPHICS.svg.clone()));
-            }
-        }
         let graphics = match gate_type {
             LogicGate::Nand => &NAND_GRAPHICS,
         };
+
+        let size = Vec2::new(48.0, 36.0);
+        let rect = egui::Rect::from_center_size(pos, size);
+        let image = egui::Image::new(graphics.svg.clone()).fit_to_exact_size(rect.size());
+        ui.put(rect, image);
+
         for pin in graphics.pins {
             let pin_pos = pos + pin.offset;
             let color = match pin.kind {
