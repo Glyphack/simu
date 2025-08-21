@@ -235,9 +235,11 @@ impl TemplateApp {
     }
 
     pub fn main_layout(&mut self, ui: &mut Ui) {
+        // egui::Window::new("Debug logs").show(ui.ctx(), |ui| {
+        //     egui_logger::logger_ui().show(ui);
+        // });
         ui.with_layout(Layout::left_to_right(Align::Min), |ui| {
             self.canvas_config = CanvasConfig::default();
-            // TODO: need a better debugging method
             ui.add(egui::TextEdit::multiline(&mut format!(
                 "world {:#?}",
                 self.instances
@@ -429,6 +431,47 @@ impl TemplateApp {
                 }
             }
         }
+        //
+        // // If Anything can be snapped to other instances do it.
+        // for instance in self.instances.iter() {
+        //     match instance.ty {
+        //         InstanceType::Gate(gate) => {
+        //             for other in self.instances.iter() {
+        //                 match other.ty {
+        //                     InstanceType::Wire(wire_instance) => {
+        //                         for pin in gate.kind.graphics().pins {
+        //                             let pin_pos = gate.pos + pin.offset;
+        //                             // Log distances from this pin to the wire start/end
+        //                             let d_start = wire_instance.start.distance(pin_pos);
+        //                             let d_end = wire_instance.end.distance(pin_pos);
+        //                             log::info!(
+        //                                 "snap-check: gate={} pin=({:.1},{:.1}) wire={} d_start={:.2} d_end={:.2}",
+        //                                 instance.id.usize(),
+        //                                 pin_pos.x,
+        //                                 pin_pos.y,
+        //                                 other.id.usize(),
+        //                                 d_start,
+        //                                 d_end
+        //                             );
+        //                             if wire_instance.start.distance(pin_pos) < 10.0
+        //                                 || wire_instance.end.distance(pin_pos) < 10.0
+        //                             {
+        //                                 ui.painter().circle_filled(
+        //                                     pin_pos,
+        //                                     20.0,
+        //                                     Color32::LIGHT_BLUE,
+        //                                 );
+        //                             }
+        //                         }
+        //                     }
+        //                     InstanceType::Gate(_) => {}
+        //                 }
+        //             }
+        //         }
+        //         InstanceType::Wire(wire_instance) => {}
+        //     }
+        // }
+        //
         for instance in self.instances.iter() {
             match instance.ty {
                 InstanceType::Gate(gate) => {
