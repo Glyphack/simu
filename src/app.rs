@@ -1,12 +1,12 @@
 use std::{collections::HashMap, hash::Hash, usize};
 
 use egui::{
-    Align, Align2, Button, Color32, FontId, Image, Label, Layout, Pos2, Rect, Sense, Shape, Stroke,
-    TextEdit, Ui, Vec2, Widget, pos2, vec2,
+    Align, Button, Color32, Image, Layout, Pos2, Rect, Sense, Stroke, Ui, Vec2, Widget, pos2, vec2,
 };
 
 use crate::{assets, config::CanvasConfig};
 
+// TODO Direction is not used anymore. I can calculate it from current positions?
 #[derive(serde::Deserialize, serde::Serialize, Debug, Clone, Copy, Default, Eq, PartialEq)]
 pub enum Direction {
     Up,
@@ -17,7 +17,7 @@ pub enum Direction {
 }
 
 impl Direction {
-    fn rotate_cw(self) -> Self {
+    fn _rotate_cw(self) -> Self {
         match self {
             Direction::Up => Direction::Right,
             Direction::Right => Direction::Down,
@@ -32,19 +32,50 @@ impl Direction {
 pub struct Instance {
     id: InstanceId,
     ty: InstanceType,
-    pos: Pos2,
-    dir: Direction,
+}
+
+impl Instance {
+    fn _new_wire(id: InstanceId, start: Pos2, end: Pos2) -> Self {
+        Self {
+            id,
+            ty: InstanceType::new_wire(start, end),
+        }
+    }
+    fn _new_gate(id: InstanceId, kind: GateKind, pos: Pos2) -> Self {
+        Self {
+            id,
+            ty: InstanceType::new_gate(kind, pos),
+        }
+    }
+    fn new(id: InstanceId, ty: InstanceType) -> Self {
+        Self { id, ty }
+    }
 }
 
 #[derive(serde::Deserialize, serde::Serialize, Copy, Debug, Clone)]
 pub enum InstanceType {
-    Nand,
-    Wire,
+    Gate(GateInstance),
+    Wire(WireInstance),
 }
 
-#[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
+impl InstanceType {
+    fn new_wire(start: Pos2, end: Pos2) -> Self {
+        Self::Wire(WireInstance { start, end })
+    }
+
+    pub fn _new_wire_from_point(p: Pos2) -> Self {
+        return Self::new_wire(p, pos2(p.x + 30.0, p.y));
+    }
+    fn new_gate(kind: GateKind, pos: Pos2) -> Self {
+        Self::Gate(GateInstance { kind, pos })
+    }
+}
+
+#[derive(serde::Deserialize, serde::Serialize, Copy, Debug, Clone)]
 pub struct GateInstance {
     kind: GateKind,
+    // Center position
+    pos: Pos2,
 }
 
 impl GateKind {
@@ -55,23 +86,24 @@ impl GateKind {
     }
 }
 
-#[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
+#[derive(serde::Deserialize, serde::Serialize, Copy, Debug, Clone)]
 pub enum GateKind {
     Nand,
 }
 
-#[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
+#[derive(serde::Deserialize, serde::Serialize, Copy, Debug, Clone)]
 pub struct WireInstance {
     pub start: Pos2,
     pub end: Pos2,
 }
 
 impl WireInstance {
-    pub fn from_point(p: Pos2) -> WireInstance {
-        return Self {
-            start: p,
-            end: pos2(p.x + 30.0, p.y),
-        };
+    fn rotate_cw(&mut self) {
+        let origin = (self.start.to_vec2() + self.end.to_vec2()) / 2.0;
+        // 0 -1
+        // 1 0
+        self.start = rotate_point(self.start, origin.to_pos2(), std::f32::consts::FRAC_PI_2);
+        self.end = rotate_point(self.end, origin.to_pos2(), std::f32::consts::FRAC_PI_2);
     }
 }
 
@@ -129,16 +161,13 @@ pub struct PanelDrag {
     ty: InstanceType,
     /// Temporary drag position
     pos: Pos2,
-    /// Orientation while dragging needed to allow rotate while dragging
-    dir: Direction,
 }
 
 impl PanelDrag {
-    fn new(ty: InstanceType, pos: Pos2) -> Self {
+    fn new(ty: InstanceType) -> Self {
         Self {
             ty,
-            pos,
-            dir: Direction::Right,
+            pos: pos2(0.0, 0.0),
         }
     }
 }
@@ -232,7 +261,7 @@ impl TemplateApp {
         if nand_resp.dragged()
             && let Some(pos) = ui.ctx().pointer_interact_pos()
         {
-            self.panel_drag = Some(PanelDrag::new(InstanceType::Nand, pos))
+            self.panel_drag = Some(PanelDrag::new(InstanceType::new_wire(pos, pos)));
         }
 
         ui.add_space(8.0);
@@ -245,7 +274,7 @@ impl TemplateApp {
         if wire_resp.dragged()
             && let Some(pos) = ui.ctx().pointer_interact_pos()
         {
-            self.panel_drag = Some(PanelDrag::new(InstanceType::Wire, pos));
+            self.panel_drag = Some(PanelDrag::new(InstanceType::new_gate(GateKind::Nand, pos)));
         }
 
         ui.add_space(8.0);
@@ -273,22 +302,11 @@ impl TemplateApp {
         if let Some(panel_drag) = &self.panel_drag {
             if canvas_rect.contains(panel_drag.pos) {
                 match panel_drag.ty {
-                    InstanceType::Nand => {
-                        self.draw_gate(
-                            ui,
-                            &GateInstance {
-                                kind: GateKind::Nand,
-                            },
-                            panel_drag.pos,
-                        );
+                    InstanceType::Gate(gate) => {
+                        self.draw_gate(ui, &gate);
                     }
-                    InstanceType::Wire => {
-                        self.draw_wire(
-                            ui,
-                            &WireInstance::from_point(panel_drag.pos),
-                            panel_drag.pos,
-                            panel_drag.dir,
-                        );
+                    InstanceType::Wire(wire) => {
+                        self.draw_wire(ui, &wire);
                     }
                 }
             }
@@ -304,34 +322,8 @@ impl TemplateApp {
             && mouse_up
         {
             if canvas_rect.contains(panel_drag.pos) {
-                match panel_drag.ty {
-                    InstanceType::Nand => {
-                        self.instances.push(Instance {
-                            id: self.next_instance_id,
-                            ty: InstanceType::Nand,
-                            pos: panel_drag.pos,
-                            dir: panel_drag.dir,
-                        });
-                        self.gates.insert(
-                            self.next_instance_id,
-                            GateInstance {
-                                kind: GateKind::Nand,
-                            },
-                        );
-                    }
-                    InstanceType::Wire => {
-                        self.instances.push(Instance {
-                            id: self.next_instance_id,
-                            ty: InstanceType::Wire,
-                            pos: panel_drag.pos,
-                            dir: panel_drag.dir,
-                        });
-                        self.wires.insert(
-                            self.next_instance_id,
-                            WireInstance::from_point(panel_drag.pos),
-                        );
-                    }
-                }
+                self.instances
+                    .push(Instance::new(self.next_instance_id, panel_drag.ty));
                 self.next_instance_id.incr();
                 self.panel_drag = None;
             }
@@ -348,14 +340,13 @@ impl TemplateApp {
             let i = self.interacted_instance(mouse_pos);
             if let Some(instance) = i {
                 match instance.ty {
-                    InstanceType::Nand => {
+                    InstanceType::Gate(gate) => {
                         self.canvas_drag = Some(CanvasDrag::new(
                             instance.id,
-                            instance.pos.to_vec2() - mouse_pos.to_vec2(),
+                            gate.pos.to_vec2() - mouse_pos.to_vec2(),
                         ));
                     }
-                    InstanceType::Wire => {
-                        let wire = self.get_wire(instance.id);
+                    InstanceType::Wire(wire) => {
                         if mouse_pos.distance(wire.end) < 5.0 {
                             self.resize = Some(Resize {
                                 id: instance.id,
@@ -385,7 +376,7 @@ impl TemplateApp {
         } {
             let instance = self.get_instance(id);
             match instance.ty {
-                InstanceType::Nand => {
+                InstanceType::Gate(mut gate) => {
                     let mut new_pos = mouse_pos + offset;
                     new_pos.x = new_pos
                         .x
@@ -393,11 +384,9 @@ impl TemplateApp {
                     new_pos.y = new_pos
                         .y
                         .clamp(canvas_rect.top() + 18.0, canvas_rect.bottom() - 18.0);
-                    let instance = self.get_instance_mut(instance.id);
-                    instance.pos = new_pos;
+                    gate.pos = new_pos;
                 }
-                InstanceType::Wire => {
-                    let wire = self.get_wire_mut(instance.id);
+                InstanceType::Wire(mut wire) => {
                     // TODO: Fix clamping for end and start when dragging one side can go out.
                     let mut new_pos = mouse_pos + offset;
                     new_pos.x = new_pos
@@ -429,42 +418,30 @@ impl TemplateApp {
 
         let r_pressed = ui.input(|i| i.key_pressed(egui::Key::R));
         if r_pressed {
-            if let Some(c_drag) = &self.canvas_drag {
-                let instance_r = self.get_instance_mut(c_drag.id);
-                instance_r.dir = instance_r.dir.rotate_cw();
-            }
-            if let Some(p_drag) = &mut self.panel_drag {
-                p_drag.dir = p_drag.dir.rotate_cw();
-            }
-            if let Some(mouse_pos) = pointer_pos {
+            if let Some(_c_drag) = &self.canvas_drag {
+                // TODO: implement instance rotate
+            } else if let Some(_p_drag) = &mut self.panel_drag {
+                // rotate instance when dragging from panel
+            } else if let Some(mouse_pos) = pointer_pos {
                 if let Some(i) = self.interacted_instance(mouse_pos) {
                     let wire = self.get_wire_mut(i.id);
-                    let origin = (wire.start.to_vec2() + wire.end.to_vec2()) / 2.0;
-                    // 0 -1
-                    // 1 0
-                    wire.start =
-                        rotate_point(wire.start, origin.to_pos2(), std::f32::consts::FRAC_PI_2);
-                    wire.end =
-                        rotate_point(wire.end, origin.to_pos2(), std::f32::consts::FRAC_PI_2);
+                    wire.rotate_cw();
                 }
             }
         }
         for instance in self.instances.iter() {
             match instance.ty {
-                InstanceType::Nand => {
-                    let gate = self.get_gate(instance.id);
-                    self.draw_gate(ui, gate, instance.pos);
+                InstanceType::Gate(gate) => {
+                    self.draw_gate(ui, &gate);
                 }
-                InstanceType::Wire => {
-                    let wire = self.get_wire(instance.id);
-                    self.draw_wire(ui, wire, instance.pos, instance.dir);
+                InstanceType::Wire(wire) => {
+                    self.draw_wire(ui, &wire);
                 }
             }
         }
     }
 
-    fn draw_wire(&self, ui: &mut Ui, wire: &WireInstance, pos: Pos2, dir: Direction) {
-        let length = 40.0;
+    fn draw_wire(&self, ui: &mut Ui, wire: &WireInstance) {
         let thickness = 6.0;
         ui.painter().line_segment(
             [wire.start, wire.end],
@@ -472,13 +449,13 @@ impl TemplateApp {
         );
     }
 
-    fn draw_gate(&self, ui: &mut Ui, gate: &GateInstance, pos: Pos2) {
-        let rect = Rect::from_center_size(pos, self.canvas_config.base_gate_size);
+    fn draw_gate(&self, ui: &mut Ui, gate: &GateInstance) {
+        let rect = Rect::from_center_size(gate.pos, self.canvas_config.base_gate_size);
         let image = Image::new(gate.kind.graphics().svg.clone()).fit_to_exact_size(rect.size());
         ui.put(rect, image);
 
         for pin in gate.kind.graphics().pins {
-            let pin_pos = pos + pin.offset;
+            let pin_pos = gate.pos + pin.offset;
             let color = match pin.kind {
                 assets::PinKind::Input => self.canvas_config.base_input_pin_color,
                 assets::PinKind::Output => self.canvas_config.base_output_pin_color,
@@ -492,16 +469,15 @@ impl TemplateApp {
         let mut i: Option<&Instance> = None;
         for instance in self.instances.iter() {
             match instance.ty {
-                InstanceType::Nand => {
+                InstanceType::Gate(gate) => {
                     let size = self.canvas_config.base_gate_size;
-                    let gate_rect = egui::Rect::from_center_size(instance.pos, size);
+                    let gate_rect = egui::Rect::from_center_size(gate.pos, size);
                     if gate_rect.contains(mouse_pos) {
                         i = Some(instance);
                         break;
                     }
                 }
-                InstanceType::Wire => {
-                    let wire = self.get_wire(instance.id);
+                InstanceType::Wire(wire) => {
                     let dist = distance_point_to_segment(mouse_pos, wire.start, wire.end);
                     if dist < 10.0 {
                         i = Some(instance);
@@ -515,15 +491,24 @@ impl TemplateApp {
 }
 
 impl TemplateApp {
-    fn get_wire(&self, id: InstanceId) -> &WireInstance {
-        self.wires.get(&id).expect("should not happen")
+    fn _get_wire(&self, id: InstanceId) -> WireInstance {
+        match self.get_instance(id).ty {
+            InstanceType::Gate(_) => panic!("Should not happen"),
+            InstanceType::Wire(wire_instance) => wire_instance,
+        }
     }
     fn get_wire_mut(&mut self, id: InstanceId) -> &mut WireInstance {
-        self.wires.get_mut(&id).expect("should not happen")
+        match &mut self.get_instance_mut(id).ty {
+            InstanceType::Gate(_) => panic!("Should not happen"),
+            InstanceType::Wire(wire_instance) => wire_instance,
+        }
     }
 
-    fn get_gate(&self, id: InstanceId) -> &GateInstance {
-        self.gates.get(&id).expect("should not happen")
+    fn _get_gate(&self, id: InstanceId) -> GateInstance {
+        match self.get_instance(id).ty {
+            InstanceType::Gate(gate) => gate,
+            InstanceType::Wire(_) => panic!("Should not happen"),
+        }
     }
 
     fn get_instance(&self, id: InstanceId) -> &Instance {
