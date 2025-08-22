@@ -5,7 +5,9 @@
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> eframe::Result {
     // Install egui_logger so `log::info!` etc. are captured and viewable.
-    egui_logger::builder().init().unwrap();
+    egui_logger::builder()
+        .init()
+        .expect("failed to initialize egui_logger");
 
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -30,7 +32,9 @@ fn main() -> eframe::Result {
 fn main() {
     use eframe::wasm_bindgen::JsCast as _;
 
-    egui_logger::builder().init().unwrap();
+    egui_logger::builder()
+        .init()
+        .expect("failed to initialize egui_logger");
 
     let web_options = eframe::WebOptions::default();
 

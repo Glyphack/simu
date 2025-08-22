@@ -17,11 +17,6 @@ pub struct PinInfo {
     pub offset: Vec2,
 }
 
-pub static WIRE_GRAPHICS: InstanceGraphics = InstanceGraphics {
-    svg: include_image!("../assets/nand.svg"),
-    pins: &[],
-};
-
 pub static NAND_GRAPHICS: InstanceGraphics = InstanceGraphics {
     svg: include_image!("../assets/nand.svg"),
     // TODO: offset must be made from the base_gate_size otherwise it will be unaligned when gates resize

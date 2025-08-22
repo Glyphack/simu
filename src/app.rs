@@ -1,13 +1,11 @@
-use std::{collections::HashSet, hash::Hash, usize};
+use std::{collections::HashSet, hash::Hash};
 
 use egui::{
-    Align, Button, Color32, Image, Layout, Pos2, Rect, Sense, Stroke, Ui, Vec2, Widget, pos2, vec2,
+    Align, Button, Color32, Image, Layout, Pos2, Rect, Sense, Stroke, Ui, Vec2, Widget as _, pos2,
+    vec2,
 };
 
-use crate::{
-    assets::{self, PinInfo},
-    config::CanvasConfig,
-};
+use crate::{assets, config::CanvasConfig};
 
 // TODO Direction is not used anymore. I can calculate it from current positions?
 #[derive(serde::Deserialize, serde::Serialize, Debug, Clone, Copy, Default, Eq, PartialEq)]
@@ -22,10 +20,10 @@ pub enum Direction {
 impl Direction {
     fn _rotate_cw(self) -> Self {
         match self {
-            Direction::Up => Direction::Right,
-            Direction::Right => Direction::Down,
-            Direction::Down => Direction::Left,
-            Direction::Left => Direction::Up,
+            Self::Up => Self::Right,
+            Self::Right => Self::Down,
+            Self::Down => Self::Left,
+            Self::Left => Self::Up,
         }
     }
 }
@@ -83,7 +81,7 @@ impl Instance {
             }
         }
 
-        return pins;
+        pins
     }
 
     fn mov(&mut self, move_vec: Vec2) {
@@ -128,7 +126,7 @@ impl InstanceType {
     }
 
     pub fn new_wire_from_point(p: Pos2) -> Self {
-        return Self::new_wire(p, pos2(p.x + 30.0, p.y));
+        Self::new_wire(p, pos2(p.x + 30.0, p.y))
     }
     fn new_gate(kind: GateKind, pos: Pos2) -> Self {
         Self::Gate(GateInstance { kind, pos })
@@ -142,15 +140,7 @@ pub struct GateInstance {
     pos: Pos2,
 }
 
-impl GateInstance {
-    fn pins(&self) -> Vec<Pos2> {
-        let mut pins_pos = Vec::new();
-        for pin in self.kind.graphics().pins {
-            pins_pos.push(self.pos + pin.offset);
-        }
-        pins_pos
-    }
-}
+impl GateInstance {}
 
 #[derive(serde::Deserialize, serde::Serialize, Copy, Debug, Clone)]
 pub enum GateKind {
@@ -162,10 +152,6 @@ impl GateKind {
         match self {
             Self::Nand => &assets::NAND_GRAPHICS,
         }
-    }
-
-    fn pins(&self) -> &[PinInfo] {
-        self.graphics().pins
     }
 }
 
@@ -212,19 +198,19 @@ impl InstanceId {
 
 impl From<u32> for InstanceId {
     fn from(v: u32) -> Self {
-        InstanceId(v)
+        Self(v)
     }
 }
 
-impl Into<u32> for InstanceId {
-    fn into(self) -> u32 {
-        self.0
+impl From<InstanceId> for u32 {
+    fn from(val: InstanceId) -> Self {
+        val.0
     }
 }
 
-impl Into<usize> for InstanceId {
-    fn into(self) -> usize {
-        self.0 as usize
+impl From<InstanceId> for usize {
+    fn from(val: InstanceId) -> Self {
+        val.0 as Self
     }
 }
 
@@ -289,11 +275,7 @@ impl Connection {
     }
 }
 
-/// Define what instance is moving
-pub struct MoveMutation {
-    ins: InstanceId,
-    move_vec: Vec2,
-}
+//
 
 #[derive(serde::Deserialize, serde::Serialize)]
 pub struct TemplateApp {
@@ -410,6 +392,7 @@ impl TemplateApp {
         }
     }
 
+    #[expect(clippy::too_many_lines)]
     fn draw_canvas(&mut self, ui: &mut Ui) {
         let (resp, _painter) = ui.allocate_painter(ui.available_size(), Sense::hover());
         let canvas_rect = resp.rect;
@@ -425,7 +408,7 @@ impl TemplateApp {
                         self.draw_gate(ui, &gate);
                     }
                     InstanceType::Wire(wire) => {
-                        self.draw_wire(ui, &wire);
+                        Self::draw_wire(ui, &wire);
                     }
                 }
             }
@@ -435,13 +418,12 @@ impl TemplateApp {
         // spawn a new gate
         if let Some(panel_drag) = &self.panel_drag
             && mouse_up
+            && inside_rect(&canvas_rect, &panel_drag.ty)
         {
-            if inside_rect(&canvas_rect, &panel_drag.ty) {
-                self.instances
-                    .push(Instance::new(self.next_instance_id, panel_drag.ty));
-                self.next_instance_id.incr();
-                self.panel_drag = None;
-            }
+            self.instances
+                .push(Instance::new(self.next_instance_id, panel_drag.ty));
+            self.next_instance_id.incr();
+            self.panel_drag = None;
         }
         let pointer_pos = ui.input(|i| i.pointer.interact_pos());
         let pointer_pressed = ui.input(|i| i.pointer.primary_down());
@@ -454,7 +436,7 @@ impl TemplateApp {
         {
             let i = self.interacted_instance(mouse_pos);
             if let Some(instance) = i {
-                log::debug!("canvas drag on {:?}", instance);
+                log::debug!("canvas drag on {instance:?}");
                 match instance.ty {
                     InstanceType::Gate(gate) => {
                         self.canvas_drag = Some(CanvasDrag::new(
@@ -527,11 +509,11 @@ impl TemplateApp {
             // TODO: Only need to check this on placement and moving.
             // Also use a better way than iterating on everything.
             let mut possible_connections = HashSet::new();
-            for self_ins in self.instances.iter() {
+            for self_ins in &self.instances {
                 log::info!("{self_ins:#?}");
                 let self_pins = self_ins.pins();
                 for self_pin in self_pins {
-                    for other_ins in self.instances.iter() {
+                    for other_ins in &self.instances {
                         if self_ins.id == other_ins.id {
                             continue;
                         }
@@ -554,15 +536,33 @@ impl TemplateApp {
                     }
                 }
             }
-            // paint connected pins
-            for conn in &possible_connections {
+            // paint connected pins (iterate in a stable order)
+            let mut conns: Vec<_> = possible_connections.iter().collect();
+            conns.sort_by_key(|c| {
+                (
+                    c.pin1.pos.x.to_bits(),
+                    c.pin1.pos.y.to_bits(),
+                    c.pin2.pos.x.to_bits(),
+                    c.pin2.pos.y.to_bits(),
+                )
+            });
+            for conn in conns {
                 ui.painter()
                     .circle_filled(conn.pin1.pos, 10.0, Color32::LIGHT_YELLOW);
             }
             // snap connections together
             if mouse_up {
-                // TODO: Remove clone
-                for conn in &possible_connections {
+                // snap in a stable order
+                let mut conns: Vec<_> = possible_connections.iter().collect();
+                conns.sort_by_key(|c| {
+                    (
+                        c.pin1.pos.x.to_bits(),
+                        c.pin1.pos.y.to_bits(),
+                        c.pin2.pos.x.to_bits(),
+                        c.pin2.pos.y.to_bits(),
+                    )
+                });
+                for conn in conns {
                     let instance = self.get_instance_mut(conn.pin1.ins);
                     instance.move_pin(conn.pin1, conn.pin2.pos);
                 }
@@ -597,13 +597,13 @@ impl TemplateApp {
                 }
             }
         }
-        for instance in self.instances.iter() {
+        for instance in &self.instances {
             match instance.ty {
                 InstanceType::Gate(gate) => {
                     self.draw_gate(ui, &gate);
                 }
                 InstanceType::Wire(wire) => {
-                    self.draw_wire(ui, &wire);
+                    Self::draw_wire(ui, &wire);
                 }
             }
         }
@@ -613,7 +613,7 @@ impl TemplateApp {
         }
     }
 
-    fn draw_wire(&self, ui: &mut Ui, wire: &WireInstance) {
+    fn draw_wire(ui: &Ui, wire: &WireInstance) {
         let thickness = 6.0;
         ui.painter().line_segment(
             [wire.start, wire.end],
@@ -635,7 +635,16 @@ impl TemplateApp {
             ui.painter()
                 .circle_filled(pin_pos, self.canvas_config.base_pin_size, color);
             // paint connected pins
-            for conn in &self.connections {
+            let mut conns: Vec<_> = self.connections.iter().collect();
+            conns.sort_by_key(|c| {
+                (
+                    c.pin1.pos.x.to_bits(),
+                    c.pin1.pos.y.to_bits(),
+                    c.pin2.pos.x.to_bits(),
+                    c.pin2.pos.y.to_bits(),
+                )
+            });
+            for conn in conns {
                 if conn.pin1.pos == pin_pos || conn.pin2.pos == pin_pos {
                     // ui.painter()
                     //     .circle_filled(pin_pos, 10.0, Color32::LIGHT_YELLOW);
@@ -646,7 +655,7 @@ impl TemplateApp {
 
     fn interacted_instance(&self, mouse_pos: Pos2) -> Option<&Instance> {
         let mut i: Option<&Instance> = None;
-        for instance in self.instances.iter() {
+        for instance in &self.instances {
             match instance.ty {
                 InstanceType::Gate(gate) => {
                     let size = self.canvas_config.base_gate_size;
@@ -679,28 +688,11 @@ fn inside_rect(canvas_rect: &Rect, ty: &InstanceType) -> bool {
 }
 
 impl TemplateApp {
-    fn _get_wire(&self, id: InstanceId) -> WireInstance {
-        match self.get_instance(id).ty {
-            InstanceType::Gate(_) => panic!("Should not happen"),
-            InstanceType::Wire(wire_instance) => wire_instance,
-        }
-    }
     fn get_wire_mut(&mut self, id: InstanceId) -> &mut WireInstance {
         match &mut self.get_instance_mut(id).ty {
             InstanceType::Gate(_) => panic!("Should not happen"),
             InstanceType::Wire(wire_instance) => wire_instance,
         }
-    }
-
-    fn _get_gate(&self, id: InstanceId) -> GateInstance {
-        match self.get_instance(id).ty {
-            InstanceType::Gate(gate) => gate,
-            InstanceType::Wire(_) => panic!("Should not happen"),
-        }
-    }
-
-    fn get_instance(&self, id: InstanceId) -> &Instance {
-        self.instances.get(id.usize()).expect("should not happen")
     }
 
     fn get_instance_mut(&mut self, id: InstanceId) -> &mut Instance {
@@ -711,7 +703,16 @@ impl TemplateApp {
 
     fn get_connected_instances(&self, id: InstanceId) -> Vec<InstanceId> {
         let mut connecteds = Vec::new();
-        for con in &self.connections {
+        let mut conns: Vec<_> = self.connections.iter().collect();
+        conns.sort_by_key(|c| {
+            (
+                c.pin1.pos.x.to_bits(),
+                c.pin1.pos.y.to_bits(),
+                c.pin2.pos.x.to_bits(),
+                c.pin2.pos.y.to_bits(),
+            )
+        });
+        for con in conns {
             if con.pin1.ins == id {
                 connecteds.push(con.pin2.ins);
             }
