@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Always run from the repo root
+repo_root=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+cd "$repo_root"
+
+# If a global hooksPath is configured, run its pre-commit first
+if global_hooks_path=$(git config --global core.hooksPath 2>/dev/null); then
+  if [ -n "$global_hooks_path" ]; then
+    global_pre_commit="$global_hooks_path/pre-commit"
+    if [ -x "$global_pre_commit" ]; then
+      # Avoid recursion by ensuring we're not calling ourselves
+      current_hook_path="$(cd "$(dirname "$0")" && pwd)/pre-commit"
+      resolved_global_hook="$(cd "$(dirname "$global_pre_commit")" && pwd)/pre-commit"
+      if [ "$resolved_global_hook" != "$current_hook_path" ]; then
+        "$global_pre_commit" "$@"
+      fi
+    fi
+  fi
+fi
+
+# Run repo checks after global hooks
+exec ./check.sh
