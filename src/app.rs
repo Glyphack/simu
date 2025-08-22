@@ -400,16 +400,16 @@ impl TemplateApp {
 
         // handle dragging from panel
         // TODO probably should add panel_drag to the world so rendering is easier
-        if let Some(panel_drag) = &self.panel_drag {
-            if inside_rect(&canvas_rect, &panel_drag.ty) {
-                log::debug!("drag inside rect");
-                match panel_drag.ty {
-                    InstanceType::Gate(gate) => {
-                        self.draw_gate(ui, &gate);
-                    }
-                    InstanceType::Wire(wire) => {
-                        Self::draw_wire(ui, &wire);
-                    }
+        if let Some(panel_drag) = &self.panel_drag
+            && inside_rect(&canvas_rect, &panel_drag.ty)
+        {
+            log::debug!("drag inside rect");
+            match panel_drag.ty {
+                InstanceType::Gate(gate) => {
+                    self.draw_gate(ui, &gate);
+                }
+                InstanceType::Wire(wire) => {
+                    Self::draw_wire(ui, &wire);
                 }
             }
         }
@@ -590,11 +590,11 @@ impl TemplateApp {
                 // TODO: implement instance rotate
             } else if let Some(_p_drag) = &mut self.panel_drag {
                 // rotate instance when dragging from panel
-            } else if let Some(mouse_pos) = pointer_pos {
-                if let Some(i) = self.interacted_instance(mouse_pos) {
-                    let wire = self.get_wire_mut(i.id);
-                    wire.rotate_cw();
-                }
+            } else if let Some(mouse_pos) = pointer_pos
+                && let Some(i) = self.interacted_instance(mouse_pos)
+            {
+                let wire = self.get_wire_mut(i.id);
+                wire.rotate_cw();
             }
         }
         for instance in &self.instances {
