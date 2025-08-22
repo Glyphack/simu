@@ -53,6 +53,67 @@ impl Instance {
     fn new(id: InstanceId, ty: InstanceType) -> Self {
         Self { id, ty }
     }
+
+    // TODO: Reuse array instead of creating
+    fn pins(&self) -> Vec<Pin> {
+        let mut pins = Vec::new();
+
+        match self.ty {
+            InstanceType::Gate(gate_instance) => {
+                for (i, pin) in gate_instance.kind.graphics().pins.iter().enumerate() {
+                    let pin_pos = gate_instance.pos + pin.offset;
+                    pins.push(Pin {
+                        pos: pin_pos,
+                        ins: self.id,
+                        index: i as u32,
+                    });
+                }
+            }
+            InstanceType::Wire(wire_instance) => {
+                pins.push(Pin {
+                    pos: wire_instance.start,
+                    ins: self.id,
+                    index: 0,
+                });
+                pins.push(Pin {
+                    pos: wire_instance.end,
+                    ins: self.id,
+                    index: 1,
+                });
+            }
+        }
+
+        return pins;
+    }
+
+    fn mov(&mut self, move_vec: Vec2) {
+        match &mut self.ty {
+            InstanceType::Wire(wire) => {
+                wire.start += move_vec;
+                wire.end += move_vec;
+            }
+            InstanceType::Gate(gate) => {
+                gate.pos += move_vec;
+            }
+        }
+    }
+
+    fn move_pin(&mut self, pin: Pin, new_pos: Pos2) {
+        match &mut self.ty {
+            InstanceType::Wire(wire) => {
+                // TODO: Maybe wire.start and wire.end can go to a vector of size 2?
+                if pin.index == 0 {
+                    wire.start = new_pos;
+                } else {
+                    wire.end = new_pos;
+                }
+            }
+            InstanceType::Gate(gate) => {
+                let move_vec = new_pos - pin.pos;
+                gate.pos += move_vec;
+            }
+        }
+    }
 }
 
 #[derive(serde::Deserialize, serde::Serialize, Copy, Debug, Clone)]
@@ -202,23 +263,36 @@ impl CanvasDrag {
     }
 }
 
-#[derive(serde::Deserialize, serde::Serialize, PartialEq, Eq, Hash)]
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Pin {
+    pub pos: Pos2,
+    pub ins: InstanceId,
+    pub index: u32,
+}
+
+impl Hash for Pin {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.ins.hash(state);
+        self.index.hash(state);
+    }
+}
+
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Connection {
-    pub ins1: InstanceId,
-    pub ins2: InstanceId,
+    pin1: Pin,
+    pin2: Pin,
 }
 
 impl Connection {
-    fn new(ins1: InstanceId, ins2: InstanceId) -> Self {
-        Self { ins1, ins2 }
+    fn new(pin1: Pin, pin2: Pin) -> Self {
+        Self { pin1, pin2 }
     }
 }
 
 /// Define what instance is moving
 pub struct MoveMutation {
     ins: InstanceId,
-    old_pos: Pos2,
-    new_pos: Pos2,
+    move_vec: Vec2,
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -227,7 +301,7 @@ pub struct TemplateApp {
     ///
     instances: Vec<Instance>,
     /// Connected instance pairs
-    connections: Vec<Connection>,
+    connections: HashSet<Connection>,
     /// Next unique ID for gates
     next_instance_id: InstanceId,
 
@@ -262,12 +336,11 @@ impl TemplateApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         // Register all supported image loaders
         egui_extras::install_image_loaders(&cc.egui_ctx);
-        // if let Some(storage) = cc.storage {
-        //     eframe::get_value(storage, eframe::APP_KEY).unwrap_or_default()
-        // } else {
-        //     Default::default()
-        // }
-        Default::default()
+        if let Some(storage) = cc.storage {
+            eframe::get_value(storage, eframe::APP_KEY).unwrap_or_default()
+        } else {
+            Default::default()
+        }
     }
 
     pub fn main_layout(&mut self, ui: &mut Ui) {
@@ -276,10 +349,16 @@ impl TemplateApp {
         // });
         ui.with_layout(Layout::left_to_right(Align::Min), |ui| {
             self.canvas_config = CanvasConfig::default();
-            ui.add(egui::TextEdit::multiline(&mut format!(
-                "world {:#?}",
-                self.instances
-            )));
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                ui.add_sized(
+                    vec2(200.0, 50.0),
+                    egui::TextEdit::multiline(&mut format!(
+                        "world {:#?}\n conn: {:#?}",
+                        self.instances, self.connections
+                    )),
+                )
+            });
+
             ui.vertical(|ui| {
                 ui.heading("Logic Gates");
                 self.draw_palette(ui);
@@ -334,8 +413,7 @@ impl TemplateApp {
     fn draw_canvas(&mut self, ui: &mut Ui) {
         let (resp, _painter) = ui.allocate_painter(ui.available_size(), Sense::hover());
         let canvas_rect = resp.rect;
-
-        let mut mutations: Vec<MoveMutation> = Vec::new();
+        let threshold = 10.0;
 
         // handle dragging from panel
         // TODO probably should add panel_drag to the world so rendering is easier
@@ -353,10 +431,6 @@ impl TemplateApp {
             }
         }
         let mouse_up = ui.input(|i| i.pointer.any_released());
-        if mouse_up {
-            self.resize = None;
-            self.canvas_drag = None;
-        }
 
         // spawn a new gate
         if let Some(panel_drag) = &self.panel_drag
@@ -426,7 +500,8 @@ impl TemplateApp {
                     new_pos.y = new_pos
                         .y
                         .clamp(canvas_rect.top() + 18.0, canvas_rect.bottom() - 18.0);
-                    gate.pos = new_pos;
+                    let move_vec = new_pos - gate.pos;
+                    self.mov_with_connected(id, move_vec, &mut Vec::new());
                 }
                 InstanceType::Wire(wire) => {
                     // TODO: Fix clamping for end and start when dragging one side can go out.
@@ -438,9 +513,60 @@ impl TemplateApp {
                         .y
                         .clamp(canvas_rect.top() + 18.0, canvas_rect.bottom() - 18.0);
                     let diff = new_pos - wire.end;
-                    wire.end = new_pos;
-                    wire.start += diff;
+                    self.mov_with_connected(id, diff, &mut Vec::new());
                 }
+            }
+        }
+        log::info!(
+            "drag: {}, resize: {}",
+            self.canvas_drag.is_some(),
+            self.resize.is_some()
+        );
+
+        if self.canvas_drag.is_some() || self.resize.is_some() {
+            // TODO: Only need to check this on placement and moving.
+            // Also use a better way than iterating on everything.
+            let mut possible_connections = HashSet::new();
+            for self_ins in self.instances.iter() {
+                log::info!("{self_ins:#?}");
+                let self_pins = self_ins.pins();
+                for self_pin in self_pins {
+                    for other_ins in self.instances.iter() {
+                        if self_ins.id == other_ins.id {
+                            continue;
+                        }
+
+                        for other_pin in other_ins.pins() {
+                            if self_pin.pos.distance(other_pin.pos) > threshold {
+                                continue;
+                            }
+
+                            log::info!("{self_pin:#?}, {other_pin:#?}");
+                            let t = Connection::new(self_pin, other_pin);
+                            let t_other = Connection::new(other_pin, self_pin);
+                            // TODO: Use the hashset hashing instead of this check
+                            let found = possible_connections.contains(&t)
+                                || possible_connections.contains(&t_other);
+                            if !found {
+                                possible_connections.insert(t);
+                            }
+                        }
+                    }
+                }
+            }
+            // paint connected pins
+            for conn in &possible_connections {
+                ui.painter()
+                    .circle_filled(conn.pin1.pos, 10.0, Color32::LIGHT_YELLOW);
+            }
+            // snap connections together
+            if mouse_up {
+                // TODO: Remove clone
+                for conn in &possible_connections {
+                    let instance = self.get_instance_mut(conn.pin1.ins);
+                    instance.move_pin(conn.pin1, conn.pin2.pos);
+                }
+                self.connections = possible_connections;
             }
         }
 
@@ -471,101 +597,6 @@ impl TemplateApp {
                 }
             }
         }
-        let mut new_connections: HashSet<Connection> = HashSet::new();
-
-        let threshold = 10.0;
-        // TODO: Only need to check this on placement and moving.
-        // Also use a better way than iterating on everything.
-        for instance in self.instances.iter() {
-            match instance.ty {
-                InstanceType::Gate(self_gate) => {
-                    for other in self.instances.iter() {
-                        if other.id == instance.id {
-                            continue;
-                        }
-                        match other.ty {
-                            InstanceType::Wire(other_wire) => {
-                                for pin_pos in self_gate.pins() {
-                                    let d_start = other_wire.start.distance(pin_pos);
-                                    let d_end = other_wire.end.distance(pin_pos);
-                                    if d_start < threshold {
-                                        ui.painter().circle_filled(
-                                            pin_pos,
-                                            10.0,
-                                            Color32::LIGHT_BLUE,
-                                        );
-                                        new_connections
-                                            .insert(Connection::new(instance.id, other.id));
-                                        mutations.push(MoveMutation {
-                                            ins: other.id,
-                                            old_pos: other_wire.start,
-                                            new_pos: pin_pos,
-                                        });
-                                    } else if d_end < threshold {
-                                        ui.painter().circle_filled(
-                                            pin_pos,
-                                            10.0,
-                                            Color32::LIGHT_BLUE,
-                                        );
-                                        new_connections
-                                            .insert(Connection::new(instance.id, other.id));
-                                        mutations.push(MoveMutation {
-                                            ins: other.id,
-                                            old_pos: other_wire.end,
-                                            new_pos: pin_pos,
-                                        });
-                                    }
-                                }
-                            }
-                            // TODO: Right now once self is moved to other and once other is moved
-                            // to self. This logic is not correct
-                            InstanceType::Gate(other_gate) => {
-                                for self_pin in self_gate.pins() {
-                                    for other_pin in other_gate.pins() {
-                                        if self_pin.distance(other_pin) < threshold {
-                                            ui.painter().circle_filled(
-                                                self_pin,
-                                                10.0,
-                                                Color32::LIGHT_BLUE,
-                                            );
-                                            mutations.push(MoveMutation {
-                                                ins: other.id,
-                                                old_pos: other_pin,
-                                                new_pos: self_pin,
-                                            });
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                InstanceType::Wire(wire_instance) => {}
-            }
-        }
-
-        // Apply move mutations
-        if mouse_up {
-            for mutation in mutations {
-                let instance = self.get_instance_mut(mutation.ins);
-                match &mut instance.ty {
-                    InstanceType::Gate(gate_instance) => {
-                        gate_instance.pos += mutation.new_pos - mutation.old_pos
-                    }
-                    InstanceType::Wire(wire_instance) => {
-                        if wire_instance.start == mutation.old_pos {
-                            wire_instance.start = mutation.new_pos
-                        }
-                        if wire_instance.end == mutation.old_pos {
-                            wire_instance.end = mutation.new_pos
-                        }
-                    }
-                }
-            }
-            for conn in new_connections {
-                self.connections.push(conn);
-            }
-        }
         for instance in self.instances.iter() {
             match instance.ty {
                 InstanceType::Gate(gate) => {
@@ -575,6 +606,10 @@ impl TemplateApp {
                     self.draw_wire(ui, &wire);
                 }
             }
+        }
+        if mouse_up {
+            self.resize = None;
+            self.canvas_drag = None;
         }
     }
 
@@ -599,6 +634,13 @@ impl TemplateApp {
             };
             ui.painter()
                 .circle_filled(pin_pos, self.canvas_config.base_pin_size, color);
+            // paint connected pins
+            for conn in &self.connections {
+                if conn.pin1.pos == pin_pos || conn.pin2.pos == pin_pos {
+                    // ui.painter()
+                    //     .circle_filled(pin_pos, 10.0, Color32::LIGHT_YELLOW);
+                }
+            }
         }
     }
 
@@ -665,6 +707,33 @@ impl TemplateApp {
         self.instances
             .get_mut(id.usize())
             .expect("should not happen")
+    }
+
+    fn get_connected_instances(&self, id: InstanceId) -> Vec<InstanceId> {
+        let mut connecteds = Vec::new();
+        for con in &self.connections {
+            if con.pin1.ins == id {
+                connecteds.push(con.pin2.ins);
+            }
+            if con.pin2.ins == id {
+                connecteds.push(con.pin1.ins);
+            }
+        }
+
+        connecteds
+    }
+
+    fn mov_with_connected(&mut self, id: InstanceId, mov_vec: Vec2, moved: &mut Vec<InstanceId>) {
+        if moved.contains(&id) {
+            return;
+        }
+        let instance = self.get_instance_mut(id);
+        moved.push(id);
+        instance.mov(mov_vec);
+        let connected_ids = self.get_connected_instances(id);
+        for connected_id in connected_ids {
+            self.mov_with_connected(connected_id, mov_vec, moved);
+        }
     }
 }
 
