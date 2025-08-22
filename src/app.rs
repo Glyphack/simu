@@ -385,10 +385,12 @@ impl TemplateApp {
             .clicked()
         {
             self.instances.clear();
+            self.connections.clear();
+            self.next_instance_id = InstanceId(0);
             self.canvas_drag = None;
             self.panel_drag = None;
             self.resize = None;
-            self.next_instance_id = InstanceId(0);
+            self.resize = None;
         }
     }
 
