@@ -1,4 +1,4 @@
-use std::{collections::HashMap, hash::Hash, usize};
+use std::{hash::Hash, usize};
 
 use egui::{
     Align, Button, Color32, Image, Layout, Pos2, Rect, Sense, Stroke, Ui, Vec2, Widget, pos2, vec2,
@@ -190,8 +190,6 @@ pub struct TemplateApp {
     /// State
     ///
     instances: Vec<Instance>,
-    gates: HashMap<InstanceId, GateInstance>,
-    wires: HashMap<InstanceId, WireInstance>,
     /// Next unique ID for gates
     next_instance_id: InstanceId,
 
@@ -212,8 +210,6 @@ impl Default for TemplateApp {
     fn default() -> Self {
         Self {
             instances: Default::default(),
-            gates: Default::default(),
-            wires: Default::default(),
             next_instance_id: InstanceId(0),
             panel_drag: None,
             canvas_drag: None,
@@ -287,8 +283,6 @@ impl TemplateApp {
             .clicked()
         {
             self.instances.clear();
-            self.gates.clear();
-            self.wires.clear();
             self.canvas_drag = None;
             self.panel_drag = None;
             self.resize = None;
