@@ -4,7 +4,10 @@ use egui::{
     Align, Button, Color32, Image, Layout, Pos2, Rect, Sense, Stroke, Ui, Vec2, Widget, pos2, vec2,
 };
 
-use crate::{assets, config::CanvasConfig};
+use crate::{
+    assets::{self, PinInfo},
+    config::CanvasConfig,
+};
 
 // TODO Direction is not used anymore. I can calculate it from current positions?
 #[derive(serde::Deserialize, serde::Serialize, Debug, Clone, Copy, Default, Eq, PartialEq)]
@@ -78,17 +81,31 @@ pub struct GateInstance {
     pos: Pos2,
 }
 
-impl GateKind {
-    fn graphics(&self) -> &assets::InstanceGraphics {
-        match self {
-            Self::Nand => &assets::NAND_GRAPHICS,
+impl GateInstance {
+    fn pins(&self) -> Vec<Pos2> {
+        let mut pins_pos = Vec::new();
+        for pin in self.kind.graphics().pins {
+            pins_pos.push(self.pos + pin.offset);
         }
+        pins_pos
     }
 }
 
 #[derive(serde::Deserialize, serde::Serialize, Copy, Debug, Clone)]
 pub enum GateKind {
     Nand,
+}
+
+impl GateKind {
+    fn graphics(&self) -> &assets::InstanceGraphics {
+        match self {
+            Self::Nand => &assets::NAND_GRAPHICS,
+        }
+    }
+
+    fn pins(&self) -> &[PinInfo] {
+        self.graphics().pins
+    }
 }
 
 #[derive(serde::Deserialize, serde::Serialize, Copy, Debug, Clone)]
@@ -245,17 +262,18 @@ impl TemplateApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         // Register all supported image loaders
         egui_extras::install_image_loaders(&cc.egui_ctx);
-        if let Some(storage) = cc.storage {
-            eframe::get_value(storage, eframe::APP_KEY).unwrap_or_default()
-        } else {
-            Default::default()
-        }
+        // if let Some(storage) = cc.storage {
+        //     eframe::get_value(storage, eframe::APP_KEY).unwrap_or_default()
+        // } else {
+        //     Default::default()
+        // }
+        Default::default()
     }
 
     pub fn main_layout(&mut self, ui: &mut Ui) {
-        egui::Window::new("Debug logs").show(ui.ctx(), |ui| {
-            egui_logger::logger_ui().show(ui);
-        });
+        // egui::Window::new("Debug logs").show(ui.ctx(), |ui| {
+        //     egui_logger::logger_ui().show(ui);
+        // });
         ui.with_layout(Layout::left_to_right(Align::Min), |ui| {
             self.canvas_config = CanvasConfig::default();
             ui.add(egui::TextEdit::multiline(&mut format!(
@@ -320,6 +338,7 @@ impl TemplateApp {
         let mut mutations: Vec<MoveMutation> = Vec::new();
 
         // handle dragging from panel
+        // TODO probably should add panel_drag to the world so rendering is easier
         if let Some(panel_drag) = &self.panel_drag {
             if inside_rect(&canvas_rect, &panel_drag.ty) {
                 log::debug!("drag inside rect");
@@ -454,40 +473,74 @@ impl TemplateApp {
         }
         let mut new_connections: HashSet<Connection> = HashSet::new();
 
+        let threshold = 10.0;
+        // TODO: Only need to check this on placement and moving.
+        // Also use a better way than iterating on everything.
         for instance in self.instances.iter() {
             match instance.ty {
-                InstanceType::Gate(gate) => {
+                InstanceType::Gate(self_gate) => {
                     for other in self.instances.iter() {
-                        if let InstanceType::Wire(wire_instance) = other.ty {
-                            for pin in gate.kind.graphics().pins {
-                                let pin_pos = gate.pos + pin.offset;
-                                let d_start = wire_instance.start.distance(pin_pos);
-                                let d_end = wire_instance.end.distance(pin_pos);
-                                let threshold = 10.0;
-                                if d_start < threshold {
-                                    ui.painter()
-                                        .circle_filled(pin_pos, 10.0, Color32::LIGHT_BLUE);
-                                    new_connections.insert(Connection::new(instance.id, other.id));
-                                    mutations.push(MoveMutation {
-                                        ins: other.id,
-                                        old_pos: wire_instance.start,
-                                        new_pos: pin_pos,
-                                    });
-                                } else if d_end < threshold {
-                                    ui.painter()
-                                        .circle_filled(pin_pos, 10.0, Color32::LIGHT_BLUE);
-                                    new_connections.insert(Connection::new(instance.id, other.id));
-                                    mutations.push(MoveMutation {
-                                        ins: other.id,
-                                        old_pos: wire_instance.end,
-                                        new_pos: pin_pos,
-                                    });
+                        if other.id == instance.id {
+                            continue;
+                        }
+                        match other.ty {
+                            InstanceType::Wire(other_wire) => {
+                                for pin_pos in self_gate.pins() {
+                                    let d_start = other_wire.start.distance(pin_pos);
+                                    let d_end = other_wire.end.distance(pin_pos);
+                                    if d_start < threshold {
+                                        ui.painter().circle_filled(
+                                            pin_pos,
+                                            10.0,
+                                            Color32::LIGHT_BLUE,
+                                        );
+                                        new_connections
+                                            .insert(Connection::new(instance.id, other.id));
+                                        mutations.push(MoveMutation {
+                                            ins: other.id,
+                                            old_pos: other_wire.start,
+                                            new_pos: pin_pos,
+                                        });
+                                    } else if d_end < threshold {
+                                        ui.painter().circle_filled(
+                                            pin_pos,
+                                            10.0,
+                                            Color32::LIGHT_BLUE,
+                                        );
+                                        new_connections
+                                            .insert(Connection::new(instance.id, other.id));
+                                        mutations.push(MoveMutation {
+                                            ins: other.id,
+                                            old_pos: other_wire.end,
+                                            new_pos: pin_pos,
+                                        });
+                                    }
+                                }
+                            }
+                            // TODO: Right now once self is moved to other and once other is moved
+                            // to self. This logic is not correct
+                            InstanceType::Gate(other_gate) => {
+                                for self_pin in self_gate.pins() {
+                                    for other_pin in other_gate.pins() {
+                                        if self_pin.distance(other_pin) < threshold {
+                                            ui.painter().circle_filled(
+                                                self_pin,
+                                                10.0,
+                                                Color32::LIGHT_BLUE,
+                                            );
+                                            mutations.push(MoveMutation {
+                                                ins: other.id,
+                                                old_pos: other_pin,
+                                                new_pos: self_pin,
+                                            });
+                                        }
+                                    }
                                 }
                             }
                         }
                     }
                 }
-                InstanceType::Wire(_) => {}
+                InstanceType::Wire(wire_instance) => {}
             }
         }
 
@@ -497,7 +550,7 @@ impl TemplateApp {
                 let instance = self.get_instance_mut(mutation.ins);
                 match &mut instance.ty {
                     InstanceType::Gate(gate_instance) => {
-                        // TODO implement gates moving to snap
+                        gate_instance.pos += mutation.new_pos - mutation.old_pos
                     }
                     InstanceType::Wire(wire_instance) => {
                         if wire_instance.start == mutation.old_pos {
