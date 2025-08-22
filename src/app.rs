@@ -1,4 +1,4 @@
-use std::{hash::Hash, usize};
+use std::{collections::HashSet, hash::Hash, usize};
 
 use egui::{
     Align, Button, Color32, Image, Layout, Pos2, Rect, Sense, Stroke, Ui, Vec2, Widget, pos2, vec2,
@@ -63,7 +63,7 @@ impl InstanceType {
         Self::Wire(WireInstance { start, end })
     }
 
-    pub fn _new_wire_from_point(p: Pos2) -> Self {
+    pub fn new_wire_from_point(p: Pos2) -> Self {
         return Self::new_wire(p, pos2(p.x + 30.0, p.y));
     }
     fn new_gate(kind: GateKind, pos: Pos2) -> Self {
@@ -156,7 +156,7 @@ pub struct Resize {
     pub start: bool,
 }
 
-#[derive(serde::Deserialize, serde::Serialize)]
+#[derive(serde::Deserialize, serde::Serialize, Debug)]
 pub struct PanelDrag {
     ty: InstanceType,
     /// Temporary drag position
@@ -185,11 +185,32 @@ impl CanvasDrag {
     }
 }
 
+#[derive(serde::Deserialize, serde::Serialize, PartialEq, Eq, Hash)]
+pub struct Connection {
+    pub ins1: InstanceId,
+    pub ins2: InstanceId,
+}
+
+impl Connection {
+    fn new(ins1: InstanceId, ins2: InstanceId) -> Self {
+        Self { ins1, ins2 }
+    }
+}
+
+/// Define what instance is moving
+pub struct MoveMutation {
+    ins: InstanceId,
+    old_pos: Pos2,
+    new_pos: Pos2,
+}
+
 #[derive(serde::Deserialize, serde::Serialize)]
 pub struct TemplateApp {
     /// State
     ///
     instances: Vec<Instance>,
+    /// Connected instance pairs
+    connections: Vec<Connection>,
     /// Next unique ID for gates
     next_instance_id: InstanceId,
 
@@ -210,6 +231,7 @@ impl Default for TemplateApp {
     fn default() -> Self {
         Self {
             instances: Default::default(),
+            connections: Default::default(),
             next_instance_id: InstanceId(0),
             panel_drag: None,
             canvas_drag: None,
@@ -231,9 +253,9 @@ impl TemplateApp {
     }
 
     pub fn main_layout(&mut self, ui: &mut Ui) {
-        // egui::Window::new("Debug logs").show(ui.ctx(), |ui| {
-        //     egui_logger::logger_ui().show(ui);
-        // });
+        egui::Window::new("Debug logs").show(ui.ctx(), |ui| {
+            egui_logger::logger_ui().show(ui);
+        });
         ui.with_layout(Layout::left_to_right(Align::Min), |ui| {
             self.canvas_config = CanvasConfig::default();
             ui.add(egui::TextEdit::multiline(&mut format!(
@@ -259,7 +281,8 @@ impl TemplateApp {
         if nand_resp.dragged()
             && let Some(pos) = ui.ctx().pointer_interact_pos()
         {
-            self.panel_drag = Some(PanelDrag::new(InstanceType::new_wire(pos, pos)));
+            self.panel_drag = Some(PanelDrag::new(InstanceType::new_gate(GateKind::Nand, pos)));
+            log::debug!("dragged {:#?}", self.panel_drag);
         }
 
         ui.add_space(8.0);
@@ -272,7 +295,7 @@ impl TemplateApp {
         if wire_resp.dragged()
             && let Some(pos) = ui.ctx().pointer_interact_pos()
         {
-            self.panel_drag = Some(PanelDrag::new(InstanceType::new_gate(GateKind::Nand, pos)));
+            self.panel_drag = Some(PanelDrag::new(InstanceType::new_wire_from_point(pos)));
         }
 
         ui.add_space(8.0);
@@ -294,9 +317,12 @@ impl TemplateApp {
         let (resp, _painter) = ui.allocate_painter(ui.available_size(), Sense::hover());
         let canvas_rect = resp.rect;
 
+        let mut mutations: Vec<MoveMutation> = Vec::new();
+
         // handle dragging from panel
         if let Some(panel_drag) = &self.panel_drag {
-            if canvas_rect.contains(panel_drag.pos) {
+            if inside_rect(&canvas_rect, &panel_drag.ty) {
+                log::debug!("drag inside rect");
                 match panel_drag.ty {
                     InstanceType::Gate(gate) => {
                         self.draw_gate(ui, &gate);
@@ -317,7 +343,7 @@ impl TemplateApp {
         if let Some(panel_drag) = &self.panel_drag
             && mouse_up
         {
-            if canvas_rect.contains(panel_drag.pos) {
+            if inside_rect(&canvas_rect, &panel_drag.ty) {
                 self.instances
                     .push(Instance::new(self.next_instance_id, panel_drag.ty));
                 self.next_instance_id.incr();
@@ -335,6 +361,7 @@ impl TemplateApp {
         {
             let i = self.interacted_instance(mouse_pos);
             if let Some(instance) = i {
+                log::debug!("canvas drag on {:?}", instance);
                 match instance.ty {
                     InstanceType::Gate(gate) => {
                         self.canvas_drag = Some(CanvasDrag::new(
@@ -343,12 +370,12 @@ impl TemplateApp {
                         ));
                     }
                     InstanceType::Wire(wire) => {
-                        if mouse_pos.distance(wire.end) < 5.0 {
+                        if mouse_pos.distance(wire.end) < 10.0 {
                             self.resize = Some(Resize {
                                 id: instance.id,
                                 start: false,
                             });
-                        } else if mouse_pos.distance(wire.start) < 5.0 {
+                        } else if mouse_pos.distance(wire.start) < 10.0 {
                             self.resize = Some(Resize {
                                 id: instance.id,
                                 start: true,
@@ -370,9 +397,9 @@ impl TemplateApp {
             let offset = self.canvas_drag.as_ref().map(|c| c.offset);
             (id_opt, pointer_pos, offset)
         } {
-            let instance = self.get_instance(id);
-            match instance.ty {
-                InstanceType::Gate(mut gate) => {
+            let instance = self.get_instance_mut(id);
+            match &mut instance.ty {
+                InstanceType::Gate(gate) => {
                     let mut new_pos = mouse_pos + offset;
                     new_pos.x = new_pos
                         .x
@@ -382,7 +409,7 @@ impl TemplateApp {
                         .clamp(canvas_rect.top() + 18.0, canvas_rect.bottom() - 18.0);
                     gate.pos = new_pos;
                 }
-                InstanceType::Wire(mut wire) => {
+                InstanceType::Wire(wire) => {
                     // TODO: Fix clamping for end and start when dragging one side can go out.
                     let mut new_pos = mouse_pos + offset;
                     new_pos.x = new_pos
@@ -425,47 +452,67 @@ impl TemplateApp {
                 }
             }
         }
-        //
-        // // If Anything can be snapped to other instances do it.
-        // for instance in self.instances.iter() {
-        //     match instance.ty {
-        //         InstanceType::Gate(gate) => {
-        //             for other in self.instances.iter() {
-        //                 match other.ty {
-        //                     InstanceType::Wire(wire_instance) => {
-        //                         for pin in gate.kind.graphics().pins {
-        //                             let pin_pos = gate.pos + pin.offset;
-        //                             // Log distances from this pin to the wire start/end
-        //                             let d_start = wire_instance.start.distance(pin_pos);
-        //                             let d_end = wire_instance.end.distance(pin_pos);
-        //                             log::info!(
-        //                                 "snap-check: gate={} pin=({:.1},{:.1}) wire={} d_start={:.2} d_end={:.2}",
-        //                                 instance.id.usize(),
-        //                                 pin_pos.x,
-        //                                 pin_pos.y,
-        //                                 other.id.usize(),
-        //                                 d_start,
-        //                                 d_end
-        //                             );
-        //                             if wire_instance.start.distance(pin_pos) < 10.0
-        //                                 || wire_instance.end.distance(pin_pos) < 10.0
-        //                             {
-        //                                 ui.painter().circle_filled(
-        //                                     pin_pos,
-        //                                     20.0,
-        //                                     Color32::LIGHT_BLUE,
-        //                                 );
-        //                             }
-        //                         }
-        //                     }
-        //                     InstanceType::Gate(_) => {}
-        //                 }
-        //             }
-        //         }
-        //         InstanceType::Wire(wire_instance) => {}
-        //     }
-        // }
-        //
+        let mut new_connections: HashSet<Connection> = HashSet::new();
+
+        for instance in self.instances.iter() {
+            match instance.ty {
+                InstanceType::Gate(gate) => {
+                    for other in self.instances.iter() {
+                        if let InstanceType::Wire(wire_instance) = other.ty {
+                            for pin in gate.kind.graphics().pins {
+                                let pin_pos = gate.pos + pin.offset;
+                                let d_start = wire_instance.start.distance(pin_pos);
+                                let d_end = wire_instance.end.distance(pin_pos);
+                                let threshold = 10.0;
+                                if d_start < threshold {
+                                    ui.painter()
+                                        .circle_filled(pin_pos, 10.0, Color32::LIGHT_BLUE);
+                                    new_connections.insert(Connection::new(instance.id, other.id));
+                                    mutations.push(MoveMutation {
+                                        ins: other.id,
+                                        old_pos: wire_instance.start,
+                                        new_pos: pin_pos,
+                                    });
+                                } else if d_end < threshold {
+                                    ui.painter()
+                                        .circle_filled(pin_pos, 10.0, Color32::LIGHT_BLUE);
+                                    new_connections.insert(Connection::new(instance.id, other.id));
+                                    mutations.push(MoveMutation {
+                                        ins: other.id,
+                                        old_pos: wire_instance.end,
+                                        new_pos: pin_pos,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+                InstanceType::Wire(_) => {}
+            }
+        }
+
+        // Apply move mutations
+        if mouse_up {
+            for mutation in mutations {
+                let instance = self.get_instance_mut(mutation.ins);
+                match &mut instance.ty {
+                    InstanceType::Gate(gate_instance) => {
+                        // TODO implement gates moving to snap
+                    }
+                    InstanceType::Wire(wire_instance) => {
+                        if wire_instance.start == mutation.old_pos {
+                            wire_instance.start = mutation.new_pos
+                        }
+                        if wire_instance.end == mutation.old_pos {
+                            wire_instance.end = mutation.new_pos
+                        }
+                    }
+                }
+            }
+            for conn in new_connections {
+                self.connections.push(conn);
+            }
+        }
         for instance in self.instances.iter() {
             match instance.ty {
                 InstanceType::Gate(gate) => {
@@ -524,6 +571,15 @@ impl TemplateApp {
             }
         }
         i
+    }
+}
+
+fn inside_rect(canvas_rect: &Rect, ty: &InstanceType) -> bool {
+    match ty {
+        InstanceType::Gate(gate_instance) => canvas_rect.contains(gate_instance.pos),
+        InstanceType::Wire(wire_instance) => {
+            canvas_rect.contains(wire_instance.start) && canvas_rect.contains(wire_instance.end)
+        }
     }
 }
 
