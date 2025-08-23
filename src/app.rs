@@ -157,24 +157,17 @@ impl Instance {
         }
     }
 
-    fn move_pin(&mut self, pin: Pin, new_pos: Pos2) {
-        match &mut self.ty {
+    fn move_pin_delta(&self, pin: Pin, new_pos: Pos2) -> Vec2 {
+        match &self.ty {
             InstanceType::Wire(wire) => {
-                // TODO: Maybe wire.start and wire.end can go to a vector of size 2?
                 if pin.index == 0 {
-                    wire.start = new_pos;
+                    new_pos - wire.start
                 } else {
-                    wire.end = new_pos;
+                    new_pos - wire.end
                 }
             }
-            InstanceType::Gate(gate) => {
-                let move_vec = new_pos - pin.pos;
-                gate.pos += move_vec;
-            }
-            InstanceType::Power(power) => {
-                let move_vec = new_pos - pin.pos;
-                power.pos += move_vec;
-            }
+            InstanceType::Gate(_gate) => new_pos - pin.pos,
+            InstanceType::Power(_power) => new_pos - pin.pos,
         }
     }
 }
@@ -322,7 +315,7 @@ impl PanelDrag {
     }
 }
 
-#[derive(serde::Deserialize, serde::Serialize, Default)]
+#[derive(serde::Deserialize, serde::Serialize, Debug, Default)]
 pub struct CanvasDrag {
     id: InstanceId,
     /// Offset from mouse pointer to gate center at drag start
@@ -342,6 +335,30 @@ pub struct Pin {
     pub index: u32,
 }
 
+impl Pin {
+    /// Compute this pin's current world position from its instance.
+    /// This ignores the stored `pos` and derives from the instance's data.
+    pub fn _position_from(&self, ins: &Instance) -> Pos2 {
+        match ins.ty {
+            InstanceType::Gate(g) => {
+                let info = g.kind.graphics().pins[self.index as usize];
+                g.pos + info.offset
+            }
+            InstanceType::Power(p) => {
+                let info = p.graphics().pins[self.index as usize];
+                p.pos + info.offset
+            }
+            InstanceType::Wire(w) => {
+                if self.index == 0 {
+                    w.start
+                } else {
+                    w.end
+                }
+            }
+        }
+    }
+}
+
 impl Hash for Pin {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.ins.hash(state);
@@ -349,7 +366,7 @@ impl Hash for Pin {
     }
 }
 
-#[derive(serde::Deserialize, serde::Serialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(serde::Deserialize, serde::Serialize, Debug, Eq, Clone, Copy)]
 pub struct Connection {
     pin1: Pin,
     pin2: Pin,
@@ -357,7 +374,43 @@ pub struct Connection {
 
 impl Connection {
     fn new(pin1: Pin, pin2: Pin) -> Self {
-        Self { pin1, pin2 }
+        let (a, b) = if (pin2.ins, pin2.index) < (pin1.ins, pin1.index) {
+            (pin2, pin1)
+        } else {
+            (pin1, pin2)
+        };
+        Self { pin1: a, pin2: b }
+    }
+
+    /// Return pins in the order that starts with pin from instance id
+    fn get_pin(&self, moving_instance_id: InstanceId) -> Option<(Pin, Pin)> {
+        if self.pin1.ins == moving_instance_id {
+            Some((self.pin1, self.pin2))
+        } else if self.pin2.ins == moving_instance_id {
+            Some((self.pin2, self.pin1))
+        } else {
+            None
+        }
+    }
+}
+
+impl PartialEq for Connection {
+    fn eq(&self, other: &Self) -> bool {
+        // Order-insensitive equality thanks to normalization
+        self.pin1.ins == other.pin1.ins
+            && self.pin1.index == other.pin1.index
+            && self.pin2.ins == other.pin2.ins
+            && self.pin2.index == other.pin2.index
+    }
+}
+
+impl Hash for Connection {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        // Order-insensitive hash thanks to normalization
+        self.pin1.ins.hash(state);
+        self.pin1.index.hash(state);
+        self.pin2.ins.hash(state);
+        self.pin2.index.hash(state);
     }
 }
 
@@ -421,8 +474,8 @@ impl TemplateApp {
                 ui.add_sized(
                     vec2(200.0, 50.0),
                     egui::TextEdit::multiline(&mut format!(
-                        "world {:#?}\n conn: {:#?}",
-                        self.instances, self.connections
+                        "world {:#?}\n conn: {:#?}\n moving: {:#?}\n\n\n",
+                        self.instances, self.connections, self.canvas_drag
                     )),
                 )
             });
@@ -652,13 +705,11 @@ impl TemplateApp {
             let mut possible_connections = HashSet::new();
             for self_ins in &self.instances {
                 log::info!("{self_ins:#?}");
-                let self_pins = self_ins.pins();
-                for self_pin in self_pins {
+                for self_pin in self_ins.pins() {
                     for other_ins in &self.instances {
                         if self_ins.id == other_ins.id {
                             continue;
                         }
-
                         for other_pin in other_ins.pins() {
                             if self_pin.pos.distance(other_pin.pos) > threshold {
                                 continue;
@@ -666,10 +717,8 @@ impl TemplateApp {
 
                             log::info!("{self_pin:#?}, {other_pin:#?}");
                             let t = Connection::new(self_pin, other_pin);
-                            let t_other = Connection::new(other_pin, self_pin);
-                            // TODO: Use the hashset hashing instead of this check
-                            let found = possible_connections.contains(&t)
-                                || possible_connections.contains(&t_other);
+                            // To prevent pin1, pin2 and pin2, pin1 connections
+                            let found = possible_connections.contains(&t);
                             if !found {
                                 possible_connections.insert(t);
                             }
@@ -677,42 +726,42 @@ impl TemplateApp {
                     }
                 }
             }
-            // paint connected pins (iterate in a stable order)
-            let mut conns: Vec<_> = possible_connections.iter().collect();
-            conns.sort_by_key(|c| {
-                (
-                    c.pin1.pos.x.to_bits(),
-                    c.pin1.pos.y.to_bits(),
-                    c.pin2.pos.x.to_bits(),
-                    c.pin2.pos.y.to_bits(),
-                )
-            });
-            for conn in conns {
-                if conn.pin1.ins == moving_instance_id {
+            // TODO: inefficient but okay for now. We want to highlight connections for moving
+            // object.
+            for conn in &possible_connections {
+                if let Some((pin, _)) = conn.get_pin(moving_instance_id) {
                     ui.painter()
-                        .circle_filled(conn.pin1.pos, 10.0, Color32::LIGHT_YELLOW);
-                } else if conn.pin2.ins == moving_instance_id {
-                    ui.painter()
-                        .circle_filled(conn.pin2.pos, 10.0, Color32::LIGHT_YELLOW);
+                        .circle_filled(pin.pos, 10.0, Color32::LIGHT_YELLOW);
                 }
             }
-            // snap connections together
             if mouse_up {
-                // snap in a stable order
-                let mut conns: Vec<_> = possible_connections.iter().collect();
-                conns.sort_by_key(|c| {
-                    (
-                        c.pin1.pos.x.to_bits(),
-                        c.pin1.pos.y.to_bits(),
-                        c.pin2.pos.x.to_bits(),
-                        c.pin2.pos.y.to_bits(),
-                    )
-                });
-                for conn in conns {
-                    let instance = self.get_instance_mut(conn.pin1.ins);
-                    instance.move_pin(conn.pin1, conn.pin2.pos);
+                for conn in &possible_connections {
+                    let (pin1, pin2) = if let Some((pin1, pin2)) = conn.get_pin(moving_instance_id)
+                    {
+                        (pin1, pin2)
+                    } else {
+                        (conn.pin1, conn.pin2)
+                    };
+                    let instance = self.get_instance(pin1.ins);
+                    if let InstanceType::Wire(_) = instance.ty {
+                        let wire = self.get_wire_mut(instance.id);
+                        if pin1.index == 0 {
+                            wire.start = pin2.pos;
+                        } else {
+                            wire.end = pin2.pos;
+                        };
+                        self.resize = None;
+                    } else {
+                        let delta = { instance.move_pin_delta(pin1, pin2.pos) };
+                        self.mov_component_with_connected(pin1.ins, delta, canvas_rect);
+                    }
                 }
-                self.connections = possible_connections;
+                for conn in &possible_connections {
+                    self.connections.insert(*conn);
+                }
+                // Remove any connections not present in possible_connections
+                self.connections
+                    .retain(|conn| possible_connections.contains(conn));
             }
         }
 
@@ -861,6 +910,10 @@ impl TemplateApp {
         self.instances
             .get_mut(id.usize())
             .expect("should not happen")
+    }
+
+    fn get_instance(&self, id: InstanceId) -> &Instance {
+        self.instances.get(id.usize()).expect("should not happen")
     }
 
     fn get_connected_instances(&self, id: InstanceId) -> Vec<InstanceId> {
@@ -1018,4 +1071,36 @@ fn rotate_point(point: Pos2, origin: Pos2, angle: f32) -> Pos2 {
     let ynew = px * s + py * c;
 
     Pos2::new(xnew + origin.x, ynew + origin.y)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn connection_normalization_and_hash_eq() {
+        let a = Pin {
+            pos: pos2(0.0, 0.0),
+            ins: InstanceId(1),
+            index: 0,
+        };
+        let b = Pin {
+            pos: pos2(10.0, 0.0),
+            ins: InstanceId(2),
+            index: 1,
+        };
+
+        let c1 = Connection::new(a, b);
+        let c2 = Connection::new(b, a); // swapped
+
+        assert_eq!(c1, c2);
+
+        let mut set: HashSet<Connection> = HashSet::new();
+        let inserted1 = set.insert(c1);
+        let inserted2 = set.insert(c2);
+
+        assert!(inserted1);
+        assert!(!inserted2);
+        assert_eq!(set.len(), 1);
+    }
 }
