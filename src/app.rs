@@ -41,7 +41,6 @@ impl Instance {
         match self.ty {
             InstanceType::Gate(g) => {
                 let target = g.pos + move_vec;
-                // Gates are clamped with half size margins
                 let clamped_x = target
                     .x
                     .clamp(rect.left() + half_extent.x, rect.right() - half_extent.x);
@@ -50,20 +49,27 @@ impl Instance {
                     .clamp(rect.top() + half_extent.y, rect.bottom() - half_extent.y);
                 vec2(clamped_x - g.pos.x, clamped_y - g.pos.y)
             }
+            InstanceType::Power(p) => {
+                let target = p.pos + move_vec;
+                let clamped_x = target
+                    .x
+                    .clamp(rect.left() + half_extent.x, rect.right() - half_extent.x);
+                let clamped_y = target
+                    .y
+                    .clamp(rect.top() + half_extent.y, rect.bottom() - half_extent.y);
+                vec2(clamped_x - p.pos.x, clamped_y - p.pos.y)
+            }
             InstanceType::Wire(w) => {
-                // Wires: both endpoints must remain inside the rect
                 let ts = w.start + move_vec;
                 let te = w.end + move_vec;
                 let sx = ts.x.clamp(rect.left(), rect.right());
                 let sy = ts.y.clamp(rect.top(), rect.bottom());
                 let ex = te.x.clamp(rect.left(), rect.right());
                 let ey = te.y.clamp(rect.top(), rect.bottom());
-                // Compute back the maximal safe delta that achieves those clamped targets
                 let safe_dx_start = sx - w.start.x;
                 let safe_dy_start = sy - w.start.y;
                 let safe_dx_end = ex - w.end.x;
                 let safe_dy_end = ey - w.end.y;
-                // We must respect both endpoints; take the limiting deltas
                 let safe_dx = if move_vec.x.is_sign_positive() {
                     safe_dx_start.min(safe_dx_end)
                 } else {
@@ -109,6 +115,16 @@ impl Instance {
                     });
                 }
             }
+            InstanceType::Power(power_instance) => {
+                for (i, pin) in power_instance.graphics().pins.iter().enumerate() {
+                    let pin_pos = power_instance.pos + pin.offset;
+                    pins.push(Pin {
+                        pos: pin_pos,
+                        ins: self.id,
+                        index: i as u32,
+                    });
+                }
+            }
             InstanceType::Wire(wire_instance) => {
                 pins.push(Pin {
                     pos: wire_instance.start,
@@ -135,6 +151,9 @@ impl Instance {
             InstanceType::Gate(gate) => {
                 gate.pos += move_vec;
             }
+            InstanceType::Power(power) => {
+                power.pos += move_vec;
+            }
         }
     }
 
@@ -152,6 +171,10 @@ impl Instance {
                 let move_vec = new_pos - pin.pos;
                 gate.pos += move_vec;
             }
+            InstanceType::Power(power) => {
+                let move_vec = new_pos - pin.pos;
+                power.pos += move_vec;
+            }
         }
     }
 }
@@ -160,6 +183,7 @@ impl Instance {
 pub enum InstanceType {
     Gate(GateInstance),
     Wire(WireInstance),
+    Power(PowerInstance),
 }
 
 impl InstanceType {
@@ -172,6 +196,9 @@ impl InstanceType {
     }
     fn new_gate(kind: GateKind, pos: Pos2) -> Self {
         Self::Gate(GateInstance { kind, pos })
+    }
+    fn new_power(pos: Pos2, on: bool) -> Self {
+        Self::Power(PowerInstance { pos, on })
     }
 }
 
@@ -193,6 +220,23 @@ impl GateKind {
     fn graphics(&self) -> &assets::InstanceGraphics {
         match self {
             Self::Nand => &assets::NAND_GRAPHICS,
+        }
+    }
+}
+
+#[derive(serde::Deserialize, serde::Serialize, Copy, Debug, Clone)]
+pub struct PowerInstance {
+    // Center position
+    pos: Pos2,
+    on: bool,
+}
+
+impl PowerInstance {
+    fn graphics(&self) -> &assets::InstanceGraphics {
+        if self.on {
+            &assets::POWER_ON_GRAPHICS
+        } else {
+            &assets::POWER_OFF_GRAPHICS
         }
     }
 }
@@ -408,6 +452,16 @@ impl TemplateApp {
 
         ui.add_space(8.0);
 
+        let pwr_image = egui::Image::new(assets::POWER_ON_GRAPHICS.svg.clone()).max_height(70.0);
+        let pwr_resp = ui.add(egui::ImageButton::new(pwr_image).sense(Sense::click_and_drag()));
+        if pwr_resp.dragged()
+            && let Some(pos) = ui.ctx().pointer_interact_pos()
+        {
+            self.panel_drag = Some(PanelDrag::new(InstanceType::new_power(pos, true)));
+        }
+
+        ui.add_space(8.0);
+
         let wire_resp = ui.add(
             Button::new("Wire")
                 .sense(Sense::click_and_drag())
@@ -450,14 +504,22 @@ impl TemplateApp {
                             self.canvas_config.base_gate_size.x * 0.5,
                             self.canvas_config.base_gate_size.y * 0.5,
                         );
-                        // compute move from current preview pos to mouse, then clamp via temporary instance view
                         let desired = mouse - g.pos;
                         let tmp = Instance::new(InstanceId(0), InstanceType::Gate(*g));
                         let delta = tmp.clamp_move(desired, canvas_rect, half_extent);
                         g.pos += delta;
                     }
+                    InstanceType::Power(p) => {
+                        let half_extent = vec2(
+                            self.canvas_config.base_gate_size.x * 0.5,
+                            self.canvas_config.base_gate_size.y * 0.5,
+                        );
+                        let desired = mouse - p.pos;
+                        let tmp = Instance::new(InstanceId(0), InstanceType::Power(*p));
+                        let delta = tmp.clamp_move(desired, canvas_rect, half_extent);
+                        p.pos += delta;
+                    }
                     InstanceType::Wire(w) => {
-                        // Move so that start follows mouse, but clamp as a wire move
                         let desired = mouse - w.start;
                         let tmp = Instance::new(InstanceId(0), InstanceType::Wire(*w));
                         let delta = tmp.clamp_move(desired, canvas_rect, vec2(0.0, 0.0));
@@ -469,6 +531,7 @@ impl TemplateApp {
             if inside_rect(&canvas_rect, &pd.ty) {
                 match pd.ty {
                     InstanceType::Gate(gate) => self.draw_gate(ui, &gate),
+                    InstanceType::Power(power) => self.draw_power(ui, &power),
                     InstanceType::Wire(wire) => Self::draw_wire(ui, &wire),
                 }
             }
@@ -487,6 +550,21 @@ impl TemplateApp {
         }
         let pointer_pos = ui.input(|i| i.pointer.interact_pos());
         let pointer_pressed = ui.input(|i| i.pointer.primary_down());
+        let right_clicked = ui.input(|i| i.pointer.secondary_clicked());
+
+        if right_clicked
+            && let Some(mouse_pos) = pointer_pos
+            && self.panel_drag.is_none()
+            && self.canvas_drag.is_none()
+            && self.resize.is_none()
+            && let Some(instance) = self.interacted_instance(mouse_pos)
+            && let InstanceType::Power(_) = instance.ty
+        {
+            let id = instance.id;
+            if let InstanceType::Power(pi) = &mut self.get_instance_mut(id).ty {
+                pi.on = !pi.on;
+            }
+        }
 
         if pointer_pressed
             && let Some(mouse_pos) = pointer_pos
@@ -496,12 +574,17 @@ impl TemplateApp {
         {
             let i = self.interacted_instance(mouse_pos);
             if let Some(instance) = i {
-                log::debug!("canvas drag on {instance:?}");
                 match instance.ty {
                     InstanceType::Gate(gate) => {
                         self.canvas_drag = Some(CanvasDrag::new(
                             instance.id,
                             gate.pos.to_vec2() - mouse_pos.to_vec2(),
+                        ));
+                    }
+                    InstanceType::Power(power) => {
+                        self.canvas_drag = Some(CanvasDrag::new(
+                            instance.id,
+                            power.pos.to_vec2() - mouse_pos.to_vec2(),
                         ));
                     }
                     InstanceType::Wire(wire) => {
@@ -536,6 +619,10 @@ impl TemplateApp {
             match &mut instance.ty {
                 InstanceType::Gate(gate) => {
                     let desired = (mouse_pos + offset) - gate.pos;
+                    self.mov_component_with_connected(id, desired, canvas_rect);
+                }
+                InstanceType::Power(power) => {
+                    let desired = (mouse_pos + offset) - power.pos;
                     self.mov_component_with_connected(id, desired, canvas_rect);
                 }
                 InstanceType::Wire(wire) => {
@@ -664,11 +751,15 @@ impl TemplateApp {
                 InstanceType::Gate(gate) => {
                     self.draw_gate(ui, &gate);
                 }
+                InstanceType::Power(power) => {
+                    self.draw_power(ui, &power);
+                }
                 InstanceType::Wire(wire) => {
                     Self::draw_wire(ui, &wire);
                 }
             }
         }
+
         if mouse_up {
             self.resize = None;
             self.canvas_drag = None;
@@ -696,22 +787,22 @@ impl TemplateApp {
             };
             ui.painter()
                 .circle_filled(pin_pos, self.canvas_config.base_pin_size, color);
-            // paint connected pins
-            let mut conns: Vec<_> = self.connections.iter().collect();
-            conns.sort_by_key(|c| {
-                (
-                    c.pin1.pos.x.to_bits(),
-                    c.pin1.pos.y.to_bits(),
-                    c.pin2.pos.x.to_bits(),
-                    c.pin2.pos.y.to_bits(),
-                )
-            });
-            for conn in conns {
-                if conn.pin1.pos == pin_pos || conn.pin2.pos == pin_pos {
-                    // ui.painter()
-                    //     .circle_filled(pin_pos, 10.0, Color32::LIGHT_YELLOW);
-                }
-            }
+        }
+    }
+
+    fn draw_power(&self, ui: &mut Ui, power: &PowerInstance) {
+        let rect = Rect::from_center_size(power.pos, self.canvas_config.base_gate_size);
+        let image = Image::new(power.graphics().svg.clone()).fit_to_exact_size(rect.size());
+        ui.put(rect, image);
+
+        for pin in power.graphics().pins {
+            let pin_pos = power.pos + pin.offset;
+            let color = match pin.kind {
+                assets::PinKind::Input => self.canvas_config.base_input_pin_color,
+                assets::PinKind::Output => self.canvas_config.base_output_pin_color,
+            };
+            ui.painter()
+                .circle_filled(pin_pos, self.canvas_config.base_pin_size, color);
         }
     }
 
@@ -723,6 +814,14 @@ impl TemplateApp {
                     let size = self.canvas_config.base_gate_size;
                     let gate_rect = egui::Rect::from_center_size(gate.pos, size);
                     if gate_rect.contains(mouse_pos) {
+                        i = Some(instance);
+                        break;
+                    }
+                }
+                InstanceType::Power(power) => {
+                    let size = self.canvas_config.base_gate_size;
+                    let rect = egui::Rect::from_center_size(power.pos, size);
+                    if rect.contains(mouse_pos) {
                         i = Some(instance);
                         break;
                     }
@@ -743,6 +842,7 @@ impl TemplateApp {
 fn inside_rect(canvas_rect: &Rect, ty: &InstanceType) -> bool {
     match ty {
         InstanceType::Gate(gate_instance) => canvas_rect.contains(gate_instance.pos),
+        InstanceType::Power(power_instance) => canvas_rect.contains(power_instance.pos),
         InstanceType::Wire(wire_instance) => {
             canvas_rect.contains(wire_instance.start) && canvas_rect.contains(wire_instance.end)
         }
@@ -752,8 +852,8 @@ fn inside_rect(canvas_rect: &Rect, ty: &InstanceType) -> bool {
 impl TemplateApp {
     fn get_wire_mut(&mut self, id: InstanceId) -> &mut WireInstance {
         match &mut self.get_instance_mut(id).ty {
-            InstanceType::Gate(_) => panic!("Should not happen"),
             InstanceType::Wire(wire_instance) => wire_instance,
+            InstanceType::Gate(_) | InstanceType::Power(_) => panic!("Should not happen"),
         }
     }
 
@@ -816,6 +916,17 @@ impl TemplateApp {
             match ins.ty {
                 InstanceType::Gate(g) => {
                     let q = g.pos;
+                    let left = rect.left() + half_w;
+                    let right = rect.right() - half_w;
+                    let top = rect.top() + half_h;
+                    let bottom = rect.bottom() - half_h;
+                    dx_min = dx_min.max(left - q.x);
+                    dx_max = dx_max.min(right - q.x);
+                    dy_min = dy_min.max(top - q.y);
+                    dy_max = dy_max.min(bottom - q.y);
+                }
+                InstanceType::Power(p) => {
+                    let q = p.pos;
                     let left = rect.left() + half_w;
                     let right = rect.right() - half_w;
                     let top = rect.top() + half_h;
