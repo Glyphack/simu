@@ -36,6 +36,48 @@ pub struct Instance {
 }
 
 impl Instance {
+    /// Clamp a desired move so this instance stays within rect
+    fn clamp_move(&self, move_vec: Vec2, rect: Rect, half_extent: Vec2) -> Vec2 {
+        match self.ty {
+            InstanceType::Gate(g) => {
+                let target = g.pos + move_vec;
+                // Gates are clamped with half size margins
+                let clamped_x = target
+                    .x
+                    .clamp(rect.left() + half_extent.x, rect.right() - half_extent.x);
+                let clamped_y = target
+                    .y
+                    .clamp(rect.top() + half_extent.y, rect.bottom() - half_extent.y);
+                vec2(clamped_x - g.pos.x, clamped_y - g.pos.y)
+            }
+            InstanceType::Wire(w) => {
+                // Wires: both endpoints must remain inside the rect
+                let ts = w.start + move_vec;
+                let te = w.end + move_vec;
+                let sx = ts.x.clamp(rect.left(), rect.right());
+                let sy = ts.y.clamp(rect.top(), rect.bottom());
+                let ex = te.x.clamp(rect.left(), rect.right());
+                let ey = te.y.clamp(rect.top(), rect.bottom());
+                // Compute back the maximal safe delta that achieves those clamped targets
+                let safe_dx_start = sx - w.start.x;
+                let safe_dy_start = sy - w.start.y;
+                let safe_dx_end = ex - w.end.x;
+                let safe_dy_end = ey - w.end.y;
+                // We must respect both endpoints; take the limiting deltas
+                let safe_dx = if move_vec.x.is_sign_positive() {
+                    safe_dx_start.min(safe_dx_end)
+                } else {
+                    safe_dx_start.max(safe_dx_end)
+                };
+                let safe_dy = if move_vec.y.is_sign_positive() {
+                    safe_dy_start.min(safe_dy_end)
+                } else {
+                    safe_dy_start.max(safe_dy_end)
+                };
+                vec2(safe_dx, safe_dy)
+            }
+        }
+    }
     fn _new_wire(id: InstanceId, start: Pos2, end: Pos2) -> Self {
         Self {
             id,
@@ -404,25 +446,23 @@ impl TemplateApp {
             if let Some(mouse) = ui.ctx().pointer_interact_pos() {
                 match &mut pd.ty {
                     InstanceType::Gate(g) => {
-                        let half_w = self.canvas_config.base_gate_size.x * 0.5;
-                        let half_h = self.canvas_config.base_gate_size.y * 0.5;
-                        let mut p = mouse;
-                        p.x =
-                            p.x.clamp(canvas_rect.left() + half_w, canvas_rect.right() - half_w);
-                        p.y =
-                            p.y.clamp(canvas_rect.top() + half_h, canvas_rect.bottom() - half_h);
-                        g.pos = p;
+                        let half_extent = vec2(
+                            self.canvas_config.base_gate_size.x * 0.5,
+                            self.canvas_config.base_gate_size.y * 0.5,
+                        );
+                        // compute move from current preview pos to mouse, then clamp via temporary instance view
+                        let desired = mouse - g.pos;
+                        let tmp = Instance::new(InstanceId(0), InstanceType::Gate(*g));
+                        let delta = tmp.clamp_move(desired, canvas_rect, half_extent);
+                        g.pos += delta;
                     }
                     InstanceType::Wire(w) => {
-                        let delta = w.end - w.start;
-                        let mut s = mouse;
-                        s.x = s.x.clamp(canvas_rect.left(), canvas_rect.right());
-                        s.y = s.y.clamp(canvas_rect.top(), canvas_rect.bottom());
-                        let mut e = s + delta;
-                        e.x = e.x.clamp(canvas_rect.left(), canvas_rect.right());
-                        e.y = e.y.clamp(canvas_rect.top(), canvas_rect.bottom());
-                        w.start = s;
-                        w.end = e;
+                        // Move so that start follows mouse, but clamp as a wire move
+                        let desired = mouse - w.start;
+                        let tmp = Instance::new(InstanceId(0), InstanceType::Wire(*w));
+                        let delta = tmp.clamp_move(desired, canvas_rect, vec2(0.0, 0.0));
+                        w.start += delta;
+                        w.end += delta;
                     }
                 }
             }
@@ -495,27 +535,12 @@ impl TemplateApp {
             let instance = self.get_instance_mut(id);
             match &mut instance.ty {
                 InstanceType::Gate(gate) => {
-                    let mut new_pos = mouse_pos + offset;
-                    new_pos.x = new_pos
-                        .x
-                        .clamp(canvas_rect.left() + 24.0, canvas_rect.right() - 24.0);
-                    new_pos.y = new_pos
-                        .y
-                        .clamp(canvas_rect.top() + 18.0, canvas_rect.bottom() - 18.0);
-                    let move_vec = new_pos - gate.pos;
-                    self.mov_component_with_connected(id, move_vec, canvas_rect);
+                    let desired = (mouse_pos + offset) - gate.pos;
+                    self.mov_component_with_connected(id, desired, canvas_rect);
                 }
                 InstanceType::Wire(wire) => {
-                    // TODO: Fix clamping for end and start when dragging one side can go out.
-                    let mut new_pos = mouse_pos + offset;
-                    new_pos.x = new_pos
-                        .x
-                        .clamp(canvas_rect.left() + 24.0, canvas_rect.right() - 24.0);
-                    new_pos.y = new_pos
-                        .y
-                        .clamp(canvas_rect.top() + 18.0, canvas_rect.bottom() - 18.0);
-                    let diff = new_pos - wire.end;
-                    self.mov_component_with_connected(id, diff, canvas_rect);
+                    let desired = (mouse_pos + offset) - wire.end;
+                    self.mov_component_with_connected(id, desired, canvas_rect);
                 }
             }
         }
