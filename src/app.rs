@@ -108,33 +108,27 @@ impl Instance {
 
         match self.ty {
             InstanceType::Gate(gate_instance) => {
-                for (i, pin) in gate_instance.kind.graphics().pins.iter().enumerate() {
-                    let pin_pos = gate_instance.pos + pin.offset;
+                for (i, _) in gate_instance.kind.graphics().pins.iter().enumerate() {
                     pins.push(Pin {
-                        pos: pin_pos,
                         ins: self.id,
                         index: i as u32,
                     });
                 }
             }
             InstanceType::Power(power_instance) => {
-                for (i, pin) in power_instance.graphics().pins.iter().enumerate() {
-                    let pin_pos = power_instance.pos + pin.offset;
+                for (i, _) in power_instance.graphics().pins.iter().enumerate() {
                     pins.push(Pin {
-                        pos: pin_pos,
                         ins: self.id,
                         index: i as u32,
                     });
                 }
             }
-            InstanceType::Wire(wire_instance) => {
+            InstanceType::Wire(_) => {
                 pins.push(Pin {
-                    pos: wire_instance.start,
                     ins: self.id,
                     index: 0,
                 });
                 pins.push(Pin {
-                    pos: wire_instance.end,
                     ins: self.id,
                     index: 1,
                 });
@@ -156,20 +150,6 @@ impl Instance {
             InstanceType::Power(power) => {
                 power.pos += move_vec;
             }
-        }
-    }
-
-    fn move_pin_delta(&self, pin: Pin, new_pos: Pos2) -> Vec2 {
-        match &self.ty {
-            InstanceType::Wire(wire) => {
-                if pin.index == 0 {
-                    new_pos - wire.start
-                } else {
-                    new_pos - wire.end
-                }
-            }
-            InstanceType::Gate(_gate) => new_pos - pin.pos,
-            InstanceType::Power(_power) => new_pos - pin.pos,
         }
     }
 }
@@ -332,15 +312,13 @@ impl CanvasDrag {
 
 #[derive(serde::Deserialize, serde::Serialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Pin {
-    pub pos: Pos2,
     pub ins: InstanceId,
     pub index: u32,
 }
 
 impl Pin {
     /// Compute this pin's current world position from its instance.
-    /// This ignores the stored `pos` and derives from the instance's data.
-    pub fn _position_from(&self, ins: &Instance) -> Pos2 {
+    pub fn position_from(&self, ins: &Instance) -> Pos2 {
         match ins.ty {
             InstanceType::Gate(g) => {
                 let info = g.kind.graphics().pins[self.index as usize];
@@ -382,6 +360,10 @@ impl Connection {
             (pin1, pin2)
         };
         Self { pin1: a, pin2: b }
+    }
+
+    fn involves(&self, ins: InstanceId) -> bool {
+        self.pin1.ins == ins || self.pin2.ins == ins
     }
 
     /// Return pins in the order that starts with pin from instance id
@@ -489,6 +471,7 @@ impl TemplateApp {
             ui.separator();
             ui.vertical(|ui| {
                 ui.heading("Canvas");
+                ui.label("press d to remove object");
                 self.draw_canvas(ui);
             });
         });
@@ -712,7 +695,11 @@ impl TemplateApp {
                             continue;
                         }
                         for other_pin in other_ins.pins() {
-                            if self_pin.pos.distance(other_pin.pos) > EDGE_THRESHOLD {
+                            if self
+                                .get_pin_pos(self_pin)
+                                .distance(self.get_pin_pos(other_pin))
+                                > EDGE_THRESHOLD
+                            {
                                 continue;
                             }
 
@@ -731,8 +718,11 @@ impl TemplateApp {
             // object.
             for conn in &possible_connections {
                 if let Some((_, other)) = conn.get_pin(moving_instance_id) {
-                    ui.painter()
-                        .circle_filled(other.pos, EDGE_THRESHOLD, Color32::LIGHT_YELLOW);
+                    ui.painter().circle_filled(
+                        self.get_pin_pos(other),
+                        EDGE_THRESHOLD,
+                        Color32::LIGHT_YELLOW,
+                    );
                 }
             }
             if mouse_up {
@@ -744,16 +734,17 @@ impl TemplateApp {
                         (conn.pin1, conn.pin2)
                     };
                     let instance = self.get_instance(pin1.ins);
+                    let pin_pos = self.get_pin_pos(pin2);
                     if let InstanceType::Wire(_) = instance.ty {
                         let wire = self.get_wire_mut(instance.id);
                         if pin1.index == 0 {
-                            wire.start = pin2.pos;
+                            wire.start = pin_pos;
                         } else {
-                            wire.end = pin2.pos;
+                            wire.end = pin_pos;
                         };
                         self.resize = None;
                     } else {
-                        let delta = { instance.move_pin_delta(pin1, pin2.pos) };
+                        let delta = { self.move_pin_delta(pin1, self.get_pin_pos(pin2)) };
                         self.mov_component_with_connected(pin1.ins, delta, canvas_rect);
                     }
                 }
@@ -796,6 +787,22 @@ impl TemplateApp {
                 wire.rotate_cw();
             }
         }
+
+        let d_pressed = ui.input(|i| i.key_pressed(egui::Key::D));
+        if d_pressed {
+            if let Some(canvas_drag) = &self.canvas_drag {
+                self.remove_instance(canvas_drag.id);
+                self.canvas_drag = None;
+            } else if self.panel_drag.is_some() {
+                self.panel_drag = None;
+                // rotate instance when dragging from panel
+            } else if let Some(mouse_pos) = pointer_pos
+                && let Some(i) = self.interacted_instance(mouse_pos)
+            {
+                self.remove_instance(i.id);
+            }
+        }
+
         for instance in &self.instances {
             match instance.ty {
                 InstanceType::Gate(gate) => {
@@ -887,6 +894,37 @@ impl TemplateApp {
         }
         i
     }
+
+    fn move_pin_delta(&self, pin: Pin, new_pos: Pos2) -> Vec2 {
+        let instance = self.get_instance(pin.ins);
+        let pin_pos = self.get_pin_pos(pin);
+        match instance.ty {
+            InstanceType::Wire(wire) => {
+                if pin.index == 0 {
+                    new_pos - wire.start
+                } else {
+                    new_pos - wire.end
+                }
+            }
+            InstanceType::Gate(_gate) => new_pos - pin_pos,
+            InstanceType::Power(_power) => new_pos - pin_pos,
+        }
+    }
+
+    fn remove_instance(&mut self, id: InstanceId) {
+        self.connections.retain(|f| !f.involves(id));
+        self.instances.remove(id.usize());
+        if let Some(d) = &self.canvas_drag
+            && d.id == id
+        {
+            self.canvas_drag = None;
+        }
+        if let Some(r) = &self.resize
+            && r.id == id
+        {
+            self.resize = None;
+        }
+    }
 }
 
 fn inside_rect(canvas_rect: &Rect, ty: &InstanceType) -> bool {
@@ -917,18 +955,13 @@ impl TemplateApp {
         self.instances.get(id.usize()).expect("should not happen")
     }
 
+    fn get_pin_pos(&self, pin: Pin) -> Pos2 {
+        pin.position_from(self.get_instance(pin.ins))
+    }
+
     fn get_connected_instances(&self, id: InstanceId) -> Vec<InstanceId> {
         let mut connecteds = Vec::new();
-        let mut conns: Vec<_> = self.connections.iter().collect();
-        conns.sort_by_key(|c| {
-            (
-                c.pin1.pos.x.to_bits(),
-                c.pin1.pos.y.to_bits(),
-                c.pin2.pos.x.to_bits(),
-                c.pin2.pos.y.to_bits(),
-            )
-        });
-        for con in conns {
+        for con in &self.connections {
             if con.pin1.ins == id {
                 connecteds.push(con.pin2.ins);
             }
@@ -1081,12 +1114,10 @@ mod tests {
     #[test]
     fn connection_normalization_and_hash_eq() {
         let a = Pin {
-            pos: pos2(0.0, 0.0),
             ins: InstanceId(1),
             index: 0,
         };
         let b = Pin {
-            pos: pos2(10.0, 0.0),
             ins: InstanceId(2),
             index: 1,
         };
