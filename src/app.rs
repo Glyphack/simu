@@ -7,6 +7,8 @@ use egui::{
 
 use crate::{assets, config::CanvasConfig};
 
+const EDGE_THRESHOLD: f32 = 15.0;
+
 // TODO Direction is not used anymore. I can calculate it from current positions?
 #[derive(serde::Deserialize, serde::Serialize, Debug, Clone, Copy, Default, Eq, PartialEq)]
 pub enum Direction {
@@ -547,7 +549,6 @@ impl TemplateApp {
     fn draw_canvas(&mut self, ui: &mut Ui) {
         let (resp, _painter) = ui.allocate_painter(ui.available_size(), Sense::hover());
         let canvas_rect = resp.rect;
-        let threshold = 10.0;
 
         if let Some(pd) = &mut self.panel_drag {
             if let Some(mouse) = ui.ctx().pointer_interact_pos() {
@@ -641,12 +642,12 @@ impl TemplateApp {
                         ));
                     }
                     InstanceType::Wire(wire) => {
-                        if mouse_pos.distance(wire.end) < 10.0 {
+                        if mouse_pos.distance(wire.end) < EDGE_THRESHOLD {
                             self.resize = Some(Resize {
                                 id: instance.id,
                                 start: false,
                             });
-                        } else if mouse_pos.distance(wire.start) < 10.0 {
+                        } else if mouse_pos.distance(wire.start) < EDGE_THRESHOLD {
                             self.resize = Some(Resize {
                                 id: instance.id,
                                 start: true,
@@ -711,7 +712,7 @@ impl TemplateApp {
                             continue;
                         }
                         for other_pin in other_ins.pins() {
-                            if self_pin.pos.distance(other_pin.pos) > threshold {
+                            if self_pin.pos.distance(other_pin.pos) > EDGE_THRESHOLD {
                                 continue;
                             }
 
@@ -729,9 +730,9 @@ impl TemplateApp {
             // TODO: inefficient but okay for now. We want to highlight connections for moving
             // object.
             for conn in &possible_connections {
-                if let Some((pin, _)) = conn.get_pin(moving_instance_id) {
+                if let Some((_, other)) = conn.get_pin(moving_instance_id) {
                     ui.painter()
-                        .circle_filled(pin.pos, 10.0, Color32::LIGHT_YELLOW);
+                        .circle_filled(other.pos, EDGE_THRESHOLD, Color32::LIGHT_YELLOW);
                 }
             }
             if mouse_up {
