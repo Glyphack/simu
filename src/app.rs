@@ -400,18 +400,36 @@ impl TemplateApp {
         let canvas_rect = resp.rect;
         let threshold = 10.0;
 
-        // handle dragging from panel
-        // TODO probably should add panel_drag to the world so rendering is easier
-        if let Some(panel_drag) = &self.panel_drag
-            && inside_rect(&canvas_rect, &panel_drag.ty)
-        {
-            log::debug!("drag inside rect");
-            match panel_drag.ty {
-                InstanceType::Gate(gate) => {
-                    self.draw_gate(ui, &gate);
+        if let Some(pd) = &mut self.panel_drag {
+            if let Some(mouse) = ui.ctx().pointer_interact_pos() {
+                match &mut pd.ty {
+                    InstanceType::Gate(g) => {
+                        let half_w = self.canvas_config.base_gate_size.x * 0.5;
+                        let half_h = self.canvas_config.base_gate_size.y * 0.5;
+                        let mut p = mouse;
+                        p.x =
+                            p.x.clamp(canvas_rect.left() + half_w, canvas_rect.right() - half_w);
+                        p.y =
+                            p.y.clamp(canvas_rect.top() + half_h, canvas_rect.bottom() - half_h);
+                        g.pos = p;
+                    }
+                    InstanceType::Wire(w) => {
+                        let delta = w.end - w.start;
+                        let mut s = mouse;
+                        s.x = s.x.clamp(canvas_rect.left(), canvas_rect.right());
+                        s.y = s.y.clamp(canvas_rect.top(), canvas_rect.bottom());
+                        let mut e = s + delta;
+                        e.x = e.x.clamp(canvas_rect.left(), canvas_rect.right());
+                        e.y = e.y.clamp(canvas_rect.top(), canvas_rect.bottom());
+                        w.start = s;
+                        w.end = e;
+                    }
                 }
-                InstanceType::Wire(wire) => {
-                    Self::draw_wire(ui, &wire);
+            }
+            if inside_rect(&canvas_rect, &pd.ty) {
+                match pd.ty {
+                    InstanceType::Gate(gate) => self.draw_gate(ui, &gate),
+                    InstanceType::Wire(wire) => Self::draw_wire(ui, &wire),
                 }
             }
         }
@@ -485,7 +503,7 @@ impl TemplateApp {
                         .y
                         .clamp(canvas_rect.top() + 18.0, canvas_rect.bottom() - 18.0);
                     let move_vec = new_pos - gate.pos;
-                    self.mov_with_connected(id, move_vec, &mut Vec::new());
+                    self.mov_component_with_connected(id, move_vec, canvas_rect);
                 }
                 InstanceType::Wire(wire) => {
                     // TODO: Fix clamping for end and start when dragging one side can go out.
@@ -497,7 +515,7 @@ impl TemplateApp {
                         .y
                         .clamp(canvas_rect.top() + 18.0, canvas_rect.bottom() - 18.0);
                     let diff = new_pos - wire.end;
-                    self.mov_with_connected(id, diff, &mut Vec::new());
+                    self.mov_component_with_connected(id, diff, canvas_rect);
                 }
             }
         }
@@ -510,6 +528,15 @@ impl TemplateApp {
         if self.canvas_drag.is_some() || self.resize.is_some() {
             // TODO: Only need to check this on placement and moving.
             // Also use a better way than iterating on everything.
+            let moving_instance_id = {
+                if let Some(c) = &self.canvas_drag {
+                    c.id
+                } else if let Some(r) = &self.resize {
+                    r.id
+                } else {
+                    unreachable!("should not happen");
+                }
+            };
             let mut possible_connections = HashSet::new();
             for self_ins in &self.instances {
                 log::info!("{self_ins:#?}");
@@ -549,8 +576,13 @@ impl TemplateApp {
                 )
             });
             for conn in conns {
-                ui.painter()
-                    .circle_filled(conn.pin1.pos, 10.0, Color32::LIGHT_YELLOW);
+                if conn.pin1.ins == moving_instance_id {
+                    ui.painter()
+                        .circle_filled(conn.pin1.pos, 10.0, Color32::LIGHT_YELLOW);
+                } else if conn.pin2.ins == moving_instance_id {
+                    ui.painter()
+                        .circle_filled(conn.pin2.pos, 10.0, Color32::LIGHT_YELLOW);
+                }
             }
             // snap connections together
             if mouse_up {
@@ -579,10 +611,13 @@ impl TemplateApp {
             (id, pointer_pos, start)
         } {
             let wire = self.get_wire_mut(id);
+            let mut p = mouse_pos;
+            p.x = p.x.clamp(canvas_rect.left(), canvas_rect.right());
+            p.y = p.y.clamp(canvas_rect.top(), canvas_rect.bottom());
             if start {
-                wire.start = mouse_pos;
+                wire.start = p;
             } else {
-                wire.end = mouse_pos;
+                wire.end = p;
             }
         }
 
@@ -726,16 +761,69 @@ impl TemplateApp {
         connecteds
     }
 
-    fn mov_with_connected(&mut self, id: InstanceId, mov_vec: Vec2, moved: &mut Vec<InstanceId>) {
-        if moved.contains(&id) {
-            return;
+    fn collect_connected_instances(&self, root: InstanceId) -> Vec<InstanceId> {
+        let mut stack = vec![root];
+        let mut seen: HashSet<InstanceId> = HashSet::new();
+        let mut out = Vec::new();
+        while let Some(id) = stack.pop() {
+            if seen.contains(&id) {
+                continue;
+            }
+            seen.insert(id);
+            out.push(id);
+            for n in self.get_connected_instances(id) {
+                stack.push(n);
+            }
         }
-        let instance = self.get_instance_mut(id);
-        moved.push(id);
-        instance.mov(mov_vec);
-        let connected_ids = self.get_connected_instances(id);
-        for connected_id in connected_ids {
-            self.mov_with_connected(connected_id, mov_vec, moved);
+        out
+    }
+
+    fn compute_within_bounds_delta(&self, ids: &[InstanceId], desired: Vec2, rect: Rect) -> Vec2 {
+        let half_w = self.canvas_config.base_gate_size.x * 0.5;
+        let half_h = self.canvas_config.base_gate_size.y * 0.5;
+        let mut dx_min = f32::NEG_INFINITY;
+        let mut dx_max = f32::INFINITY;
+        let mut dy_min = f32::NEG_INFINITY;
+        let mut dy_max = f32::INFINITY;
+
+        for id in ids {
+            let ins = &self.instances[id.usize()];
+            match ins.ty {
+                InstanceType::Gate(g) => {
+                    let q = g.pos;
+                    let left = rect.left() + half_w;
+                    let right = rect.right() - half_w;
+                    let top = rect.top() + half_h;
+                    let bottom = rect.bottom() - half_h;
+                    dx_min = dx_min.max(left - q.x);
+                    dx_max = dx_max.min(right - q.x);
+                    dy_min = dy_min.max(top - q.y);
+                    dy_max = dy_max.min(bottom - q.y);
+                }
+                InstanceType::Wire(w) => {
+                    for q in [w.start, w.end] {
+                        let left = rect.left();
+                        let right = rect.right();
+                        let top = rect.top();
+                        let bottom = rect.bottom();
+                        dx_min = dx_min.max(left - q.x);
+                        dx_max = dx_max.min(right - q.x);
+                        dy_min = dy_min.max(top - q.y);
+                        dy_max = dy_max.min(bottom - q.y);
+                    }
+                }
+            }
+        }
+        let safe_dx = desired.x.clamp(dx_min, dx_max);
+        let safe_dy = desired.y.clamp(dy_min, dy_max);
+        vec2(safe_dx, safe_dy)
+    }
+
+    fn mov_component_with_connected(&mut self, id: InstanceId, desired: Vec2, rect: Rect) {
+        let ids = self.collect_connected_instances(id);
+        let delta = self.compute_within_bounds_delta(&ids, desired, rect);
+        for cid in ids {
+            self.get_instance_mut(cid).mov(delta);
         }
     }
 }

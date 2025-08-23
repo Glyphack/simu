@@ -157,12 +157,35 @@
     <!--Register Service Worker. this will cache the wasm / js scripts for offline use (for PWA functionality). -->
     <!-- Force refresh (Ctrl + F5) to load the latest files instead of cached files  -->
     <script>
-      // We disable caching during development so that we always view the latest version.
-      if ("serviceWorker" in navigator && window.location.hash !== "#dev") {
-        window.addEventListener("load", function () {
-          navigator.serviceWorker.register("sw.js");
-        });
-      }
+      // In dev (localhost or #dev), unregister any existing Service Worker
+      // so Trunk hot reloads always fetch fresh code.
+      (function () {
+        if (!("serviceWorker" in navigator)) return;
+
+        const isLocalhost =
+          location.hostname === "localhost" ||
+          location.hostname === "127.0.0.1" ||
+          location.hostname === "[::1]";
+        const isDev = isLocalhost || window.location.hash === "#dev";
+
+        if (isDev) {
+          navigator.serviceWorker.getRegistrations().then((regs) => {
+            if (regs.length > 0) {
+              Promise.all(regs.map((r) => r.unregister())).then(() => {
+                // If a SW was controlling this page, force one-time reload
+                if (navigator.serviceWorker.controller) {
+                  window.location.reload();
+                }
+              });
+            }
+          });
+        } else {
+          // Production: register the SW for offline/PWA support
+          window.addEventListener("load", function () {
+            navigator.serviceWorker.register("sw.js");
+          });
+        }
+      })();
     </script>
   </body>
 </html>
