@@ -1,4 +1,4 @@
-use std::{collections::HashSet, hash::Hash};
+use std::{collections::HashSet, hash::Hash, u32};
 
 use egui::{
     Align, Button, Color32, Image, Layout, Pos2, Rect, Sense, Stroke, Ui, Vec2, Widget as _, pos2,
@@ -8,27 +8,6 @@ use egui::{
 use crate::{assets, config::CanvasConfig};
 
 const EDGE_THRESHOLD: f32 = 15.0;
-
-// TODO Direction is not used anymore. I can calculate it from current positions?
-#[derive(serde::Deserialize, serde::Serialize, Debug, Clone, Copy, Default, Eq, PartialEq)]
-pub enum Direction {
-    Up,
-    #[default]
-    Right,
-    Down,
-    Left,
-}
-
-impl Direction {
-    fn _rotate_cw(self) -> Self {
-        match self {
-            Self::Up => Self::Right,
-            Self::Right => Self::Down,
-            Self::Down => Self::Left,
-            Self::Left => Self::Up,
-        }
-    }
-}
 
 /// All possible things that can appear on the screen.
 #[derive(serde::Deserialize, serde::Serialize, Copy, Debug, Clone)]
@@ -367,10 +346,20 @@ impl Connection {
     }
 
     /// Return pins in the order that starts with pin from instance id
-    fn get_pin(&self, moving_instance_id: InstanceId) -> Option<(Pin, Pin)> {
+    fn get_ins_pin_first(&self, moving_instance_id: InstanceId) -> Option<(Pin, Pin)> {
         if self.pin1.ins == moving_instance_id {
             Some((self.pin1, self.pin2))
         } else if self.pin2.ins == moving_instance_id {
+            Some((self.pin2, self.pin1))
+        } else {
+            None
+        }
+    }
+
+    fn get_pin_first(&self, pin: Pin) -> Option<(Pin, Pin)> {
+        if self.pin1 == pin {
+            Some((self.pin1, self.pin2))
+        } else if self.pin2 == pin {
             Some((self.pin2, self.pin1))
         } else {
             None
@@ -407,6 +396,8 @@ pub struct TemplateApp {
     instances: Vec<Instance>,
     /// Connected instance pairs
     connections: HashSet<Connection>,
+    /// What pins have current
+    current: HashSet<Pin>,
     /// Next unique ID for gates
     next_instance_id: InstanceId,
 
@@ -428,6 +419,7 @@ impl Default for TemplateApp {
         Self {
             instances: Default::default(),
             connections: Default::default(),
+            current: Default::default(),
             next_instance_id: InstanceId(0),
             panel_drag: None,
             canvas_drag: None,
@@ -458,8 +450,8 @@ impl TemplateApp {
                 ui.add_sized(
                     vec2(200.0, 50.0),
                     egui::TextEdit::multiline(&mut format!(
-                        "world {:#?}\n conn: {:#?}\n moving: {:#?}\n\n\n",
-                        self.instances, self.connections, self.canvas_drag
+                        "world {:#?}\n conn: {:#?}\n current: {:#?}\n moving: {:#?}\n\n\n",
+                        self.instances, self.connections, self.current, self.canvas_drag
                     )),
                 )
             });
@@ -520,6 +512,7 @@ impl TemplateApp {
         {
             self.instances.clear();
             self.connections.clear();
+            self.current.clear();
             self.next_instance_id = InstanceId(0);
             self.canvas_drag = None;
             self.panel_drag = None;
@@ -532,6 +525,9 @@ impl TemplateApp {
     fn draw_canvas(&mut self, ui: &mut Ui) {
         let (resp, _painter) = ui.allocate_painter(ui.available_size(), Sense::hover());
         let canvas_rect = resp.rect;
+
+        // Keep track if a new connection appeared
+        let mut connected_changed = false;
 
         if let Some(pd) = &mut self.panel_drag {
             if let Some(mouse) = ui.ctx().pointer_interact_pos() {
@@ -569,7 +565,7 @@ impl TemplateApp {
                 match pd.ty {
                     InstanceType::Gate(gate) => self.draw_gate(ui, &gate),
                     InstanceType::Power(power) => self.draw_power(ui, &power),
-                    InstanceType::Wire(wire) => Self::draw_wire(ui, &wire),
+                    InstanceType::Wire(wire) => self.draw_wire(ui, InstanceId(u32::MAX), &wire),
                 }
             }
         }
@@ -600,6 +596,7 @@ impl TemplateApp {
             let id = instance.id;
             if let InstanceType::Power(pi) = &mut self.get_instance_mut(id).ty {
                 pi.on = !pi.on;
+                connected_changed = true;
             }
         }
 
@@ -717,7 +714,7 @@ impl TemplateApp {
             // TODO: inefficient but okay for now. We want to highlight connections for moving
             // object.
             for conn in &possible_connections {
-                if let Some((_, other)) = conn.get_pin(moving_instance_id) {
+                if let Some((_, other)) = conn.get_ins_pin_first(moving_instance_id) {
                     ui.painter().circle_filled(
                         self.get_pin_pos(other),
                         EDGE_THRESHOLD,
@@ -727,12 +724,12 @@ impl TemplateApp {
             }
             if mouse_up {
                 for conn in &possible_connections {
-                    let (pin1, pin2) = if let Some((pin1, pin2)) = conn.get_pin(moving_instance_id)
-                    {
-                        (pin1, pin2)
-                    } else {
-                        (conn.pin1, conn.pin2)
-                    };
+                    let (pin1, pin2) =
+                        if let Some((pin1, pin2)) = conn.get_ins_pin_first(moving_instance_id) {
+                            (pin1, pin2)
+                        } else {
+                            (conn.pin1, conn.pin2)
+                        };
                     let instance = self.get_instance(pin1.ins);
                     let pin_pos = self.get_pin_pos(pin2);
                     if let InstanceType::Wire(_) = instance.ty {
@@ -749,11 +746,18 @@ impl TemplateApp {
                     }
                 }
                 for conn in &possible_connections {
+                    connected_changed = true;
                     self.connections.insert(*conn);
                 }
                 // Remove any connections not present in possible_connections
-                self.connections
-                    .retain(|conn| possible_connections.contains(conn));
+                self.connections.retain(|conn| {
+                    if possible_connections.contains(conn) {
+                        true
+                    } else {
+                        connected_changed = false;
+                        false
+                    }
+                });
             }
         }
 
@@ -789,6 +793,7 @@ impl TemplateApp {
         }
 
         let d_pressed = ui.input(|i| i.key_pressed(egui::Key::D));
+        // TODO: Placing two items and then removing one by one causes panic
         if d_pressed {
             if let Some(canvas_drag) = &self.canvas_drag {
                 self.remove_instance(canvas_drag.id);
@@ -803,6 +808,58 @@ impl TemplateApp {
             }
         }
 
+        if connected_changed {
+            let mut current = HashSet::new();
+            let mut seen = HashSet::new();
+            for instance in &self.instances {
+                let InstanceType::Power(p) = instance.ty else {
+                    continue;
+                };
+                if !p.on {
+                    continue;
+                }
+                self.flow_current(
+                    Pin {
+                        ins: instance.id,
+                        index: 0, // We know power instance pin is 0
+                    },
+                    &mut current,
+                    &mut seen,
+                );
+            }
+            for instance in &self.instances {
+                match instance.ty {
+                    InstanceType::Gate(_) => {
+                        let input1 = Pin {
+                            ins: instance.id,
+                            index: 0,
+                        };
+                        let input2 = Pin {
+                            ins: instance.id,
+                            index: 2,
+                        };
+                        let input1_p = current.contains(&input1);
+                        let input2_p = current.contains(&input2);
+
+                        match (input1_p, input2_p) {
+                            (true, true) => {}
+                            (true, false) | (false, true) | (false, false) => {
+                                let new_on = Pin {
+                                    ins: instance.id,
+                                    index: 1,
+                                };
+                                current.insert(new_on);
+                                self.flow_current(new_on, &mut current, &mut seen);
+                            }
+                        }
+                    }
+                    InstanceType::Wire(_) => {}
+                    InstanceType::Power(_) => {}
+                }
+            }
+            self.current = current;
+        }
+
         for instance in &self.instances {
             match instance.ty {
                 InstanceType::Gate(gate) => {
@@ -812,7 +869,7 @@ impl TemplateApp {
                     self.draw_power(ui, &power);
                 }
                 InstanceType::Wire(wire) => {
-                    Self::draw_wire(ui, &wire);
+                    self.draw_wire(ui, instance.id, &wire);
                 }
             }
         }
@@ -823,12 +880,15 @@ impl TemplateApp {
         }
     }
 
-    fn draw_wire(ui: &Ui, wire: &WireInstance) {
+    fn draw_wire(&self, ui: &Ui, id: InstanceId, wire: &WireInstance) {
+        let color = if self.current.contains(&Pin { ins: id, index: 0 }) {
+            Color32::BLUE
+        } else {
+            Color32::LIGHT_BLUE
+        };
         let thickness = 6.0;
-        ui.painter().line_segment(
-            [wire.start, wire.end],
-            Stroke::new(thickness, Color32::LIGHT_RED),
-        );
+        ui.painter()
+            .line_segment([wire.start, wire.end], Stroke::new(thickness, color));
     }
 
     fn draw_gate(&self, ui: &mut Ui, gate: &GateInstance) {
@@ -923,6 +983,35 @@ impl TemplateApp {
             && r.id == id
         {
             self.resize = None;
+        }
+        // TODO: Remove from current table
+    }
+
+    fn flow_current(&self, pin: Pin, current: &mut HashSet<Pin>, seen: &mut HashSet<Pin>) {
+        if seen.contains(&pin) {
+            return;
+        }
+        seen.insert(pin);
+        // TODO: Can do better search
+        for connection in &self.connections {
+            let Some((self_pin, other_pin)) = connection.get_pin_first(pin) else {
+                continue;
+            };
+            current.insert(self_pin);
+            current.insert(other_pin);
+            // Also add current for other pins in the other_pin instance
+            let instance = self.get_instance(other_pin.ins);
+            match instance.ty {
+                InstanceType::Gate(_) => {}
+                InstanceType::Wire(_) => {
+                    for pin in instance.pins() {
+                        current.insert(pin);
+                        self.flow_current(pin, current, seen);
+                    }
+                }
+                InstanceType::Power(_) => {}
+            }
+            self.flow_current(other_pin, current, seen);
         }
     }
 }
