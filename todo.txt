@@ -1,3 +1,2 @@
-- Add current
-- Add wires
-- Structure for adding different gates and pins
+- Simplify current calculation
+- Move fields to different modules to mutate easily

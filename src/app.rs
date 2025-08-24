@@ -1,4 +1,4 @@
-use std::{collections::HashSet, hash::Hash, u32};
+use std::{collections::HashSet, hash::Hash};
 
 use egui::{
     Align, Button, Color32, Image, Layout, Pos2, Rect, Sense, Stroke, Ui, Vec2, Widget as _, pos2,
@@ -841,20 +841,16 @@ impl TemplateApp {
                         let input1_p = current.contains(&input1);
                         let input2_p = current.contains(&input2);
 
-                        match (input1_p, input2_p) {
-                            (true, true) => {}
-                            (true, false) | (false, true) | (false, false) => {
-                                let new_on = Pin {
-                                    ins: instance.id,
-                                    index: 1,
-                                };
-                                current.insert(new_on);
-                                self.flow_current(new_on, &mut current, &mut seen);
-                            }
+                        if input1_p && input2_p {
+                            let new_on = Pin {
+                                ins: instance.id,
+                                index: 1,
+                            };
+                            current.insert(new_on);
+                            self.flow_current(new_on, &mut current, &mut seen);
                         }
                     }
-                    InstanceType::Wire(_) => {}
-                    InstanceType::Power(_) => {}
+                    InstanceType::Wire(_) | InstanceType::Power(_) => {}
                 }
             }
             self.current = current;
@@ -1002,14 +998,13 @@ impl TemplateApp {
             // Also add current for other pins in the other_pin instance
             let instance = self.get_instance(other_pin.ins);
             match instance.ty {
-                InstanceType::Gate(_) => {}
+                InstanceType::Gate(_) | InstanceType::Power(_) => {}
                 InstanceType::Wire(_) => {
                     for pin in instance.pins() {
                         current.insert(pin);
                         self.flow_current(pin, current, seen);
                     }
                 }
-                InstanceType::Power(_) => {}
             }
             self.flow_current(other_pin, current, seen);
         }
