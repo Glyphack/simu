@@ -446,12 +446,15 @@ impl TemplateApp {
         // });
         ui.with_layout(Layout::left_to_right(Align::Min), |ui| {
             self.canvas_config = CanvasConfig::default();
+
+            let mut sorted_current: Vec<Pin> = self.current.iter().copied().collect();
+            sorted_current.sort_by_key(|o| o.ins);
             egui::ScrollArea::vertical().show(ui, |ui| {
                 ui.add_sized(
                     vec2(200.0, 50.0),
                     egui::TextEdit::multiline(&mut format!(
                         "world {:#?}\n conn: {:#?}\n current: {:#?}\n moving: {:#?}\n\n\n",
-                        self.instances, self.connections, self.current, self.canvas_drag
+                        self.instances, self.connections, sorted_current, self.canvas_drag
                     )),
                 )
             });
@@ -665,11 +668,6 @@ impl TemplateApp {
                 }
             }
         }
-        log::info!(
-            "drag: {}, resize: {}",
-            self.canvas_drag.is_some(),
-            self.resize.is_some()
-        );
 
         if self.canvas_drag.is_some() || self.resize.is_some() {
             // TODO: Only need to check this on placement and moving.
@@ -749,6 +747,7 @@ impl TemplateApp {
                     connected_changed = true;
                     self.connections.insert(*conn);
                 }
+                let old_len = self.connections.len();
                 // Remove any connections not present in possible_connections
                 self.connections.retain(|conn| {
                     if possible_connections.contains(conn) {
@@ -758,6 +757,9 @@ impl TemplateApp {
                         false
                     }
                 });
+                if old_len != self.connections.len() {
+                    connected_changed = true;
+                }
             }
         }
 
@@ -812,46 +814,7 @@ impl TemplateApp {
             let mut current = HashSet::new();
             let mut seen = HashSet::new();
             for instance in &self.instances {
-                let InstanceType::Power(p) = instance.ty else {
-                    continue;
-                };
-                if !p.on {
-                    continue;
-                }
-                self.flow_current(
-                    Pin {
-                        ins: instance.id,
-                        index: 0, // We know power instance pin is 0
-                    },
-                    &mut current,
-                    &mut seen,
-                );
-            }
-            for instance in &self.instances {
-                match instance.ty {
-                    InstanceType::Gate(_) => {
-                        let input1 = Pin {
-                            ins: instance.id,
-                            index: 0,
-                        };
-                        let input2 = Pin {
-                            ins: instance.id,
-                            index: 2,
-                        };
-                        let input1_p = current.contains(&input1);
-                        let input2_p = current.contains(&input2);
-
-                        if input1_p && input2_p {
-                            let new_on = Pin {
-                                ins: instance.id,
-                                index: 1,
-                            };
-                            current.insert(new_on);
-                            self.flow_current(new_on, &mut current, &mut seen);
-                        }
-                    }
-                    InstanceType::Wire(_) | InstanceType::Power(_) => {}
-                }
+                self.determine_pins_state(*instance, &mut current, &mut seen);
             }
             self.current = current;
         }
@@ -980,34 +943,116 @@ impl TemplateApp {
         {
             self.resize = None;
         }
-        // TODO: Remove from current table
+        // TODO: Remove from current table. There is a panic
     }
 
-    fn flow_current(&self, pin: Pin, current: &mut HashSet<Pin>, seen: &mut HashSet<Pin>) {
-        if seen.contains(&pin) {
-            return;
+    fn determine_pins_state(
+        &self,
+        instance: Instance,
+        current: &mut HashSet<Pin>,
+        seen: &mut HashSet<Pin>,
+    ) {
+        match instance.ty {
+            InstanceType::Gate(_) => {
+                let input1 = Pin {
+                    ins: instance.id,
+                    index: 0,
+                };
+                let input2 = Pin {
+                    ins: instance.id,
+                    index: 2,
+                };
+                let input1_p = self.determine_pin(input1, current, seen);
+                let input2_p = self.determine_pin(input2, current, seen);
+
+                if !(input1_p && input2_p) {
+                    let new_on = Pin {
+                        ins: instance.id,
+                        index: 1,
+                    };
+                    current.insert(new_on);
+                }
+            }
+            InstanceType::Wire(_) => {
+                let input1 = Pin {
+                    ins: instance.id,
+                    index: 0,
+                };
+                let input2 = Pin {
+                    ins: instance.id,
+                    index: 1,
+                };
+                let input_1_p = self.determine_pin(input1, current, seen);
+                let input_2_p = self.determine_pin(input2, current, seen);
+                if input_1_p || input_2_p {
+                    current.insert(input1);
+                    current.insert(input2);
+                }
+            }
+            InstanceType::Power(p) => {
+                let output = Pin {
+                    ins: instance.id,
+                    index: 0,
+                };
+                if p.on {
+                    current.insert(output);
+                }
+            }
         }
-        seen.insert(pin);
-        // TODO: Can do better search
-        for connection in &self.connections {
-            let Some((self_pin, other_pin)) = connection.get_pin_first(pin) else {
-                continue;
-            };
-            current.insert(self_pin);
-            current.insert(other_pin);
-            // Also add current for other pins in the other_pin instance
-            let instance = self.get_instance(other_pin.ins);
-            match instance.ty {
-                InstanceType::Gate(_) | InstanceType::Power(_) => {}
+    }
+
+    fn determine_pin(&self, pin: Pin, current: &mut HashSet<Pin>, seen: &mut HashSet<Pin>) -> bool {
+        if current.contains(&pin) {
+            return true;
+        }
+        let connected_pins = self.get_connected_pins(pin);
+        for connected_pin in connected_pins {
+            let other_instance = self.get_instance(connected_pin.ins);
+            match other_instance.ty {
+                InstanceType::Gate(_) => {
+                    let output = Pin {
+                        ins: other_instance.id,
+                        index: 1,
+                    };
+                    if connected_pin == output {
+                        self.determine_pins_state(*other_instance, current, seen);
+                        if current.contains(&output) {
+                            current.insert(pin);
+                            return true;
+                        }
+                    }
+                }
                 InstanceType::Wire(_) => {
-                    for pin in instance.pins() {
+                    let start = Pin {
+                        ins: other_instance.id,
+                        index: 0,
+                    };
+                    let end = Pin {
+                        ins: other_instance.id,
+                        index: 1,
+                    };
+
+                    let res = if connected_pin == start {
+                        self.determine_pin(end, current, seen)
+                    } else if connected_pin == end {
+                        self.determine_pin(start, current, seen)
+                    } else {
+                        unreachable!("Wire has two heads");
+                    };
+                    if res {
                         current.insert(pin);
-                        self.flow_current(pin, current, seen);
+                        return true;
+                    }
+                }
+                InstanceType::Power(p) => {
+                    if p.on {
+                        current.insert(pin);
+                        return true;
                     }
                 }
             }
-            self.flow_current(other_pin, current, seen);
         }
+        false
     }
 }
 
@@ -1132,6 +1177,16 @@ impl TemplateApp {
         for cid in ids {
             self.get_instance_mut(cid).mov(delta);
         }
+    }
+
+    fn get_connected_pins(&self, pin: Pin) -> Vec<Pin> {
+        let mut res = Vec::new();
+        for conn in &self.connections {
+            if let Some((_, other)) = conn.get_pin_first(pin) {
+                res.push(other);
+            }
+        }
+        res
     }
 }
 
