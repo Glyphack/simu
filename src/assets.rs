@@ -36,6 +36,24 @@ pub static NAND_GRAPHICS: InstanceGraphics = InstanceGraphics {
     ],
 };
 
+pub static AND_GRAPHICS: InstanceGraphics = InstanceGraphics {
+    svg: include_image!("../assets/and.svg"),
+    pins: &[
+        PinInfo {
+            kind: PinKind::Input,
+            offset: Vec2::new(-37.0, 14.5),
+        },
+        PinInfo {
+            kind: PinKind::Output,
+            offset: Vec2::new(40.0, 0.2),
+        },
+        PinInfo {
+            kind: PinKind::Input,
+            offset: Vec2::new(-37.0, -14.5),
+        },
+    ],
+};
+
 pub static POWER_ON_GRAPHICS: InstanceGraphics = InstanceGraphics {
     svg: include_image!("../assets/switch-on.svg"),
     pins: &[PinInfo {

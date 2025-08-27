@@ -17,8 +17,11 @@ pub struct Instance {
 }
 
 impl Instance {
-    /// Clamp a desired move so this instance stays within rect
-    fn clamp_move(&self, move_vec: Vec2, rect: Rect, half_extent: Vec2) -> Vec2 {
+    fn new(id: InstanceId, ty: InstanceType) -> Self {
+        Self { id, ty }
+    }
+
+    fn clamp_mov(&self, move_vec: Vec2, rect: Rect, half_extent: Vec2) -> Vec2 {
         match self.ty {
             InstanceType::Gate(g) => {
                 let target = g.pos + move_vec;
@@ -64,21 +67,6 @@ impl Instance {
                 vec2(safe_dx, safe_dy)
             }
         }
-    }
-    fn _new_wire(id: InstanceId, start: Pos2, end: Pos2) -> Self {
-        Self {
-            id,
-            ty: InstanceType::new_wire(start, end),
-        }
-    }
-    fn _new_gate(id: InstanceId, kind: GateKind, pos: Pos2) -> Self {
-        Self {
-            id,
-            ty: InstanceType::new_gate(kind, pos),
-        }
-    }
-    fn new(id: InstanceId, ty: InstanceType) -> Self {
-        Self { id, ty }
     }
 
     // TODO: Reuse array instead of creating
@@ -167,6 +155,7 @@ impl GateInstance {}
 
 #[derive(serde::Deserialize, serde::Serialize, Copy, Debug, Clone)]
 pub enum GateKind {
+    And,
     Nand,
 }
 
@@ -174,6 +163,7 @@ impl GateKind {
     fn graphics(&self) -> &assets::InstanceGraphics {
         match self {
             Self::Nand => &assets::NAND_GRAPHICS,
+            Self::And => &assets::AND_GRAPHICS,
         }
     }
 }
@@ -480,7 +470,17 @@ impl TemplateApp {
             && let Some(pos) = ui.ctx().pointer_interact_pos()
         {
             self.panel_drag = Some(PanelDrag::new(InstanceType::new_gate(GateKind::Nand, pos)));
-            log::debug!("dragged {:#?}", self.panel_drag);
+        }
+
+        ui.add_space(8.0);
+
+        let image = egui::Image::new(GateKind::And.graphics().svg.clone()).max_height(70.0);
+        let and_resp = ui.add(egui::ImageButton::new(image).sense(Sense::click_and_drag()));
+
+        if and_resp.dragged()
+            && let Some(pos) = ui.ctx().pointer_interact_pos()
+        {
+            self.panel_drag = Some(PanelDrag::new(InstanceType::new_gate(GateKind::And, pos)));
         }
 
         ui.add_space(8.0);
@@ -542,7 +542,7 @@ impl TemplateApp {
                         );
                         let desired = mouse - g.pos;
                         let tmp = Instance::new(InstanceId(0), InstanceType::Gate(*g));
-                        let delta = tmp.clamp_move(desired, canvas_rect, half_extent);
+                        let delta = tmp.clamp_mov(desired, canvas_rect, half_extent);
                         g.pos += delta;
                     }
                     InstanceType::Power(p) => {
@@ -552,13 +552,13 @@ impl TemplateApp {
                         );
                         let desired = mouse - p.pos;
                         let tmp = Instance::new(InstanceId(0), InstanceType::Power(*p));
-                        let delta = tmp.clamp_move(desired, canvas_rect, half_extent);
+                        let delta = tmp.clamp_mov(desired, canvas_rect, half_extent);
                         p.pos += delta;
                     }
                     InstanceType::Wire(w) => {
                         let desired = mouse - w.start;
                         let tmp = Instance::new(InstanceId(0), InstanceType::Wire(*w));
-                        let delta = tmp.clamp_move(desired, canvas_rect, vec2(0.0, 0.0));
+                        let delta = tmp.clamp_mov(desired, canvas_rect, vec2(0.0, 0.0));
                         w.start += delta;
                         w.end += delta;
                     }
@@ -914,6 +914,7 @@ impl TemplateApp {
         i
     }
 
+    // How much the pin should move to end up in the new position?
     fn move_pin_delta(&self, pin: Pin, new_pos: Pos2) -> Vec2 {
         let instance = self.get_instance(pin.ins);
         let pin_pos = self.get_pin_pos(pin);
@@ -930,6 +931,8 @@ impl TemplateApp {
         }
     }
 
+    // TODO: Remove from current table
+    // TODO: This function is not correct because we shift elements
     fn remove_instance(&mut self, id: InstanceId) {
         self.connections.retain(|f| !f.involves(id));
         self.instances.remove(id.usize());
@@ -943,7 +946,6 @@ impl TemplateApp {
         {
             self.resize = None;
         }
-        // TODO: Remove from current table. There is a panic
     }
 
     fn determine_pins_state(
@@ -953,26 +955,48 @@ impl TemplateApp {
         seen: &mut HashSet<Pin>,
     ) {
         match instance.ty {
-            InstanceType::Gate(_) => {
-                let input1 = Pin {
-                    ins: instance.id,
-                    index: 0,
-                };
-                let input2 = Pin {
-                    ins: instance.id,
-                    index: 2,
-                };
-                let input1_p = self.determine_pin(input1, current, seen);
-                let input2_p = self.determine_pin(input2, current, seen);
-
-                if !(input1_p && input2_p) {
-                    let new_on = Pin {
+            InstanceType::Gate(g) => match g.kind {
+                GateKind::And => {
+                    let input1 = Pin {
                         ins: instance.id,
-                        index: 1,
+                        index: 0,
                     };
-                    current.insert(new_on);
+                    let input2 = Pin {
+                        ins: instance.id,
+                        index: 2,
+                    };
+                    let input1_p = self.determine_pin(input1, current, seen);
+                    let input2_p = self.determine_pin(input2, current, seen);
+
+                    if input1_p && input2_p {
+                        let new_on = Pin {
+                            ins: instance.id,
+                            index: 1,
+                        };
+                        current.insert(new_on);
+                    }
                 }
-            }
+                GateKind::Nand => {
+                    let input1 = Pin {
+                        ins: instance.id,
+                        index: 0,
+                    };
+                    let input2 = Pin {
+                        ins: instance.id,
+                        index: 2,
+                    };
+                    let input1_p = self.determine_pin(input1, current, seen);
+                    let input2_p = self.determine_pin(input2, current, seen);
+
+                    if !(input1_p && input2_p) {
+                        let new_on = Pin {
+                            ins: instance.id,
+                            index: 1,
+                        };
+                        current.insert(new_on);
+                    }
+                }
+            },
             InstanceType::Wire(_) => {
                 let input1 = Pin {
                     ins: instance.id,
@@ -1088,7 +1112,7 @@ impl TemplateApp {
         pin.position_from(self.get_instance(pin.ins))
     }
 
-    fn get_connected_instances(&self, id: InstanceId) -> Vec<InstanceId> {
+    fn _get_connected_instances(&self, id: InstanceId) -> Vec<InstanceId> {
         let mut connecteds = Vec::new();
         for con in &self.connections {
             if con.pin1.ins == id {
@@ -1102,7 +1126,7 @@ impl TemplateApp {
         connecteds
     }
 
-    fn collect_connected_instances(&self, root: InstanceId) -> Vec<InstanceId> {
+    fn _collect_connected_instances(&self, root: InstanceId) -> Vec<InstanceId> {
         let mut stack = vec![root];
         let mut seen: HashSet<InstanceId> = HashSet::new();
         let mut out = Vec::new();
@@ -1112,7 +1136,7 @@ impl TemplateApp {
             }
             seen.insert(id);
             out.push(id);
-            for n in self.get_connected_instances(id) {
+            for n in self._get_connected_instances(id) {
                 stack.push(n);
             }
         }
@@ -1172,13 +1196,42 @@ impl TemplateApp {
     }
 
     fn mov_component_with_connected(&mut self, id: InstanceId, desired: Vec2, rect: Rect) {
-        let ids = self.collect_connected_instances(id);
-        let delta = self.compute_within_bounds_delta(&ids, desired, rect);
-        for cid in ids {
-            self.get_instance_mut(cid).mov(delta);
+        let connected_pins = self.get_connected_pins_to_instance(id);
+        let delta = self.compute_within_bounds_delta(&[id], desired, rect);
+        self.get_instance_mut(id).mov(delta);
+        for pin in connected_pins {
+            let instance = self.get_instance_mut(pin.ins);
+            match &mut instance.ty {
+                InstanceType::Wire(wire_instance) => {
+                    if pin.index == 0 {
+                        wire_instance.start += delta;
+                    } else {
+                        wire_instance.end += delta;
+                    }
+                }
+                _ => {
+                    instance.mov(delta);
+                }
+            }
         }
     }
 
+    /// Return connected pins connected to this instance
+    fn get_connected_pins_to_instance(&self, id: InstanceId) -> Vec<Pin> {
+        let mut connected = Vec::new();
+        for con in &self.connections {
+            if con.pin1.ins == id {
+                connected.push(con.pin2);
+            }
+            if con.pin2.ins == id {
+                connected.push(con.pin1);
+            }
+        }
+
+        connected
+    }
+
+    /// Return connected pins to this pin
     fn get_connected_pins(&self, pin: Pin) -> Vec<Pin> {
         let mut res = Vec::new();
         for conn in &self.connections {
