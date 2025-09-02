@@ -1,8 +1,8 @@
 use std::{collections::HashSet, hash::Hash};
 
 use egui::{
-    Align, Button, Color32, Image, Layout, Pos2, Rect, Sense, Stroke, Ui, Vec2, Widget as _, pos2,
-    vec2,
+    Align, Button, Color32, CornerRadius, Image, Layout, Pos2, Rect, Sense, Stroke, StrokeKind, Ui,
+    Vec2, Widget as _, pos2, vec2,
 };
 
 use crate::{assets, config::CanvasConfig};
@@ -397,6 +397,11 @@ pub struct TemplateApp {
     /// Currently dragged gate id from canvas
     canvas_drag: Option<CanvasDrag>,
 
+    /// If the user started a selection
+    selection: Option<Pos2>,
+
+    selected: HashSet<InstanceId>,
+
     /// An item is being resized
     resize: Option<Resize>,
 
@@ -414,6 +419,8 @@ impl Default for TemplateApp {
             panel_drag: None,
             canvas_drag: None,
             resize: None,
+            selection: None,
+            selected: Default::default(),
             canvas_config: CanvasConfig::default(),
         }
     }
@@ -443,8 +450,8 @@ impl TemplateApp {
                 ui.add_sized(
                     vec2(200.0, 50.0),
                     egui::TextEdit::multiline(&mut format!(
-                        "world {:#?}\n conn: {:#?}\n current: {:#?}\n moving: {:#?}\n\n\n",
-                        self.instances, self.connections, sorted_current, self.canvas_drag
+                        "world {:#?}\n conn: {:#?}\n current: {:#?}\n moving: {:#?}\n selected: {:#?}\n\n\n",
+                        self.instances, self.connections, sorted_current, self.canvas_drag, self.selected
                     )),
                 )
             });
@@ -498,7 +505,7 @@ impl TemplateApp {
         let wire_resp = ui.add(
             Button::new("Wire")
                 .sense(Sense::click_and_drag())
-                .min_size(vec2(48.0, 30.0)),
+                .min_size(vec2(78.0, 30.0)),
         );
         if wire_resp.dragged()
             && let Some(pos) = ui.ctx().pointer_interact_pos()
@@ -566,7 +573,7 @@ impl TemplateApp {
             }
             if inside_rect(&canvas_rect, &pd.ty) {
                 match pd.ty {
-                    InstanceType::Gate(gate) => self.draw_gate(ui, &gate),
+                    InstanceType::Gate(gate) => self.draw_gate(ui, InstanceId(u32::MAX), &gate),
                     InstanceType::Power(power) => self.draw_power(ui, &power),
                     InstanceType::Wire(wire) => self.draw_wire(ui, InstanceId(u32::MAX), &wire),
                 }
@@ -608,6 +615,7 @@ impl TemplateApp {
             && self.panel_drag.is_none()
             && self.canvas_drag.is_none()
             && self.resize.is_none()
+            && self.selection.is_none()
         {
             let i = self.interacted_instance(mouse_pos);
             if let Some(instance) = i {
@@ -669,6 +677,47 @@ impl TemplateApp {
             }
         }
 
+        // Make a selection
+        if self.selection.is_none()
+            && self.panel_drag.is_none()
+            && self.canvas_drag.is_none()
+            && pointer_pressed
+            && let Some(mouse_pos) = pointer_pos
+            && canvas_rect.contains(mouse_pos)
+            && self.interacted_instance(mouse_pos).is_none()
+        {
+            self.selection = Some(mouse_pos);
+        }
+        if let Some(selection) = self.selection
+            && let Some(mouse_pos) = pointer_pos
+        {
+            let x = mouse_pos.x.clamp(canvas_rect.left(), canvas_rect.right());
+            let y = mouse_pos.y.clamp(canvas_rect.top(), canvas_rect.bottom());
+            let rect = Rect::from_two_pos(selection, pos2(x, y));
+            ui.painter().rect_stroke(
+                rect,
+                CornerRadius::default(),
+                Stroke::new(2.0, Color32::DARK_BLUE),
+                StrokeKind::Middle,
+            );
+        }
+
+        // TODO: Does not work breaks selection
+        // if let Some(mouse_pos) = pointer_pos
+        //     && self.selection.is_none()
+        // {
+        //     if let Some(i) = {
+        //         let id_opt = self.interacted_instance(mouse_pos).map(|c| c.id);
+        //         id_opt
+        //     } {
+        //         self.selected.retain(|id| *id == i);
+        //         self.selected.insert(i);
+        //     } else {
+        //         self.selected.clear();
+        //     }
+        // }
+
+        // Create connections
         if self.canvas_drag.is_some() || self.resize.is_some() {
             // TODO: Only need to check this on placement and moving.
             // Also use a better way than iterating on everything.
@@ -822,7 +871,7 @@ impl TemplateApp {
         for instance in &self.instances {
             match instance.ty {
                 InstanceType::Gate(gate) => {
-                    self.draw_gate(ui, &gate);
+                    self.draw_gate(ui, instance.id, &gate);
                 }
                 InstanceType::Power(power) => {
                     self.draw_power(ui, &power);
@@ -836,6 +885,18 @@ impl TemplateApp {
         if mouse_up {
             self.resize = None;
             self.canvas_drag = None;
+            if let Some(selection) = self.selection
+                && let Some(mouse_pos) = pointer_pos
+            {
+                // TODO sync with other rect
+                let rect = Rect::from_two_pos(selection, mouse_pos);
+                let instances = self.selected_instances(rect);
+                self.selected = instances;
+                self.selection = None;
+            } else {
+                self.selected.clear();
+                self.selection = None;
+            }
         }
     }
 
@@ -850,10 +911,23 @@ impl TemplateApp {
             .line_segment([wire.start, wire.end], Stroke::new(thickness, color));
     }
 
-    fn draw_gate(&self, ui: &mut Ui, gate: &GateInstance) {
+    fn draw_gate(&self, ui: &mut Ui, instance_id: InstanceId, gate: &GateInstance) {
         let rect = Rect::from_center_size(gate.pos, self.canvas_config.base_gate_size);
         let image = Image::new(gate.kind.graphics().svg.clone()).fit_to_exact_size(rect.size());
         ui.put(rect, image);
+
+        if self.selected.contains(&instance_id) {
+            let outer = Rect::from_center_size(
+                gate.pos,
+                self.canvas_config.base_gate_size + vec2(3.0, 3.0),
+            );
+            ui.painter().rect_stroke(
+                outer,
+                CornerRadius::default(),
+                Stroke::new(2.0, Color32::DARK_BLUE),
+                StrokeKind::Middle,
+            );
+        }
 
         for pin in gate.kind.graphics().pins {
             let pin_pos = gate.pos + pin.offset;
@@ -880,6 +954,30 @@ impl TemplateApp {
             ui.painter()
                 .circle_filled(pin_pos, self.canvas_config.base_pin_size, color);
         }
+    }
+
+    fn selected_instances(&self, rect: Rect) -> HashSet<InstanceId> {
+        let mut instances = HashSet::new();
+        for instance in &self.instances {
+            match instance.ty {
+                InstanceType::Gate(gate) => {
+                    if rect.contains(gate.pos) {
+                        instances.insert(instance.id);
+                    }
+                }
+                InstanceType::Power(power) => {
+                    if rect.contains(power.pos) {
+                        instances.insert(instance.id);
+                    }
+                }
+                InstanceType::Wire(wire) => {
+                    if rect.contains(wire.start) && rect.contains(wire.end) {
+                        instances.insert(instance.id);
+                    }
+                }
+            }
+        }
+        instances
     }
 
     fn interacted_instance(&self, mouse_pos: Pos2) -> Option<&Instance> {
