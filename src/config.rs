@@ -6,6 +6,7 @@ pub struct CanvasConfig {
     pub base_pin_size: f32,
     pub base_input_pin_color: Color32,
     pub base_output_pin_color: Color32,
+    pub wire_thickness: f32,
 }
 
 impl Default for CanvasConfig {
@@ -15,6 +16,7 @@ impl Default for CanvasConfig {
             base_pin_size: 4.5,
             base_input_pin_color: Color32::RED,
             base_output_pin_color: Color32::GREEN,
+            wire_thickness: 6.0,
         }
     }
 }

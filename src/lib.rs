@@ -3,4 +3,4 @@
 mod app;
 mod assets;
 mod config;
-pub use app::TemplateApp;
+pub use app::App;

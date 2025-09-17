@@ -54,6 +54,78 @@ pub static AND_GRAPHICS: InstanceGraphics = InstanceGraphics {
     ],
 };
 
+pub static OR_GRAPHICS: InstanceGraphics = InstanceGraphics {
+    svg: include_image!("../assets/or.svg"),
+    pins: &[
+        PinInfo {
+            kind: PinKind::Input,
+            offset: Vec2::new(-37.0, 14.5),
+        },
+        PinInfo {
+            kind: PinKind::Output,
+            offset: Vec2::new(40.0, 0.2),
+        },
+        PinInfo {
+            kind: PinKind::Input,
+            offset: Vec2::new(-37.0, -14.5),
+        },
+    ],
+};
+
+pub static NOR_GRAPHICS: InstanceGraphics = InstanceGraphics {
+    svg: include_image!("../assets/nor.svg"),
+    pins: &[
+        PinInfo {
+            kind: PinKind::Input,
+            offset: Vec2::new(-37.0, 14.5),
+        },
+        PinInfo {
+            kind: PinKind::Output,
+            offset: Vec2::new(40.0, 0.2),
+        },
+        PinInfo {
+            kind: PinKind::Input,
+            offset: Vec2::new(-37.0, -14.5),
+        },
+    ],
+};
+
+pub static XOR_GRAPHICS: InstanceGraphics = InstanceGraphics {
+    svg: include_image!("../assets/xor.svg"),
+    pins: &[
+        PinInfo {
+            kind: PinKind::Input,
+            offset: Vec2::new(-37.0, 14.5),
+        },
+        PinInfo {
+            kind: PinKind::Output,
+            offset: Vec2::new(40.0, 0.2),
+        },
+        PinInfo {
+            kind: PinKind::Input,
+            offset: Vec2::new(-37.0, -14.5),
+        },
+    ],
+};
+
+pub static XNOR_GRAPHICS: InstanceGraphics = InstanceGraphics {
+    svg: include_image!("../assets/xnor.svg"),
+    pins: &[
+        PinInfo {
+            kind: PinKind::Input,
+            offset: Vec2::new(-37.0, 14.5),
+        },
+        PinInfo {
+            kind: PinKind::Output,
+            offset: Vec2::new(40.0, 0.2),
+        },
+        PinInfo {
+            kind: PinKind::Input,
+            offset: Vec2::new(-37.0, -14.5),
+        },
+    ],
+};
+
 pub static POWER_ON_GRAPHICS: InstanceGraphics = InstanceGraphics {
     svg: include_image!("../assets/switch-on.svg"),
     pins: &[PinInfo {
