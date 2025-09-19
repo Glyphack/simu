@@ -4,7 +4,7 @@ use std::hash::Hash;
 
 use egui::{
     Align, Button, Color32, CornerRadius, Image, Layout, Pos2, Rect, Sense, Stroke, StrokeKind, Ui,
-    Widget as _, vec2,
+    Vec2, Widget as _, vec2,
 };
 use slotmap::{Key as _, SecondaryMap, SlotMap};
 
@@ -15,17 +15,24 @@ pub const WIRE_HIT_DISTANCE: f32 = 10.0;
 
 pub const COLOR_PIN_DETACH_HINT: Color32 = Color32::RED;
 pub const COLOR_PIN_POWERED_OUTLINE: Color32 = Color32::BLUE;
-pub const COLOR_WIRE_POWERED: Color32 = Color32::BLUE;
-pub const COLOR_WIRE_IDLE: Color32 = Color32::DARK_BLUE;
-pub const COLOR_WIRE_HOVER: Color32 = Color32::GREEN;
+pub const COLOR_WIRE_POWERED: Color32 = Color32::GREEN;
+pub const COLOR_WIRE_IDLE: Color32 = Color32::LIGHT_BLUE;
+pub const COLOR_WIRE_HOVER: Color32 = Color32::GRAY;
 pub const COLOR_HOVER_OUTLINE: Color32 = Color32::GRAY;
 pub const COLOR_ENDPOINT_HOVER: Color32 = Color32::LIGHT_YELLOW;
 pub const COLOR_POTENTIAL_CONN_HIGHLIGHT: Color32 = Color32::LIGHT_YELLOW;
-pub const COLOR_SELECTION_HIGHLIGHT: Color32 = Color32::LIGHT_YELLOW;
-pub const COLOR_SELECTION_BOX: Color32 = Color32::YELLOW;
+pub const COLOR_SELECTION_HIGHLIGHT: Color32 = Color32::GRAY;
+pub const COLOR_SELECTION_BOX: Color32 = Color32::LIGHT_BLUE;
 
 slotmap::new_key_type! {
     pub struct InstanceId;
+}
+
+#[derive(serde::Deserialize, serde::Serialize, Copy, Debug, Clone)]
+pub enum InstancePosOffset {
+    Gate(GateKind, Vec2),
+    Power(Vec2),
+    Wire(Vec2, Vec2),
 }
 
 #[derive(serde::Deserialize, serde::Serialize, Copy, Debug, Clone)]
@@ -164,7 +171,7 @@ pub struct DB {
 }
 
 impl DB {
-    pub fn new_gate(&mut self, g: Gate) {
+    pub fn new_gate(&mut self, g: Gate) -> InstanceId {
         let k = self.instances.insert(());
         self.gates.insert(k, g);
         let kind = self
@@ -173,18 +180,21 @@ impl DB {
             .expect("gate must exist right after insertion")
             .kind;
         self.types.insert(k, InstanceKind::Gate(kind));
+        k
     }
 
-    pub fn new_power(&mut self, p: Power) {
+    pub fn new_power(&mut self, p: Power) -> InstanceId {
         let k = self.instances.insert(());
         self.powers.insert(k, p);
         self.types.insert(k, InstanceKind::Power);
+        k
     }
 
-    pub fn new_wire(&mut self, w: Wire) {
+    pub fn new_wire(&mut self, w: Wire) -> InstanceId {
         let k = self.instances.insert(());
         self.wires.insert(k, w);
         self.types.insert(k, InstanceKind::Wire);
+        k
     }
 
     pub fn ty(&self, id: InstanceId) -> InstanceKind {
@@ -280,6 +290,8 @@ pub struct App {
     pub show_debug: bool,
     // selection set and move preview
     pub selected: std::collections::HashSet<InstanceId>,
+    //Copied. Items with their offset compared to a middle point in the rectangle
+    pub clipboard: Vec<InstancePosOffset>,
 }
 
 impl Default for App {
@@ -301,6 +313,7 @@ impl Default for App {
             current_dirty: true,
             show_debug: true,
             selected: Default::default(),
+            clipboard: Default::default(),
         }
     }
 }
@@ -394,6 +407,8 @@ impl App {
         writeln!(out, "hovered: {:?}", self.hovered).ok();
         writeln!(out, "drag: {:?}", self.drag).ok();
         writeln!(out, "potential_conns: {}", self.potential_connections.len()).ok();
+        writeln!(out, "clipboard: {:?}", self.clipboard).ok();
+        writeln!(out, "selected: {:?}", self.selected).ok();
 
         writeln!(out, "\nGates:").ok();
         for (id, g) in &self.db.gates {
@@ -587,6 +602,7 @@ impl App {
         }
     }
 
+    #[expect(clippy::too_many_lines)]
     fn draw_canvas(&mut self, ui: &mut Ui) {
         let (resp, _painter) = ui.allocate_painter(ui.available_size(), Sense::hover());
         let canvas_rect = resp.rect;
@@ -596,10 +612,94 @@ impl App {
         let right_clicked = ui.input(|i| i.pointer.secondary_clicked());
         let mouse_pos = ui.ctx().pointer_interact_pos();
 
+        let mut copy_event_detected = false;
+        let mut paste_event_detected = false;
+        ui.ctx().input(|i| {
+            for event in &i.events {
+                if matches!(event, egui::Event::Copy) {
+                    log::info!("Copy detected");
+                    copy_event_detected = true;
+                }
+                if let egui::Event::Paste(_) = event {
+                    paste_event_detected = true;
+                }
+            }
+        });
+
         let d_pressed = ui.input(|i| i.key_pressed(egui::Key::D));
 
         if d_pressed && let Some(id) = self.hovered.take() {
             self.delete_instance(id);
+        }
+
+        if copy_event_detected && !self.selected.is_empty() {
+            let mut points = vec![];
+            for &selected in &self.selected {
+                match self.db.ty(selected) {
+                    InstanceKind::Gate(_) => {
+                        let g = self.db.get_gate(selected);
+                        points.push(g.pos);
+                    }
+                    InstanceKind::Power => {
+                        let p = self.db.get_power(selected);
+                        points.push(p.pos);
+                    }
+                    InstanceKind::Wire => {
+                        let w = self.db.get_wire(selected);
+                        points.push(w.start);
+                        points.push(w.end);
+                    }
+                }
+            }
+            let rect = Rect::from_points(&points);
+            let center = rect.center();
+
+            let mut object_pos = vec![];
+
+            for &selected in &self.selected {
+                let ty = self.db.ty(selected);
+                match ty {
+                    InstanceKind::Gate(kind) => {
+                        let g = self.db.get_gate(selected);
+                        object_pos.push(InstancePosOffset::Gate(kind, center - g.pos));
+                    }
+                    InstanceKind::Power => {
+                        let p = self.db.get_power(selected);
+                        object_pos.push(InstancePosOffset::Power(center - p.pos));
+                    }
+                    InstanceKind::Wire => {
+                        let w = self.db.get_wire(selected);
+                        object_pos.push(InstancePosOffset::Wire(center - w.start, center - w.end));
+                    }
+                }
+            }
+
+            self.clipboard = object_pos
+        }
+
+        if paste_event_detected
+            && !self.clipboard.is_empty()
+            && let Some(mouse) = mouse_pos
+        {
+            for to_paste in self.clipboard.clone() {
+                let id = match to_paste {
+                    InstancePosOffset::Gate(gate_kind, offset) => self.db.new_gate(Gate {
+                        kind: gate_kind,
+                        pos: mouse - offset,
+                    }),
+                    InstancePosOffset::Power(offset) => self.db.new_power(Power {
+                        pos: mouse - offset,
+                        on: false,
+                    }),
+                    InstancePosOffset::Wire(s, e) => self.db.new_wire(Wire {
+                        start: mouse - s,
+                        end: mouse - e,
+                    }),
+                };
+                self.potential_connections = self.compute_potential_connections_for_instance(id);
+                self.finalize_connections_for_instance(id, &canvas_rect);
+            }
+            self.selected.clear();
         }
 
         if let Some(mouse) = mouse_pos {
