@@ -1,2 +1,0 @@
-- Simplify current calculation
-- Move fields to different modules to mutate easily

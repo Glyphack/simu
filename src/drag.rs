@@ -9,11 +9,29 @@ use crate::app::{
 
 #[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
 pub enum Drag {
-    Panel { pos: Pos2, kind: InstanceKind },
-    Canvas { id: InstanceId, offset: Vec2 },
-    Resize { id: InstanceId, start: bool },
-    Selecting { start: Pos2 },
-    MoveSelection { start: Pos2, has_dragged: bool },
+    Panel {
+        pos: Pos2,
+        kind: InstanceKind,
+    },
+    Canvas {
+        id: InstanceId,
+        offset: Vec2,
+    },
+    Resize {
+        id: InstanceId,
+        start: bool,
+    },
+    Selecting {
+        start: Pos2,
+    },
+    MoveSelection {
+        start: Pos2,
+        has_dragged: bool,
+    },
+    PinToWire {
+        source_pin: Pin,
+        wire_id: InstanceId,
+    },
 }
 
 impl App {
@@ -70,7 +88,28 @@ impl App {
             match self.db.ty(hovered) {
                 InstanceKind::Gate(_) => {
                     if let Some(pin) = self.find_near_pin(hovered, mouse_pos) {
-                        self.detach_pin(pin);
+                        if self.is_pin_connected(pin) {
+                            self.detach_pin(pin);
+                        } else {
+                            let pin_pos = self.db.pin_position(pin);
+                            let wire_id = self.db.new_wire(Wire {
+                                start: pin_pos,
+                                end: mouse_pos,
+                            });
+                            self.db.connections.insert(Connection::new(
+                                pin,
+                                Pin {
+                                    ins: wire_id,
+                                    index: 0,
+                                },
+                            ));
+                            self.drag = Some(Drag::PinToWire {
+                                source_pin: pin,
+                                wire_id,
+                            });
+                            self.current_dirty = true;
+                            return;
+                        }
                     }
                     let gate = self.db.get_gate(hovered);
                     let offset = gate.pos - mouse_pos;
@@ -81,7 +120,28 @@ impl App {
                 }
                 InstanceKind::Power => {
                     if let Some(pin) = self.find_near_pin(hovered, mouse_pos) {
-                        self.detach_pin(pin);
+                        if self.is_pin_connected(pin) {
+                            self.detach_pin(pin);
+                        } else {
+                            let pin_pos = self.db.pin_position(pin);
+                            let wire_id = self.db.new_wire(Wire {
+                                start: pin_pos,
+                                end: mouse_pos,
+                            });
+                            self.db.connections.insert(Connection::new(
+                                pin,
+                                Pin {
+                                    ins: wire_id,
+                                    index: 0,
+                                },
+                            ));
+                            self.drag = Some(Drag::PinToWire {
+                                source_pin: pin,
+                                wire_id,
+                            });
+                            self.current_dirty = true;
+                            return;
+                        }
                     }
                     let power = self.db.get_power(hovered);
                     let offset = power.pos - mouse_pos;
@@ -215,6 +275,21 @@ impl App {
                     index: u32::from(!start),
                 });
             }
+            Some(Drag::PinToWire {
+                source_pin: _,
+                wire_id,
+            }) => {
+                let mut p = mouse;
+                p.x = p.x.clamp(canvas_rect.left(), canvas_rect.right());
+                p.y = p.y.clamp(canvas_rect.top(), canvas_rect.bottom());
+                let wire = self.db.get_wire_mut(wire_id);
+                wire.end = p;
+
+                self.potential_connections = self.compute_potential_connections_for_pin(Pin {
+                    ins: wire_id,
+                    index: 1,
+                });
+            }
             None => {}
         }
 
@@ -291,6 +366,19 @@ impl App {
                     let pin = Pin {
                         ins: id,
                         index: u32::from(!start),
+                    };
+                    self.finalize_connections_for_pin(pin, canvas_rect);
+                }
+                self.potential_connections.clear();
+            }
+            Drag::PinToWire {
+                source_pin: _,
+                wire_id,
+            } => {
+                if !self.potential_connections.is_empty() {
+                    let pin = Pin {
+                        ins: wire_id,
+                        index: 1,
                     };
                     self.finalize_connections_for_pin(pin, canvas_rect);
                 }

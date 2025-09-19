@@ -3,8 +3,8 @@ use std::fmt::Write as _;
 use std::hash::Hash;
 
 use egui::{
-    Align, Button, Color32, CornerRadius, Image, Layout, Pos2, Rect, Sense, Stroke, StrokeKind, Ui,
-    Vec2, Widget as _, vec2,
+    Align, Button, Color32, CornerRadius, Layout, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2,
+    Widget as _, pos2, vec2,
 };
 use slotmap::{Key as _, SecondaryMap, SlotMap};
 
@@ -13,8 +13,12 @@ use crate::{assets, config::CanvasConfig, drag::Drag};
 pub const EDGE_THRESHOLD: f32 = 10.0;
 pub const WIRE_HIT_DISTANCE: f32 = 10.0;
 
+pub const GRID_SIZE: f32 = 20.0;
+pub const COLOR_GRID_LIGHT: Color32 = Color32::from_rgb(230, 230, 230);
+pub const COLOR_GRID_DARK: Color32 = Color32::from_rgb(40, 40, 40);
+
 pub const COLOR_PIN_DETACH_HINT: Color32 = Color32::RED;
-pub const COLOR_PIN_POWERED_OUTLINE: Color32 = Color32::BLUE;
+pub const COLOR_PIN_POWERED_OUTLINE: Color32 = Color32::GREEN;
 pub const COLOR_WIRE_POWERED: Color32 = Color32::GREEN;
 pub const COLOR_WIRE_IDLE: Color32 = Color32::LIGHT_BLUE;
 pub const COLOR_WIRE_HOVER: Color32 = Color32::GRAY;
@@ -157,7 +161,6 @@ pub struct Wire {
 
 impl Wire {}
 
-#[derive(serde::Deserialize, serde::Serialize)]
 pub struct DB {
     // Primary key allocator; ensures unique keys across all instance kinds
     pub instances: SlotMap<InstanceId, ()>,
@@ -275,6 +278,105 @@ impl DB {
     }
 }
 
+// Custom serialization format for DB that avoids SlotMap version issues
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SerializableDB {
+    gates: Vec<(u64, Gate)>,
+    powers: Vec<(u64, Power)>,
+    wires: Vec<(u64, Wire)>,
+    connections: HashSet<Connection>,
+}
+
+impl serde::Serialize for DB {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut gates = Vec::new();
+        let mut powers = Vec::new();
+        let mut wires = Vec::new();
+
+        for (id, gate) in &self.gates {
+            gates.push((id.data().as_ffi(), *gate));
+        }
+        for (id, power) in &self.powers {
+            powers.push((id.data().as_ffi(), *power));
+        }
+        for (id, wire) in &self.wires {
+            wires.push((id.data().as_ffi(), *wire));
+        }
+
+        let serializable = SerializableDB {
+            gates,
+            powers,
+            wires,
+            connections: self.connections.clone(),
+        };
+
+        serializable.serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for DB {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let serializable = SerializableDB::deserialize(deserializer)?;
+
+        let mut db = Self {
+            instances: SlotMap::with_key(),
+            types: SecondaryMap::new(),
+            gates: SecondaryMap::new(),
+            powers: SecondaryMap::new(),
+            wires: SecondaryMap::new(),
+            connections: serializable.connections,
+        };
+
+        // Reconstruct gates
+        for (raw_id, gate) in serializable.gates {
+            let key_data = slotmap::KeyData::from_ffi(raw_id);
+            let id = InstanceId::from(key_data);
+
+            // Ensure the slot exists in instances
+            while db.instances.len() <= id.data().as_ffi() as usize {
+                db.instances.insert(());
+            }
+
+            db.gates.insert(id, gate);
+            db.types.insert(id, InstanceKind::Gate(gate.kind));
+        }
+
+        // Reconstruct powers
+        for (raw_id, power) in serializable.powers {
+            let key_data = slotmap::KeyData::from_ffi(raw_id);
+            let id = InstanceId::from(key_data);
+
+            while db.instances.len() <= id.data().as_ffi() as usize {
+                db.instances.insert(());
+            }
+
+            db.powers.insert(id, power);
+            db.types.insert(id, InstanceKind::Power);
+        }
+
+        // Reconstruct wires
+        for (raw_id, wire) in serializable.wires {
+            let key_data = slotmap::KeyData::from_ffi(raw_id);
+            let id = InstanceId::from(key_data);
+
+            while db.instances.len() <= id.data().as_ffi() as usize {
+                db.instances.insert(());
+            }
+
+            db.wires.insert(id, wire);
+            db.types.insert(id, InstanceKind::Wire);
+        }
+
+        Ok(db)
+    }
+}
+
 #[derive(serde::Deserialize, serde::Serialize)]
 pub struct App {
     pub canvas_config: CanvasConfig,
@@ -292,6 +394,9 @@ pub struct App {
     pub selected: std::collections::HashSet<InstanceId>,
     //Copied. Items with their offset compared to a middle point in the rectangle
     pub clipboard: Vec<InstancePosOffset>,
+    // For web load functionality - stores pending JSON to load
+    #[serde(skip)]
+    pub pending_load_json: Option<String>,
 }
 
 impl Default for App {
@@ -314,6 +419,7 @@ impl Default for App {
             show_debug: true,
             selected: Default::default(),
             clipboard: Default::default(),
+            pending_load_json: None,
         }
     }
 }
@@ -327,14 +433,26 @@ impl eframe::App for App {
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 let is_web = cfg!(target_arch = "wasm32");
-                if !is_web {
-                    ui.menu_button("File", |ui| {
+
+                ui.menu_button("File", |ui| {
+                    if ui.button("Save Circuit").clicked()
+                        && let Err(e) = self.save_to_file()
+                    {
+                        log::error!("Failed to save circuit: {e}");
+                    }
+                    if ui.button("Load Circuit").clicked()
+                        && let Err(e) = self.load_from_file()
+                    {
+                        log::error!("Failed to load circuit: {e}");
+                    }
+                    if !is_web {
+                        ui.separator();
                         if ui.button("Quit").clicked() {
                             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                         }
-                    });
-                    ui.add_space(16.0);
-                }
+                    }
+                });
+                ui.add_space(16.0);
 
                 ui.menu_button("View", |ui| {
                     ui.checkbox(&mut self.show_debug, "World Debug");
@@ -361,7 +479,49 @@ impl App {
         }
     }
 
+    fn process_pending_load(&mut self) {
+        // First check the local field
+        if let Some(json) = self.pending_load_json.take() {
+            match serde_json::from_str::<Self>(&json) {
+                Ok(mut loaded_app) => {
+                    loaded_app.pending_load_json = None;
+                    *self = loaded_app;
+                    self.current_dirty = true;
+                    log::info!("Circuit loaded successfully from JSON");
+                }
+                Err(e) => log::error!("Failed to parse JSON: {e}"),
+            }
+        } else {
+            // Then check localStorage for web version
+            #[cfg(target_arch = "wasm32")]
+            {
+                use web_sys::window;
+                if let Some(window) = window() {
+                    if let Ok(Some(storage)) = window.local_storage() {
+                        if let Ok(Some(json)) = storage.get_item("simu_pending_load") {
+                            // Clear the stored JSON immediately to prevent repeated loading
+                            storage.remove_item("simu_pending_load").ok();
+
+                            match serde_json::from_str::<Self>(&json) {
+                                Ok(mut loaded_app) => {
+                                    loaded_app.pending_load_json = None;
+                                    *self = loaded_app;
+                                    self.current_dirty = true;
+                                    log::info!("Circuit loaded successfully from web storage");
+                                }
+                                Err(e) => log::error!("Failed to parse JSON from web storage: {e}"),
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     pub fn main_layout(&mut self, ui: &mut Ui) {
+        // Process any pending loads first
+        self.process_pending_load();
+
         if self.show_debug {
             egui::Window::new("Debug logs").show(ui.ctx(), |ui| {
                 egui_logger::logger_ui().show(ui);
@@ -471,7 +631,9 @@ impl App {
 
     #[expect(clippy::too_many_lines)]
     fn draw_panel(&mut self, ui: &mut Ui) {
-        let image = egui::Image::new(GateKind::Nand.graphics().svg.clone()).max_height(70.0);
+        let image = egui::Image::new(GateKind::Nand.graphics().svg.clone())
+            .max_height(70.0)
+            .bg_fill(Color32::WHITE);
         let nand_resp = ui.add(egui::ImageButton::new(image).sense(Sense::click_and_drag()));
 
         if nand_resp.dragged()
@@ -485,7 +647,9 @@ impl App {
 
         ui.add_space(8.0);
 
-        let image = egui::Image::new(GateKind::And.graphics().svg.clone()).max_height(70.0);
+        let image = egui::Image::new(GateKind::And.graphics().svg.clone())
+            .max_height(70.0)
+            .bg_fill(Color32::WHITE);
         let and_resp = ui.add(egui::ImageButton::new(image).sense(Sense::click_and_drag()));
 
         if and_resp.dragged()
@@ -499,7 +663,9 @@ impl App {
 
         ui.add_space(8.0);
 
-        let image = egui::Image::new(GateKind::Or.graphics().svg.clone()).max_height(70.0);
+        let image = egui::Image::new(GateKind::Or.graphics().svg.clone())
+            .max_height(70.0)
+            .bg_fill(Color32::WHITE);
         let or_resp = ui.add(egui::ImageButton::new(image).sense(Sense::click_and_drag()));
 
         if or_resp.dragged()
@@ -513,7 +679,9 @@ impl App {
 
         ui.add_space(8.0);
 
-        let image = egui::Image::new(GateKind::Nor.graphics().svg.clone()).max_height(70.0);
+        let image = egui::Image::new(GateKind::Nor.graphics().svg.clone())
+            .max_height(70.0)
+            .bg_fill(Color32::WHITE);
         let nor_resp = ui.add(egui::ImageButton::new(image).sense(Sense::click_and_drag()));
 
         if nor_resp.dragged()
@@ -527,7 +695,9 @@ impl App {
 
         ui.add_space(8.0);
 
-        let image = egui::Image::new(GateKind::Xor.graphics().svg.clone()).max_height(70.0);
+        let image = egui::Image::new(GateKind::Xor.graphics().svg.clone())
+            .max_height(70.0)
+            .bg_fill(Color32::WHITE);
         let xor_resp = ui.add(egui::ImageButton::new(image).sense(Sense::click_and_drag()));
 
         if xor_resp.dragged()
@@ -541,7 +711,9 @@ impl App {
 
         ui.add_space(8.0);
 
-        let image = egui::Image::new(GateKind::Xnor.graphics().svg.clone()).max_height(70.0);
+        let image = egui::Image::new(GateKind::Xnor.graphics().svg.clone())
+            .max_height(70.0)
+            .bg_fill(Color32::WHITE);
         let xnor_resp = ui.add(egui::ImageButton::new(image).sense(Sense::click_and_drag()));
 
         if xnor_resp.dragged()
@@ -555,7 +727,9 @@ impl App {
 
         ui.add_space(8.0);
 
-        let pwr_image = egui::Image::new(assets::POWER_ON_GRAPHICS.svg.clone()).max_height(70.0);
+        let pwr_image = egui::Image::new(assets::POWER_ON_GRAPHICS.svg.clone())
+            .max_height(70.0)
+            .bg_fill(Color32::WHITE);
         let pwr_resp = ui.add(egui::ImageButton::new(pwr_image).sense(Sense::click_and_drag()));
         if pwr_resp.dragged()
             && let Some(pos) = ui.ctx().pointer_interact_pos()
@@ -607,6 +781,8 @@ impl App {
         let (resp, _painter) = ui.allocate_painter(ui.available_size(), Sense::hover());
         let canvas_rect = resp.rect;
 
+        Self::draw_grid(ui, canvas_rect);
+
         let mouse_up = ui.input(|i| i.pointer.any_released());
         let pointer_pressed = ui.input(|i| i.pointer.primary_down());
         let right_clicked = ui.input(|i| i.pointer.secondary_clicked());
@@ -630,6 +806,12 @@ impl App {
 
         if d_pressed && let Some(id) = self.hovered.take() {
             self.delete_instance(id);
+        } else if d_pressed && self.hovered.is_none() && !self.selected.is_empty() {
+            // Collect IDs to delete to avoid mutable borrow conflict
+            let ids_to_delete: Vec<InstanceId> = self.selected.drain().collect();
+            for id in ids_to_delete {
+                self.delete_instance(id);
+            }
         }
 
         if copy_event_detected && !self.selected.is_empty() {
@@ -674,13 +856,14 @@ impl App {
                 }
             }
 
-            self.clipboard = object_pos
+            self.clipboard = object_pos;
         }
 
         if paste_event_detected
             && !self.clipboard.is_empty()
             && let Some(mouse) = mouse_pos
         {
+            self.selected.clear(); // Clear existing selection before pasting new items
             for to_paste in self.clipboard.clone() {
                 let id = match to_paste {
                     InstancePosOffset::Gate(gate_kind, offset) => self.db.new_gate(Gate {
@@ -698,8 +881,8 @@ impl App {
                 };
                 self.potential_connections = self.compute_potential_connections_for_instance(id);
                 self.finalize_connections_for_instance(id, &canvas_rect);
+                self.selected.insert(id); // Add newly pasted instance to selection
             }
-            self.selected.clear();
         }
 
         if let Some(mouse) = mouse_pos {
@@ -777,10 +960,55 @@ impl App {
         self.draw_selection_highlight(ui);
     }
 
+    fn draw_grid(ui: &Ui, canvas_rect: Rect) {
+        let grid_color = if ui.visuals().dark_mode {
+            COLOR_GRID_DARK
+        } else {
+            COLOR_GRID_LIGHT
+        };
+
+        let painter = ui.painter();
+
+        // Draw vertical lines
+        let start_x = (canvas_rect.left() / GRID_SIZE).floor() * GRID_SIZE;
+        let mut x = start_x;
+        while x <= canvas_rect.right() {
+            if x >= canvas_rect.left() {
+                painter.line_segment(
+                    [pos2(x, canvas_rect.top()), pos2(x, canvas_rect.bottom())],
+                    Stroke::new(1.0, grid_color),
+                );
+            }
+            x += GRID_SIZE;
+        }
+
+        // Draw horizontal lines
+        let start_y = (canvas_rect.top() / GRID_SIZE).floor() * GRID_SIZE;
+        let mut y = start_y;
+        while y <= canvas_rect.bottom() {
+            if y >= canvas_rect.top() {
+                painter.line_segment(
+                    [pos2(canvas_rect.left(), y), pos2(canvas_rect.right(), y)],
+                    Stroke::new(1.0, grid_color),
+                );
+            }
+            y += GRID_SIZE;
+        }
+    }
+
+    fn draw_icon(ui: &mut Ui, source: egui::ImageSource<'_>, rect: Rect) {
+        let mut image = egui::Image::new(source).fit_to_exact_size(rect.size());
+
+        if ui.visuals().dark_mode {
+            image = image.bg_fill(Color32::WHITE);
+        }
+
+        ui.put(rect, image);
+    }
+
     fn draw_gate(&self, ui: &mut Ui, id: InstanceId, gate: &Gate) {
         let rect = Rect::from_center_size(gate.pos, self.canvas_config.base_gate_size);
-        let image = Image::new(gate.kind.graphics().svg.clone()).fit_to_exact_size(rect.size());
-        ui.put(rect, image);
+        Self::draw_icon(ui, gate.kind.graphics().svg.clone(), rect);
 
         for (i, pin) in gate.kind.graphics().pins.iter().enumerate() {
             let pin_pos = gate.pos + pin.offset;
@@ -806,8 +1034,7 @@ impl App {
 
     pub fn draw_gate_preview(&self, ui: &mut Ui, gate_kind: GateKind, pos: Pos2) {
         let rect = Rect::from_center_size(pos, self.canvas_config.base_gate_size);
-        let image = Image::new(gate_kind.graphics().svg.clone()).fit_to_exact_size(rect.size());
-        ui.put(rect, image);
+        Self::draw_icon(ui, gate_kind.graphics().svg.clone(), rect);
 
         for pin in gate_kind.graphics().pins {
             let pin_pos = pos + pin.offset;
@@ -822,8 +1049,7 @@ impl App {
 
     fn draw_power(&self, ui: &mut Ui, id: InstanceId, power: &Power) {
         let rect = Rect::from_center_size(power.pos, self.canvas_config.base_gate_size);
-        let image = Image::new(power.graphics().svg.clone()).fit_to_exact_size(rect.size());
-        ui.put(rect, image);
+        Self::draw_icon(ui, power.graphics().svg.clone(), rect);
 
         for (i, pin) in power.graphics().pins.iter().enumerate() {
             let pin_pos = power.pos + pin.offset;
@@ -850,8 +1076,7 @@ impl App {
     pub fn draw_power_preview(&self, ui: &mut Ui, pos: Pos2) {
         let power = Power { pos, on: true };
         let rect = Rect::from_center_size(power.pos, self.canvas_config.base_gate_size);
-        let image = Image::new(power.graphics().svg.clone()).fit_to_exact_size(rect.size());
-        ui.put(rect, image);
+        Self::draw_icon(ui, power.graphics().svg.clone(), rect);
 
         for pin in power.graphics().pins {
             let pin_pos = power.pos + pin.offset;
@@ -863,7 +1088,6 @@ impl App {
                 .circle_filled(pin_pos, self.canvas_config.base_pin_size, color);
         }
     }
-
     pub fn draw_wire(&self, ui: &Ui, mouse: Wire, hovered: bool, has_current: bool) {
         let mut color = if has_current {
             COLOR_WIRE_POWERED
@@ -972,7 +1196,7 @@ impl App {
         }
     }
 
-    fn is_pin_connected(&self, pin: Pin) -> bool {
+    pub fn is_pin_connected(&self, pin: Pin) -> bool {
         self.db.connections.iter().any(|c| c.a == pin || c.b == pin)
     }
 
