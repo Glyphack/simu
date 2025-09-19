@@ -1,6 +1,7 @@
 #![warn(clippy::all, rust_2018_idioms)]
 
-mod app;
-mod assets;
-mod config;
+pub mod app;
+pub mod assets;
+pub mod config;
+pub mod drag;
 pub use app::App;
