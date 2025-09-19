@@ -606,6 +606,12 @@ impl App {
         let right_clicked = ui.input(|i| i.pointer.secondary_clicked());
         let mouse_pos = ui.ctx().pointer_interact_pos();
 
+        let d_pressed = ui.input(|i| i.key_pressed(egui::Key::D));
+
+        if d_pressed && let Some(id) = self.hovered.take() {
+            self.delete_instance(id);
+        }
+
         if let Some(mouse) = mouse_pos {
             self.handle_dragging(ui, mouse, &canvas_rect);
             self.hovered = self.interacted_instance(mouse);
@@ -1199,6 +1205,19 @@ impl App {
                 self.potential_connections.clear();
             }
         }
+    }
+
+    fn delete_instance(&mut self, id: InstanceId) {
+        self.db.instances.remove(id);
+        self.db.types.remove(id);
+        self.db.gates.remove(id);
+        self.db.powers.remove(id);
+        self.db.wires.remove(id);
+        self.db.connections.retain(|c| !c.involves_instance(id));
+        self.hovered.take();
+        self.selected.remove(&id);
+        self.current.retain(|p| p.ins != id);
+        self.current_dirty = true;
     }
 
     fn compute_potential_connections_for_instance(&self, id: InstanceId) -> HashSet<Connection> {
