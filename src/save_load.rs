@@ -1,4 +1,110 @@
-use crate::App;
+use std::collections::HashSet;
+
+use slotmap::{Key as _, SecondaryMap, SlotMap};
+
+use crate::{
+    App,
+    app::{Connection, DB, Gate, InstanceId, InstanceKind, Power, Wire},
+};
+
+// Custom serialization format for DB that avoids SlotMap version issues
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SerializableDB {
+    gates: Vec<(u64, Gate)>,
+    powers: Vec<(u64, Power)>,
+    wires: Vec<(u64, Wire)>,
+    connections: HashSet<Connection>,
+}
+
+impl serde::Serialize for DB {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut gates = Vec::new();
+        let mut powers = Vec::new();
+        let mut wires = Vec::new();
+
+        for (id, gate) in &self.gates {
+            gates.push((id.data().as_ffi(), *gate));
+        }
+        for (id, power) in &self.powers {
+            powers.push((id.data().as_ffi(), *power));
+        }
+        for (id, wire) in &self.wires {
+            wires.push((id.data().as_ffi(), *wire));
+        }
+
+        let serializable = SerializableDB {
+            gates,
+            powers,
+            wires,
+            connections: self.connections.clone(),
+        };
+
+        serializable.serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for DB {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let serializable = SerializableDB::deserialize(deserializer)?;
+
+        let mut db = Self {
+            instances: SlotMap::with_key(),
+            types: SecondaryMap::new(),
+            gates: SecondaryMap::new(),
+            powers: SecondaryMap::new(),
+            wires: SecondaryMap::new(),
+            connections: serializable.connections,
+        };
+
+        // Reconstruct gates
+        for (raw_id, gate) in serializable.gates {
+            let key_data = slotmap::KeyData::from_ffi(raw_id);
+            let id = InstanceId::from(key_data);
+
+            // Ensure the slot exists in instances
+            while db.instances.len() <= id.data().as_ffi() as usize {
+                db.instances.insert(());
+            }
+
+            db.gates.insert(id, gate);
+            db.types.insert(id, InstanceKind::Gate(gate.kind));
+        }
+
+        // Reconstruct powers
+        for (raw_id, power) in serializable.powers {
+            let key_data = slotmap::KeyData::from_ffi(raw_id);
+            let id = InstanceId::from(key_data);
+
+            while db.instances.len() <= id.data().as_ffi() as usize {
+                db.instances.insert(());
+            }
+
+            db.powers.insert(id, power);
+            db.types.insert(id, InstanceKind::Power);
+        }
+
+        // Reconstruct wires
+        for (raw_id, wire) in serializable.wires {
+            let key_data = slotmap::KeyData::from_ffi(raw_id);
+            let id = InstanceId::from(key_data);
+
+            while db.instances.len() <= id.data().as_ffi() as usize {
+                db.instances.insert(());
+            }
+
+            db.wires.insert(id, wire);
+            db.types.insert(id, InstanceKind::Wire);
+        }
+
+        Ok(db)
+    }
+}
 
 impl App {
     #[cfg(not(target_arch = "wasm32"))]
@@ -149,5 +255,44 @@ impl App {
         input.click();
 
         Ok(())
+    }
+
+    pub fn process_pending_load(&mut self) {
+        // First check the local field
+        if let Some(json) = self.pending_load_json.take() {
+            match serde_json::from_str::<Self>(&json) {
+                Ok(mut loaded_app) => {
+                    loaded_app.pending_load_json = None;
+                    *self = loaded_app;
+                    self.current_dirty = true;
+                    log::info!("Circuit loaded successfully from JSON");
+                }
+                Err(e) => log::error!("Failed to parse JSON: {e}"),
+            }
+        } else {
+            // Then check localStorage for web version
+            #[cfg(target_arch = "wasm32")]
+            {
+                use web_sys::window;
+                if let Some(window) = window() {
+                    if let Ok(Some(storage)) = window.local_storage() {
+                        if let Ok(Some(json)) = storage.get_item("simu_pending_load") {
+                            // Clear the stored JSON immediately to prevent repeated loading
+                            storage.remove_item("simu_pending_load").ok();
+
+                            match serde_json::from_str::<Self>(&json) {
+                                Ok(mut loaded_app) => {
+                                    loaded_app.pending_load_json = None;
+                                    *self = loaded_app;
+                                    self.current_dirty = true;
+                                    log::info!("Circuit loaded successfully from web storage");
+                                }
+                                Err(e) => log::error!("Failed to parse JSON from web storage: {e}"),
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }

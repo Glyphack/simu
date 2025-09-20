@@ -3,8 +3,8 @@ use std::fmt::Write as _;
 use std::hash::Hash;
 
 use egui::{
-    Align, Button, Color32, CornerRadius, Layout, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2,
-    Widget as _, pos2, vec2,
+    Align, Button, Color32, CornerRadius, Image, Layout, Pos2, Rect, Response, Sense, Stroke,
+    StrokeKind, Ui, Vec2, Widget as _, pos2, vec2,
 };
 use slotmap::{Key as _, SecondaryMap, SlotMap};
 
@@ -12,6 +12,8 @@ use crate::{assets, config::CanvasConfig, drag::Drag};
 
 pub const EDGE_THRESHOLD: f32 = 10.0;
 pub const WIRE_HIT_DISTANCE: f32 = 10.0;
+
+pub const PANEL_BUTTON_MAX_HEIGH: f32 = 70.0;
 
 pub const GRID_SIZE: f32 = 20.0;
 pub const COLOR_GRID_LIGHT: Color32 = Color32::from_rgb(230, 230, 230);
@@ -62,7 +64,6 @@ pub struct Connection {
 
 impl Connection {
     pub fn new(p1: Pin, p2: Pin) -> Self {
-        // Normalize by ordering on (ins, index)
         if (p2.ins.data(), p2.index) < (p1.ins.data(), p1.index) {
             Self { a: p2, b: p1 }
         } else {
@@ -102,9 +103,9 @@ impl Hash for Connection {
 
 #[derive(serde::Deserialize, serde::Serialize, Copy, Debug, Clone)]
 pub struct Gate {
-    pub kind: GateKind,
     // Center position
     pub pos: Pos2,
+    pub kind: GateKind,
 }
 
 #[derive(serde::Deserialize, serde::Serialize, Copy, Debug, Clone)]
@@ -278,105 +279,6 @@ impl DB {
     }
 }
 
-// Custom serialization format for DB that avoids SlotMap version issues
-#[derive(serde::Serialize, serde::Deserialize)]
-struct SerializableDB {
-    gates: Vec<(u64, Gate)>,
-    powers: Vec<(u64, Power)>,
-    wires: Vec<(u64, Wire)>,
-    connections: HashSet<Connection>,
-}
-
-impl serde::Serialize for DB {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        let mut gates = Vec::new();
-        let mut powers = Vec::new();
-        let mut wires = Vec::new();
-
-        for (id, gate) in &self.gates {
-            gates.push((id.data().as_ffi(), *gate));
-        }
-        for (id, power) in &self.powers {
-            powers.push((id.data().as_ffi(), *power));
-        }
-        for (id, wire) in &self.wires {
-            wires.push((id.data().as_ffi(), *wire));
-        }
-
-        let serializable = SerializableDB {
-            gates,
-            powers,
-            wires,
-            connections: self.connections.clone(),
-        };
-
-        serializable.serialize(serializer)
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for DB {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let serializable = SerializableDB::deserialize(deserializer)?;
-
-        let mut db = Self {
-            instances: SlotMap::with_key(),
-            types: SecondaryMap::new(),
-            gates: SecondaryMap::new(),
-            powers: SecondaryMap::new(),
-            wires: SecondaryMap::new(),
-            connections: serializable.connections,
-        };
-
-        // Reconstruct gates
-        for (raw_id, gate) in serializable.gates {
-            let key_data = slotmap::KeyData::from_ffi(raw_id);
-            let id = InstanceId::from(key_data);
-
-            // Ensure the slot exists in instances
-            while db.instances.len() <= id.data().as_ffi() as usize {
-                db.instances.insert(());
-            }
-
-            db.gates.insert(id, gate);
-            db.types.insert(id, InstanceKind::Gate(gate.kind));
-        }
-
-        // Reconstruct powers
-        for (raw_id, power) in serializable.powers {
-            let key_data = slotmap::KeyData::from_ffi(raw_id);
-            let id = InstanceId::from(key_data);
-
-            while db.instances.len() <= id.data().as_ffi() as usize {
-                db.instances.insert(());
-            }
-
-            db.powers.insert(id, power);
-            db.types.insert(id, InstanceKind::Power);
-        }
-
-        // Reconstruct wires
-        for (raw_id, wire) in serializable.wires {
-            let key_data = slotmap::KeyData::from_ffi(raw_id);
-            let id = InstanceId::from(key_data);
-
-            while db.instances.len() <= id.data().as_ffi() as usize {
-                db.instances.insert(());
-            }
-
-            db.wires.insert(id, wire);
-            db.types.insert(id, InstanceKind::Wire);
-        }
-
-        Ok(db)
-    }
-}
-
 #[derive(serde::Deserialize, serde::Serialize)]
 pub struct App {
     pub canvas_config: CanvasConfig,
@@ -464,7 +366,7 @@ impl eframe::App for App {
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            self.main_layout(ui);
+            self.draw_main(ui);
         });
     }
 }
@@ -479,47 +381,7 @@ impl App {
         }
     }
 
-    fn process_pending_load(&mut self) {
-        // First check the local field
-        if let Some(json) = self.pending_load_json.take() {
-            match serde_json::from_str::<Self>(&json) {
-                Ok(mut loaded_app) => {
-                    loaded_app.pending_load_json = None;
-                    *self = loaded_app;
-                    self.current_dirty = true;
-                    log::info!("Circuit loaded successfully from JSON");
-                }
-                Err(e) => log::error!("Failed to parse JSON: {e}"),
-            }
-        } else {
-            // Then check localStorage for web version
-            #[cfg(target_arch = "wasm32")]
-            {
-                use web_sys::window;
-                if let Some(window) = window() {
-                    if let Ok(Some(storage)) = window.local_storage() {
-                        if let Ok(Some(json)) = storage.get_item("simu_pending_load") {
-                            // Clear the stored JSON immediately to prevent repeated loading
-                            storage.remove_item("simu_pending_load").ok();
-
-                            match serde_json::from_str::<Self>(&json) {
-                                Ok(mut loaded_app) => {
-                                    loaded_app.pending_load_json = None;
-                                    *self = loaded_app;
-                                    self.current_dirty = true;
-                                    log::info!("Circuit loaded successfully from web storage");
-                                }
-                                Err(e) => log::error!("Failed to parse JSON from web storage: {e}"),
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    pub fn main_layout(&mut self, ui: &mut Ui) {
-        // Process any pending loads first
+    pub fn draw_main(&mut self, ui: &mut Ui) {
         self.process_pending_load();
 
         if self.show_debug {
@@ -529,10 +391,7 @@ impl App {
         }
         ui.with_layout(Layout::left_to_right(Align::Min), |ui| {
             self.canvas_config = CanvasConfig::default();
-
-            // World Debugger: show database and world state (full height)
             if self.show_debug {
-                // Let the debug panel use the full available height
                 let full_h = ui.available_height();
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     let mut dbg = self.debug_string();
@@ -553,208 +412,15 @@ impl App {
         });
     }
 
-    fn debug_string(&self) -> String {
-        let mut out = String::new();
-        writeln!(
-            out,
-            "counts: gates={}, powers={}, wires={}, conns={}",
-            self.db.gates.len(),
-            self.db.powers.len(),
-            self.db.wires.len(),
-            self.db.connections.len()
-        )
-        .ok();
-        writeln!(out, "hovered: {:?}", self.hovered).ok();
-        writeln!(out, "drag: {:?}", self.drag).ok();
-        writeln!(out, "potential_conns: {}", self.potential_connections.len()).ok();
-        writeln!(out, "clipboard: {:?}", self.clipboard).ok();
-        writeln!(out, "selected: {:?}", self.selected).ok();
-
-        writeln!(out, "\nGates:").ok();
-        for (id, g) in &self.db.gates {
-            writeln!(
-                out,
-                "  {:?}: kind={:?} pos=({:.1},{:.1})",
-                id, g.kind, g.pos.x, g.pos.y
-            )
-            .ok();
-            // pins
-            for (i, pin) in g.kind.graphics().pins.iter().enumerate() {
-                let p = g.pos + pin.offset;
-                writeln!(out, "    pin#{i} {:?} at ({:.1},{:.1})", pin.kind, p.x, p.y).ok();
-            }
-        }
-
-        writeln!(out, "\nPowers:").ok();
-        for (id, p) in &self.db.powers {
-            writeln!(
-                out,
-                "  {:?}: on={} pos=({:.1},{:.1})",
-                id, p.on, p.pos.x, p.pos.y
-            )
-            .ok();
-            for (i, pin) in p.graphics().pins.iter().enumerate() {
-                let pp = p.pos + pin.offset;
-                writeln!(
-                    out,
-                    "    pin#{i} {:?} at ({:.1},{:.1})",
-                    pin.kind, pp.x, pp.y
-                )
-                .ok();
-            }
-        }
-
-        writeln!(out, "\nWires:").ok();
-        for (id, w) in &self.db.wires {
-            writeln!(
-                out,
-                "  {:?}: start=({:.1},{:.1}) end=({:.1},{:.1})",
-                id, w.start.x, w.start.y, w.end.x, w.end.y
-            )
-            .ok();
-        }
-
-        writeln!(out, "\nConnections:").ok();
-        for c in &self.db.connections {
-            let p1 = self.db.pin_position(c.a);
-            let p2 = self.db.pin_position(c.b);
-            writeln!(
-                out,
-                "  ({:?}:{}) <-> ({:?}:{}) | ({:.1},{:.1})<->({:.1},{:.1})",
-                c.a.ins, c.a.index, c.b.ins, c.b.index, p1.x, p1.y, p2.x, p2.y
-            )
-            .ok();
-        }
-
-        out
-    }
-
-    #[expect(clippy::too_many_lines)]
     fn draw_panel(&mut self, ui: &mut Ui) {
-        let image = egui::Image::new(GateKind::Nand.graphics().svg.clone())
-            .max_height(70.0)
-            .bg_fill(Color32::WHITE);
-        let nand_resp = ui.add(egui::ImageButton::new(image).sense(Sense::click_and_drag()));
-
-        if nand_resp.dragged()
-            && let Some(pos) = ui.ctx().pointer_interact_pos()
-        {
-            self.drag = Some(Drag::Panel {
-                pos,
-                kind: InstanceKind::Gate(GateKind::Nand),
-            });
-        }
-
-        ui.add_space(8.0);
-
-        let image = egui::Image::new(GateKind::And.graphics().svg.clone())
-            .max_height(70.0)
-            .bg_fill(Color32::WHITE);
-        let and_resp = ui.add(egui::ImageButton::new(image).sense(Sense::click_and_drag()));
-
-        if and_resp.dragged()
-            && let Some(pos) = ui.ctx().pointer_interact_pos()
-        {
-            self.drag = Some(Drag::Panel {
-                pos,
-                kind: InstanceKind::Gate(GateKind::And),
-            });
-        }
-
-        ui.add_space(8.0);
-
-        let image = egui::Image::new(GateKind::Or.graphics().svg.clone())
-            .max_height(70.0)
-            .bg_fill(Color32::WHITE);
-        let or_resp = ui.add(egui::ImageButton::new(image).sense(Sense::click_and_drag()));
-
-        if or_resp.dragged()
-            && let Some(pos) = ui.ctx().pointer_interact_pos()
-        {
-            self.drag = Some(Drag::Panel {
-                pos,
-                kind: InstanceKind::Gate(GateKind::Or),
-            });
-        }
-
-        ui.add_space(8.0);
-
-        let image = egui::Image::new(GateKind::Nor.graphics().svg.clone())
-            .max_height(70.0)
-            .bg_fill(Color32::WHITE);
-        let nor_resp = ui.add(egui::ImageButton::new(image).sense(Sense::click_and_drag()));
-
-        if nor_resp.dragged()
-            && let Some(pos) = ui.ctx().pointer_interact_pos()
-        {
-            self.drag = Some(Drag::Panel {
-                pos,
-                kind: InstanceKind::Gate(GateKind::Nor),
-            });
-        }
-
-        ui.add_space(8.0);
-
-        let image = egui::Image::new(GateKind::Xor.graphics().svg.clone())
-            .max_height(70.0)
-            .bg_fill(Color32::WHITE);
-        let xor_resp = ui.add(egui::ImageButton::new(image).sense(Sense::click_and_drag()));
-
-        if xor_resp.dragged()
-            && let Some(pos) = ui.ctx().pointer_interact_pos()
-        {
-            self.drag = Some(Drag::Panel {
-                pos,
-                kind: InstanceKind::Gate(GateKind::Xor),
-            });
-        }
-
-        ui.add_space(8.0);
-
-        let image = egui::Image::new(GateKind::Xnor.graphics().svg.clone())
-            .max_height(70.0)
-            .bg_fill(Color32::WHITE);
-        let xnor_resp = ui.add(egui::ImageButton::new(image).sense(Sense::click_and_drag()));
-
-        if xnor_resp.dragged()
-            && let Some(pos) = ui.ctx().pointer_interact_pos()
-        {
-            self.drag = Some(Drag::Panel {
-                pos,
-                kind: InstanceKind::Gate(GateKind::Xnor),
-            });
-        }
-
-        ui.add_space(8.0);
-
-        let pwr_image = egui::Image::new(assets::POWER_ON_GRAPHICS.svg.clone())
-            .max_height(70.0)
-            .bg_fill(Color32::WHITE);
-        let pwr_resp = ui.add(egui::ImageButton::new(pwr_image).sense(Sense::click_and_drag()));
-        if pwr_resp.dragged()
-            && let Some(pos) = ui.ctx().pointer_interact_pos()
-        {
-            self.drag = Some(Drag::Panel {
-                pos,
-                kind: InstanceKind::Power,
-            });
-        }
-
-        ui.add_space(8.0);
-
-        let wire_resp = ui.add(
-            Button::new("Wire")
-                .sense(Sense::click_and_drag())
-                .min_size(vec2(78.0, 30.0)),
-        );
-        if wire_resp.dragged()
-            && let Some(pos) = ui.ctx().pointer_interact_pos()
-        {
-            self.drag = Some(Drag::Panel {
-                pos,
-                kind: InstanceKind::Wire,
-            });
-        }
+        self.add_button_panel(ui, InstanceKind::Gate(GateKind::And));
+        self.add_button_panel(ui, InstanceKind::Gate(GateKind::Nand));
+        self.add_button_panel(ui, InstanceKind::Gate(GateKind::Or));
+        self.add_button_panel(ui, InstanceKind::Gate(GateKind::Nor));
+        self.add_button_panel(ui, InstanceKind::Gate(GateKind::Xor));
+        self.add_button_panel(ui, InstanceKind::Gate(GateKind::Xnor));
+        self.add_button_panel(ui, InstanceKind::Power);
+        self.add_button_panel(ui, InstanceKind::Wire);
 
         ui.add_space(8.0);
 
@@ -774,6 +440,44 @@ impl App {
             self.current.clear();
             self.current_dirty = false;
         }
+    }
+
+    fn add_button_panel(&mut self, ui: &mut Ui, kind: InstanceKind) -> Response {
+        let resp = match kind {
+            InstanceKind::Gate(gate_kind) => {
+                let s = get_icon(ui, gate_kind.graphics().svg.clone())
+                    .max_height(PANEL_BUTTON_MAX_HEIGH);
+                ui.add(egui::ImageButton::new(s).sense(Sense::click_and_drag()))
+            }
+            InstanceKind::Power => {
+                let s = get_icon(
+                    ui,
+                    Power {
+                        pos: Pos2::ZERO,
+                        on: true,
+                    }
+                    .graphics()
+                    .svg
+                    .clone(),
+                )
+                .max_height(PANEL_BUTTON_MAX_HEIGH);
+                ui.add(egui::ImageButton::new(s).sense(Sense::click_and_drag()))
+            }
+            InstanceKind::Wire => ui.add(
+                Button::new("Wire")
+                    .sense(Sense::click_and_drag())
+                    .min_size(vec2(78.0, 30.0)),
+            ),
+        };
+
+        if resp.dragged()
+            && let Some(pos) = ui.ctx().pointer_interact_pos()
+        {
+            self.drag = Some(Drag::Panel { pos, kind });
+        }
+        ui.add_space(8.0);
+
+        resp
     }
 
     #[expect(clippy::too_many_lines)]
@@ -996,19 +700,9 @@ impl App {
         }
     }
 
-    fn draw_icon(ui: &mut Ui, source: egui::ImageSource<'_>, rect: Rect) {
-        let mut image = egui::Image::new(source).fit_to_exact_size(rect.size());
-
-        if ui.visuals().dark_mode {
-            image = image.bg_fill(Color32::WHITE);
-        }
-
-        ui.put(rect, image);
-    }
-
     fn draw_gate(&self, ui: &mut Ui, id: InstanceId, gate: &Gate) {
         let rect = Rect::from_center_size(gate.pos, self.canvas_config.base_gate_size);
-        Self::draw_icon(ui, gate.kind.graphics().svg.clone(), rect);
+        draw_icon_canvas(ui, gate.kind.graphics().svg.clone(), rect);
 
         for (i, pin) in gate.kind.graphics().pins.iter().enumerate() {
             let pin_pos = gate.pos + pin.offset;
@@ -1034,7 +728,7 @@ impl App {
 
     pub fn draw_gate_preview(&self, ui: &mut Ui, gate_kind: GateKind, pos: Pos2) {
         let rect = Rect::from_center_size(pos, self.canvas_config.base_gate_size);
-        Self::draw_icon(ui, gate_kind.graphics().svg.clone(), rect);
+        draw_icon_canvas(ui, gate_kind.graphics().svg.clone(), rect);
 
         for pin in gate_kind.graphics().pins {
             let pin_pos = pos + pin.offset;
@@ -1049,7 +743,7 @@ impl App {
 
     fn draw_power(&self, ui: &mut Ui, id: InstanceId, power: &Power) {
         let rect = Rect::from_center_size(power.pos, self.canvas_config.base_gate_size);
-        Self::draw_icon(ui, power.graphics().svg.clone(), rect);
+        draw_icon_canvas(ui, power.graphics().svg.clone(), rect);
 
         for (i, pin) in power.graphics().pins.iter().enumerate() {
             let pin_pos = power.pos + pin.offset;
@@ -1076,7 +770,7 @@ impl App {
     pub fn draw_power_preview(&self, ui: &mut Ui, pos: Pos2) {
         let power = Power { pos, on: true };
         let rect = Rect::from_center_size(power.pos, self.canvas_config.base_gate_size);
-        Self::draw_icon(ui, power.graphics().svg.clone(), rect);
+        draw_icon_canvas(ui, power.graphics().svg.clone(), rect);
 
         for pin in power.graphics().pins {
             let pin_pos = power.pos + pin.offset;
@@ -1347,4 +1041,96 @@ impl App {
         visiting.remove(&pin);
         false
     }
+
+    fn debug_string(&self) -> String {
+        let mut out = String::new();
+        writeln!(
+            out,
+            "counts: gates={}, powers={}, wires={}, conns={}",
+            self.db.gates.len(),
+            self.db.powers.len(),
+            self.db.wires.len(),
+            self.db.connections.len()
+        )
+        .ok();
+        writeln!(out, "hovered: {:?}", self.hovered).ok();
+        writeln!(out, "drag: {:?}", self.drag).ok();
+        writeln!(out, "potential_conns: {}", self.potential_connections.len()).ok();
+        writeln!(out, "clipboard: {:?}", self.clipboard).ok();
+        writeln!(out, "selected: {:?}", self.selected).ok();
+
+        writeln!(out, "\nGates:").ok();
+        for (id, g) in &self.db.gates {
+            writeln!(
+                out,
+                "  {:?}: kind={:?} pos=({:.1},{:.1})",
+                id, g.kind, g.pos.x, g.pos.y
+            )
+            .ok();
+            // pins
+            for (i, pin) in g.kind.graphics().pins.iter().enumerate() {
+                let p = g.pos + pin.offset;
+                writeln!(out, "    pin#{i} {:?} at ({:.1},{:.1})", pin.kind, p.x, p.y).ok();
+            }
+        }
+
+        writeln!(out, "\nPowers:").ok();
+        for (id, p) in &self.db.powers {
+            writeln!(
+                out,
+                "  {:?}: on={} pos=({:.1},{:.1})",
+                id, p.on, p.pos.x, p.pos.y
+            )
+            .ok();
+            for (i, pin) in p.graphics().pins.iter().enumerate() {
+                let pp = p.pos + pin.offset;
+                writeln!(
+                    out,
+                    "    pin#{i} {:?} at ({:.1},{:.1})",
+                    pin.kind, pp.x, pp.y
+                )
+                .ok();
+            }
+        }
+
+        writeln!(out, "\nWires:").ok();
+        for (id, w) in &self.db.wires {
+            writeln!(
+                out,
+                "  {:?}: start=({:.1},{:.1}) end=({:.1},{:.1})",
+                id, w.start.x, w.start.y, w.end.x, w.end.y
+            )
+            .ok();
+        }
+
+        writeln!(out, "\nConnections:").ok();
+        for c in &self.db.connections {
+            let p1 = self.db.pin_position(c.a);
+            let p2 = self.db.pin_position(c.b);
+            writeln!(
+                out,
+                "  ({:?}:{}) <-> ({:?}:{}) | ({:.1},{:.1})<->({:.1},{:.1})",
+                c.a.ins, c.a.index, c.b.ins, c.b.index, p1.x, p1.y, p2.x, p2.y
+            )
+            .ok();
+        }
+
+        out
+    }
+}
+
+fn get_icon<'a>(ui: &Ui, source: egui::ImageSource<'a>) -> Image<'a> {
+    let mut image = egui::Image::new(source);
+
+    if ui.visuals().dark_mode {
+        image = image.bg_fill(Color32::WHITE);
+    }
+
+    image
+}
+
+fn draw_icon_canvas(ui: &mut Ui, source: egui::ImageSource<'_>, rect: Rect) {
+    let image = get_icon(ui, source).fit_to_exact_size(rect.size());
+
+    ui.put(rect, image);
 }
