@@ -10,11 +10,9 @@ use slotmap::{Key as _, SecondaryMap, SlotMap};
 
 use crate::{assets, config::CanvasConfig, drag::Drag};
 
-pub const EDGE_THRESHOLD: f32 = 10.0;
-pub const WIRE_HIT_DISTANCE: f32 = 10.0;
-
 pub const PANEL_BUTTON_MAX_HEIGH: f32 = 70.0;
 
+// Grid
 pub const GRID_SIZE: f32 = 20.0;
 pub const COLOR_GRID_LIGHT: Color32 = Color32::from_rgb(230, 230, 230);
 pub const COLOR_GRID_DARK: Color32 = Color32::from_rgb(40, 40, 40);
@@ -23,15 +21,38 @@ pub const COLOR_PIN_DETACH_HINT: Color32 = Color32::RED;
 pub const COLOR_PIN_POWERED_OUTLINE: Color32 = Color32::GREEN;
 pub const COLOR_WIRE_POWERED: Color32 = Color32::GREEN;
 pub const COLOR_WIRE_IDLE: Color32 = Color32::LIGHT_BLUE;
+// Hover
 pub const COLOR_WIRE_HOVER: Color32 = Color32::GRAY;
-pub const COLOR_HOVER_OUTLINE: Color32 = Color32::GRAY;
-pub const COLOR_ENDPOINT_HOVER: Color32 = Color32::LIGHT_YELLOW;
-pub const COLOR_POTENTIAL_CONN_HIGHLIGHT: Color32 = Color32::LIGHT_YELLOW;
+pub const COLOR_HOVER_INSTANCE_OUTLINE: Color32 = Color32::GRAY;
+pub const COLOR_HOVER_PIN_TO_WIRE: Color32 = Color32::GRAY;
+pub const COLOR_HOVER_PIN_DETACH: Color32 = Color32::RED;
+pub const PIN_HOVER_THRESHOLD: f32 = 10.0;
+
+// Connections
+pub const COLOR_POTENTIAL_CONN_HIGHLIGHT: Color32 = Color32::LIGHT_BLUE;
+pub const WIRE_HIT_DISTANCE: f32 = 10.0;
+pub const SNAP_THRESHOLD: f32 = 10.0;
+
 pub const COLOR_SELECTION_HIGHLIGHT: Color32 = Color32::GRAY;
 pub const COLOR_SELECTION_BOX: Color32 = Color32::LIGHT_BLUE;
 
 slotmap::new_key_type! {
     pub struct InstanceId;
+}
+
+#[derive(serde::Deserialize, serde::Serialize, Copy, Debug, Clone)]
+pub enum Hover {
+    Pin(Pin),
+    Instance(InstanceId),
+}
+
+impl Hover {
+    pub fn instance(&self) -> InstanceId {
+        match self {
+            Self::Pin(pin) => pin.ins,
+            Self::Instance(instance_id) => *instance_id,
+        }
+    }
 }
 
 #[derive(serde::Deserialize, serde::Serialize, Copy, Debug, Clone)]
@@ -160,7 +181,31 @@ pub struct Wire {
     pub end: Pos2,
 }
 
-impl Wire {}
+impl Wire {
+    pub fn distance_point_to_segment(&self, p: Pos2) -> f32 {
+        let a = self.start;
+        let b = self.end;
+        let ab: Vec2 = b - a;
+        let ap: Vec2 = p - a;
+
+        let ab_len2 = ab.x * ab.x + ab.y * ab.y;
+        if ab_len2 == 0.0 {
+            return (p - a).length();
+        }
+
+        let t = ((ap.x * ab.x + ap.y * ab.y) / ab_len2).clamp(0.0, 1.0);
+
+        let closest = a + ab * t;
+        (p - closest).length()
+    }
+
+    pub fn center(&self) -> Pos2 {
+        pos2(
+            (self.start.x + self.end.x) * 0.5,
+            (self.start.y + self.end.y) * 0.5,
+        )
+    }
+}
 
 pub struct DB {
     // Primary key allocator; ensures unique keys across all instance kinds
@@ -266,6 +311,29 @@ impl DB {
         }
     }
 
+    pub fn pin_offset(&self, pin: Pin) -> Vec2 {
+        match self.ty(pin.ins) {
+            InstanceKind::Gate(gk) => {
+                let info = gk.graphics().pins[pin.index as usize];
+                info.offset
+            }
+            InstanceKind::Power => {
+                let p = self.get_power(pin.ins);
+                let info = p.graphics().pins[pin.index as usize];
+                info.offset
+            }
+            InstanceKind::Wire => {
+                let w = self.get_wire(pin.ins);
+                let center = w.center();
+                if pin.index == 0 {
+                    center - w.start
+                } else {
+                    center - w.end
+                }
+            }
+        }
+    }
+
     pub fn connected_pins_of_instance(&self, id: InstanceId) -> Vec<Pin> {
         let mut out = Vec::new();
         for c in &self.connections {
@@ -283,7 +351,7 @@ impl DB {
 pub struct App {
     pub canvas_config: CanvasConfig,
     pub drag: Option<Drag>,
-    pub hovered: Option<InstanceId>,
+    pub hovered: Option<Hover>,
     pub db: DB,
     // possible connections while dragging
     pub potential_connections: HashSet<Connection>,
@@ -296,9 +364,15 @@ pub struct App {
     pub selected: std::collections::HashSet<InstanceId>,
     //Copied. Items with their offset compared to a middle point in the rectangle
     pub clipboard: Vec<InstancePosOffset>,
+    // Where are we in the world
+    pub viewport_offset: Vec2,
     // For web load functionality - stores pending JSON to load
     #[serde(skip)]
     pub pending_load_json: Option<String>,
+    #[serde(skip)]
+    pub panning: bool,
+    #[serde(skip)]
+    pub panel_width: f32,
 }
 
 impl Default for App {
@@ -322,6 +396,9 @@ impl Default for App {
             selected: Default::default(),
             clipboard: Default::default(),
             pending_load_json: None,
+            viewport_offset: Vec2::ZERO,
+            panning: false,
+            panel_width: 0.0,
         }
     }
 }
@@ -381,6 +458,10 @@ impl App {
         }
     }
 
+    pub fn screen_to_world(&self, pos: Pos2) -> Pos2 {
+        pos + self.viewport_offset
+    }
+
     pub fn draw_main(&mut self, ui: &mut Ui) {
         self.process_pending_load();
 
@@ -399,28 +480,34 @@ impl App {
                 });
             }
 
-            ui.vertical(|ui| {
-                ui.heading("Logic Gates");
-                self.draw_panel(ui);
-            });
+            let panel_rect = ui
+                .vertical(|ui| {
+                    ui.heading("Logic Gates");
+                    self.draw_panel(ui);
+                })
+                .response
+                .rect;
+            self.panel_width = panel_rect.width();
             ui.separator();
             ui.vertical(|ui| {
                 ui.heading("Canvas");
                 ui.label("press d to remove object");
+                ui.label("right click on powers to toggle");
+                ui.label("right click on canvas to drag");
                 self.draw_canvas(ui);
             });
         });
     }
 
     fn draw_panel(&mut self, ui: &mut Ui) {
-        self.add_button_panel(ui, InstanceKind::Gate(GateKind::And));
-        self.add_button_panel(ui, InstanceKind::Gate(GateKind::Nand));
-        self.add_button_panel(ui, InstanceKind::Gate(GateKind::Or));
-        self.add_button_panel(ui, InstanceKind::Gate(GateKind::Nor));
-        self.add_button_panel(ui, InstanceKind::Gate(GateKind::Xor));
-        self.add_button_panel(ui, InstanceKind::Gate(GateKind::Xnor));
-        self.add_button_panel(ui, InstanceKind::Power);
-        self.add_button_panel(ui, InstanceKind::Wire);
+        self.draw_panel_button(ui, InstanceKind::Gate(GateKind::And));
+        self.draw_panel_button(ui, InstanceKind::Gate(GateKind::Nand));
+        self.draw_panel_button(ui, InstanceKind::Gate(GateKind::Or));
+        self.draw_panel_button(ui, InstanceKind::Gate(GateKind::Nor));
+        self.draw_panel_button(ui, InstanceKind::Gate(GateKind::Xor));
+        self.draw_panel_button(ui, InstanceKind::Gate(GateKind::Xnor));
+        self.draw_panel_button(ui, InstanceKind::Power);
+        self.draw_panel_button(ui, InstanceKind::Wire);
 
         ui.add_space(8.0);
 
@@ -442,7 +529,7 @@ impl App {
         }
     }
 
-    fn add_button_panel(&mut self, ui: &mut Ui, kind: InstanceKind) -> Response {
+    fn draw_panel_button(&mut self, ui: &mut Ui, kind: InstanceKind) -> Response {
         let resp = match kind {
             InstanceKind::Gate(gate_kind) => {
                 let s = get_icon(ui, gate_kind.graphics().svg.clone())
@@ -469,9 +556,13 @@ impl App {
                     .min_size(vec2(78.0, 30.0)),
             ),
         };
+        let mouse_pos_world = ui
+            .ctx()
+            .pointer_interact_pos()
+            .map(|p| self.screen_to_world(p));
 
         if resp.dragged()
-            && let Some(pos) = ui.ctx().pointer_interact_pos()
+            && let Some(pos) = mouse_pos_world
         {
             self.drag = Some(Drag::Panel { pos, kind });
         }
@@ -480,17 +571,37 @@ impl App {
         resp
     }
 
-    #[expect(clippy::too_many_lines)]
     fn draw_canvas(&mut self, ui: &mut Ui) {
         let (resp, _painter) = ui.allocate_painter(ui.available_size(), Sense::hover());
         let canvas_rect = resp.rect;
 
-        Self::draw_grid(ui, canvas_rect);
+        // Set clip rectangle to prevent canvas objects from drawing outside canvas bounds
+        ui.set_clip_rect(canvas_rect);
+
+        Self::draw_grid(ui, canvas_rect, self.viewport_offset);
 
         let mouse_up = ui.input(|i| i.pointer.any_released());
-        let pointer_pressed = ui.input(|i| i.pointer.primary_down());
+        let mouse_clicked = ui.input(|i| i.pointer.primary_down());
+        let right_released = ui.input(|i| i.pointer.secondary_released());
+        let right_down = ui.input(|i| i.pointer.secondary_down());
         let right_clicked = ui.input(|i| i.pointer.secondary_clicked());
-        let mouse_pos = ui.ctx().pointer_interact_pos();
+        let mouse_pos_world = ui
+            .ctx()
+            .pointer_interact_pos()
+            .map(|p| self.screen_to_world(p));
+        let mouse_is_visible = ui.ctx().input(|i| i.pointer.has_pointer());
+
+        if right_down && self.hovered.is_none() {
+            self.panning = true;
+        }
+
+        if right_released || !mouse_is_visible {
+            self.panning = false;
+        }
+
+        if self.panning && right_down {
+            self.viewport_offset += ui.input(|i| i.pointer.delta());
+        }
 
         let mut copy_event_detected = false;
         let mut paste_event_detected = false;
@@ -501,6 +612,7 @@ impl App {
                     copy_event_detected = true;
                 }
                 if let egui::Event::Paste(_) = event {
+                    // TODO(paste-json): If user pasted json convert it to gates and add it.
                     paste_event_detected = true;
                 }
             }
@@ -509,6 +621,10 @@ impl App {
         let d_pressed = ui.input(|i| i.key_pressed(egui::Key::D));
 
         if d_pressed && let Some(id) = self.hovered.take() {
+            let id = match id {
+                Hover::Pin(pin) => pin.ins,
+                Hover::Instance(instance_id) => instance_id,
+            };
             self.delete_instance(id);
         } else if d_pressed && self.hovered.is_none() && !self.selected.is_empty() {
             // Collect IDs to delete to avoid mutable borrow conflict
@@ -519,95 +635,38 @@ impl App {
         }
 
         if copy_event_detected && !self.selected.is_empty() {
-            let mut points = vec![];
-            for &selected in &self.selected {
-                match self.db.ty(selected) {
-                    InstanceKind::Gate(_) => {
-                        let g = self.db.get_gate(selected);
-                        points.push(g.pos);
-                    }
-                    InstanceKind::Power => {
-                        let p = self.db.get_power(selected);
-                        points.push(p.pos);
-                    }
-                    InstanceKind::Wire => {
-                        let w = self.db.get_wire(selected);
-                        points.push(w.start);
-                        points.push(w.end);
-                    }
-                }
-            }
-            let rect = Rect::from_points(&points);
-            let center = rect.center();
-
-            let mut object_pos = vec![];
-
-            for &selected in &self.selected {
-                let ty = self.db.ty(selected);
-                match ty {
-                    InstanceKind::Gate(kind) => {
-                        let g = self.db.get_gate(selected);
-                        object_pos.push(InstancePosOffset::Gate(kind, center - g.pos));
-                    }
-                    InstanceKind::Power => {
-                        let p = self.db.get_power(selected);
-                        object_pos.push(InstancePosOffset::Power(center - p.pos));
-                    }
-                    InstanceKind::Wire => {
-                        let w = self.db.get_wire(selected);
-                        object_pos.push(InstancePosOffset::Wire(center - w.start, center - w.end));
-                    }
-                }
-            }
-
-            self.clipboard = object_pos;
+            self.copy_to_clipboard();
         }
 
         if paste_event_detected
             && !self.clipboard.is_empty()
-            && let Some(mouse) = mouse_pos
+            && let Some(mouse) = mouse_pos_world
         {
-            self.selected.clear(); // Clear existing selection before pasting new items
-            for to_paste in self.clipboard.clone() {
-                let id = match to_paste {
-                    InstancePosOffset::Gate(gate_kind, offset) => self.db.new_gate(Gate {
-                        kind: gate_kind,
-                        pos: mouse - offset,
-                    }),
-                    InstancePosOffset::Power(offset) => self.db.new_power(Power {
-                        pos: mouse - offset,
-                        on: false,
-                    }),
-                    InstancePosOffset::Wire(s, e) => self.db.new_wire(Wire {
-                        start: mouse - s,
-                        end: mouse - e,
-                    }),
-                };
-                self.potential_connections = self.compute_potential_connections_for_instance(id);
-                self.finalize_connections_for_instance(id, &canvas_rect);
-                self.selected.insert(id); // Add newly pasted instance to selection
+            self.paste_from_clipboard(mouse);
+        }
+
+        if let Some(mouse_world) = mouse_pos_world {
+            if mouse_clicked {
+                self.handle_drag_start_canvas(mouse_world);
+            }
+            if self.drag.is_some() {
+                self.handle_dragging(ui, mouse_world);
+            } else {
+                self.hovered = self.get_hovered(mouse_world);
             }
         }
 
-        if let Some(mouse) = mouse_pos {
-            self.handle_dragging(ui, mouse, &canvas_rect);
-            self.hovered = self.interacted_instance(mouse);
-            if pointer_pressed && canvas_rect.contains(mouse) {
-                self.handle_drag_start_canvas(mouse);
-            }
+        if mouse_up && let Some(mouse) = mouse_pos_world {
+            self.handle_drag_end(&canvas_rect, mouse);
         }
 
         if right_clicked
-            && let Some(id) = self.hovered
+            && let Some(id) = self.hovered.as_ref().map(|i| i.instance())
             && matches!(self.db.ty(id), InstanceKind::Power)
         {
             let p = self.db.get_power_mut(id);
             p.on = !p.on;
             self.current_dirty = true;
-        }
-
-        if mouse_up {
-            self.handle_drag_end(&canvas_rect, mouse_pos);
         }
 
         if self.current_dirty {
@@ -622,7 +681,12 @@ impl App {
         }
         for (id, wire) in &self.db.wires {
             let has_current = self.current.contains(&Pin { ins: id, index: 0 });
-            self.draw_wire(ui, *wire, self.hovered == Some(id), has_current);
+            self.draw_wire(
+                ui,
+                *wire,
+                self.hovered.as_ref().is_some_and(|f| f.instance() == id),
+                has_current,
+            );
         }
 
         if !self.potential_connections.is_empty() {
@@ -652,19 +716,34 @@ impl App {
                             continue;
                         }
                     }
+                    Some(Drag::PinToWire {
+                        source_pin: _,
+                        wire_id,
+                    }) => {
+                        if c.a.ins == wire_id {
+                            c.a
+                        } else {
+                            c.b
+                        }
+                    }
                     _ => continue,
                 };
                 let p = self.db.pin_position(pin_to_highlight);
-                ui.painter()
-                    .circle_filled(p, EDGE_THRESHOLD, COLOR_POTENTIAL_CONN_HIGHLIGHT);
+                ui.painter().circle_filled(
+                    p - self.viewport_offset,
+                    SNAP_THRESHOLD,
+                    COLOR_POTENTIAL_CONN_HIGHLIGHT,
+                );
             }
         }
 
-        self.highlight_hovered(ui);
+        if self.drag.is_none() {
+            self.highlight_hovered(ui);
+        }
         self.draw_selection_highlight(ui);
     }
 
-    fn draw_grid(ui: &Ui, canvas_rect: Rect) {
+    fn draw_grid(ui: &Ui, canvas_rect: Rect, viewport_offset: Vec2) {
         let grid_color = if ui.visuals().dark_mode {
             COLOR_GRID_DARK
         } else {
@@ -674,7 +753,8 @@ impl App {
         let painter = ui.painter();
 
         // Draw vertical lines
-        let start_x = (canvas_rect.left() / GRID_SIZE).floor() * GRID_SIZE;
+        let start_x =
+            (canvas_rect.left() / GRID_SIZE).floor() * GRID_SIZE - viewport_offset.x % GRID_SIZE;
         let mut x = start_x;
         while x <= canvas_rect.right() {
             if x >= canvas_rect.left() {
@@ -687,7 +767,8 @@ impl App {
         }
 
         // Draw horizontal lines
-        let start_y = (canvas_rect.top() / GRID_SIZE).floor() * GRID_SIZE;
+        let start_y =
+            (canvas_rect.top() / GRID_SIZE).floor() * GRID_SIZE - viewport_offset.y % GRID_SIZE;
         let mut y = start_y;
         while y <= canvas_rect.bottom() {
             if y >= canvas_rect.top() {
@@ -700,12 +781,20 @@ impl App {
         }
     }
 
-    fn draw_gate(&self, ui: &mut Ui, id: InstanceId, gate: &Gate) {
-        let rect = Rect::from_center_size(gate.pos, self.canvas_config.base_gate_size);
-        draw_icon_canvas(ui, gate.kind.graphics().svg.clone(), rect);
+    fn draw_instance_graphics<F>(
+        &self,
+        ui: &mut Ui,
+        graphics: &assets::InstanceGraphics,
+        screen_center: Pos2,
+        highlight_pin: F,
+    ) where
+        F: Fn(usize) -> bool,
+    {
+        let rect = Rect::from_center_size(screen_center, self.canvas_config.base_gate_size);
+        draw_icon_canvas(ui, graphics.svg.clone(), rect);
 
-        for (i, pin) in gate.kind.graphics().pins.iter().enumerate() {
-            let pin_pos = gate.pos + pin.offset;
+        for (i, pin) in graphics.pins.iter().enumerate() {
+            let pin_pos = screen_center + pin.offset;
             let color = match pin.kind {
                 assets::PinKind::Input => self.canvas_config.base_input_pin_color,
                 assets::PinKind::Output => self.canvas_config.base_output_pin_color,
@@ -713,10 +802,7 @@ impl App {
             ui.painter()
                 .circle_filled(pin_pos, self.canvas_config.base_pin_size, color);
 
-            if self.current.contains(&Pin {
-                ins: id,
-                index: i as u32,
-            }) {
+            if highlight_pin(i) {
                 ui.painter().circle_stroke(
                     pin_pos,
                     self.canvas_config.base_pin_size + 3.0,
@@ -724,63 +810,37 @@ impl App {
                 );
             }
         }
+    }
+
+    fn draw_gate(&self, ui: &mut Ui, id: InstanceId, gate: &Gate) {
+        let screen_center = gate.pos - self.viewport_offset;
+        self.draw_instance_graphics(ui, gate.kind.graphics(), screen_center, |pin_index| {
+            self.current.contains(&Pin {
+                ins: id,
+                index: pin_index as u32,
+            })
+        });
     }
 
     pub fn draw_gate_preview(&self, ui: &mut Ui, gate_kind: GateKind, pos: Pos2) {
-        let rect = Rect::from_center_size(pos, self.canvas_config.base_gate_size);
-        draw_icon_canvas(ui, gate_kind.graphics().svg.clone(), rect);
-
-        for pin in gate_kind.graphics().pins {
-            let pin_pos = pos + pin.offset;
-            let color = match pin.kind {
-                assets::PinKind::Input => self.canvas_config.base_input_pin_color,
-                assets::PinKind::Output => self.canvas_config.base_output_pin_color,
-            };
-            ui.painter()
-                .circle_filled(pin_pos, self.canvas_config.base_pin_size, color);
-        }
+        let screen_center = pos - self.viewport_offset;
+        self.draw_instance_graphics(ui, gate_kind.graphics(), screen_center, |_| false);
     }
 
     fn draw_power(&self, ui: &mut Ui, id: InstanceId, power: &Power) {
-        let rect = Rect::from_center_size(power.pos, self.canvas_config.base_gate_size);
-        draw_icon_canvas(ui, power.graphics().svg.clone(), rect);
-
-        for (i, pin) in power.graphics().pins.iter().enumerate() {
-            let pin_pos = power.pos + pin.offset;
-            let color = match pin.kind {
-                assets::PinKind::Input => self.canvas_config.base_input_pin_color,
-                assets::PinKind::Output => self.canvas_config.base_output_pin_color,
-            };
-            ui.painter()
-                .circle_filled(pin_pos, self.canvas_config.base_pin_size, color);
-
-            if self.current.contains(&Pin {
+        let screen_center = power.pos - self.viewport_offset;
+        self.draw_instance_graphics(ui, power.graphics(), screen_center, |pin_index| {
+            self.current.contains(&Pin {
                 ins: id,
-                index: i as u32,
-            }) {
-                ui.painter().circle_stroke(
-                    pin_pos,
-                    self.canvas_config.base_pin_size + 3.0,
-                    Stroke::new(2.0, COLOR_PIN_POWERED_OUTLINE),
-                );
-            }
-        }
+                index: pin_index as u32,
+            })
+        });
     }
 
     pub fn draw_power_preview(&self, ui: &mut Ui, pos: Pos2) {
         let power = Power { pos, on: true };
-        let rect = Rect::from_center_size(power.pos, self.canvas_config.base_gate_size);
-        draw_icon_canvas(ui, power.graphics().svg.clone(), rect);
-
-        for pin in power.graphics().pins {
-            let pin_pos = power.pos + pin.offset;
-            let color = match pin.kind {
-                assets::PinKind::Input => self.canvas_config.base_input_pin_color,
-                assets::PinKind::Output => self.canvas_config.base_output_pin_color,
-            };
-            ui.painter()
-                .circle_filled(pin_pos, self.canvas_config.base_pin_size, color);
-        }
+        let screen_center = pos - self.viewport_offset;
+        self.draw_instance_graphics(ui, power.graphics(), screen_center, |_| false);
     }
     pub fn draw_wire(&self, ui: &Ui, mouse: Wire, hovered: bool, has_current: bool) {
         let mut color = if has_current {
@@ -794,9 +854,51 @@ impl App {
         }
 
         ui.painter().line_segment(
-            [mouse.start, mouse.end],
+            [
+                mouse.start - self.viewport_offset,
+                mouse.end - self.viewport_offset,
+            ],
             Stroke::new(self.canvas_config.wire_thickness, color),
         );
+    }
+
+    pub fn get_hovered(&self, mouse_pos: Pos2) -> Option<Hover> {
+        // Prioritize smaller/overlay items first: Power over Gates, then Wires
+        for (k, wire) in &self.db.wires {
+            for pin in self.db.pins_of(k) {
+                if self.db.pin_position(pin).distance(mouse_pos) < PIN_HOVER_THRESHOLD {
+                    return Some(Hover::Pin(pin));
+                }
+            }
+            let dist = wire.distance_point_to_segment(mouse_pos);
+            if dist < WIRE_HIT_DISTANCE {
+                return Some(Hover::Instance(k));
+            }
+        }
+        for (k, power) in &self.db.powers {
+            let rect = Rect::from_center_size(power.pos, self.canvas_config.base_gate_size);
+            for pin in self.db.pins_of(k) {
+                if self.db.pin_position(pin).distance(mouse_pos) < PIN_HOVER_THRESHOLD {
+                    return Some(Hover::Pin(pin));
+                }
+            }
+            if rect.contains(mouse_pos) {
+                return Some(Hover::Instance(k));
+            }
+        }
+
+        for (k, gate) in &self.db.gates {
+            let rect = Rect::from_center_size(gate.pos, self.canvas_config.base_gate_size);
+            for pin in self.db.pins_of(k) {
+                if self.db.pin_position(pin).distance(mouse_pos) < PIN_HOVER_THRESHOLD {
+                    return Some(Hover::Pin(pin));
+                }
+            }
+            if rect.contains(mouse_pos) {
+                return Some(Hover::Instance(k));
+            }
+        }
+        None
     }
 
     fn highlight_hovered(&self, ui: &Ui) {
@@ -804,89 +906,66 @@ impl App {
             return;
         };
 
-        match self.db.ty(hovered) {
-            InstanceKind::Gate(gate_kind) => {
-                let gate = self.db.get_gate(hovered);
-                let outer = Rect::from_center_size(
-                    gate.pos,
-                    self.canvas_config.base_gate_size + vec2(3.0, 3.0),
-                );
-                ui.painter().rect_stroke(
-                    outer,
-                    CornerRadius::default(),
-                    Stroke::new(2.0, COLOR_HOVER_OUTLINE),
-                    StrokeKind::Middle,
-                );
+        match hovered {
+            Hover::Pin(pin) => {
+                let color = if self.is_pin_connected(pin) {
+                    COLOR_HOVER_PIN_DETACH
+                } else {
+                    COLOR_HOVER_PIN_TO_WIRE
+                };
+                let pin_pos = self.db.pin_position(pin) - self.viewport_offset;
+                ui.painter()
+                    .circle_filled(pin_pos, PIN_HOVER_THRESHOLD, color);
+            }
+            Hover::Instance(hovered) => match self.db.ty(hovered) {
+                InstanceKind::Gate(gate_kind) => {
+                    let gate = self.db.get_gate(hovered);
+                    let outer = Rect::from_center_size(
+                        gate.pos - self.viewport_offset,
+                        self.canvas_config.base_gate_size + vec2(3.0, 3.0),
+                    );
+                    ui.painter().rect_stroke(
+                        outer,
+                        CornerRadius::default(),
+                        Stroke::new(2.0, COLOR_HOVER_INSTANCE_OUTLINE),
+                        StrokeKind::Middle,
+                    );
 
-                if let Some(mouse) = ui.ctx().pointer_interact_pos() {
-                    for (i, pin_info) in gate_kind.graphics().pins.iter().enumerate() {
-                        let pin = Pin {
-                            ins: hovered,
-                            index: i as u32,
-                        };
-                        let pin_pos = gate.pos + pin_info.offset;
-                        if mouse.distance(pin_pos) < EDGE_THRESHOLD && self.is_pin_connected(pin) {
-                            ui.painter().circle_filled(
-                                pin_pos,
-                                EDGE_THRESHOLD,
-                                COLOR_PIN_DETACH_HINT,
-                            );
+                    if let Some(mouse) = ui.ctx().pointer_interact_pos() {
+                        for (i, pin_info) in gate_kind.graphics().pins.iter().enumerate() {
+                            let pin = Pin {
+                                ins: hovered,
+                                index: i as u32,
+                            };
+                            let pin_pos = gate.pos + pin_info.offset - self.viewport_offset;
+                            if mouse.distance(pin_pos) < SNAP_THRESHOLD
+                                && self.is_pin_connected(pin)
+                            {
+                                ui.painter().circle_filled(
+                                    pin_pos,
+                                    SNAP_THRESHOLD,
+                                    COLOR_PIN_DETACH_HINT,
+                                );
+                            }
                         }
                     }
                 }
-            }
-            InstanceKind::Power => {
-                let power = self.db.get_power(hovered);
-                let outer = Rect::from_center_size(
-                    power.pos,
-                    self.canvas_config.base_gate_size + vec2(3.0, 3.0),
-                );
-                ui.painter().rect_stroke(
-                    outer,
-                    CornerRadius::default(),
-                    Stroke::new(2.0, COLOR_HOVER_OUTLINE),
-                    StrokeKind::Middle,
-                );
-
-                if let Some(mouse) = ui.ctx().pointer_interact_pos() {
-                    for (i, pin_info) in power.graphics().pins.iter().enumerate() {
-                        let pin = Pin {
-                            ins: hovered,
-                            index: i as u32,
-                        };
-                        let pin_pos = power.pos + pin_info.offset;
-                        if mouse.distance(pin_pos) < EDGE_THRESHOLD && self.is_pin_connected(pin) {
-                            ui.painter().circle_filled(
-                                pin_pos,
-                                EDGE_THRESHOLD,
-                                COLOR_PIN_DETACH_HINT,
-                            );
-                        }
-                    }
+                InstanceKind::Power => {
+                    let power = self.db.get_power(hovered);
+                    let outer = Rect::from_center_size(
+                        power.pos - self.viewport_offset,
+                        self.canvas_config.base_gate_size + vec2(3.0, 3.0),
+                    );
+                    ui.painter().rect_stroke(
+                        outer,
+                        CornerRadius::default(),
+                        Stroke::new(2.0, COLOR_HOVER_INSTANCE_OUTLINE),
+                        StrokeKind::Middle,
+                    );
                 }
-            }
-            InstanceKind::Wire => {
-                let wire = self.db.get_wire(hovered);
-                if let Some(mouse) = ui.ctx().pointer_interact_pos() {
-                    if mouse.distance(wire.start) < EDGE_THRESHOLD {
-                        ui.painter().circle_filled(
-                            wire.start,
-                            EDGE_THRESHOLD,
-                            COLOR_ENDPOINT_HOVER,
-                        );
-                    } else if mouse.distance(wire.end) < EDGE_THRESHOLD {
-                        ui.painter()
-                            .circle_filled(wire.end, EDGE_THRESHOLD, COLOR_ENDPOINT_HOVER);
-                    }
-                }
-            }
-        }
-
-        if let Some(Drag::Resize { id, start }) = self.drag {
-            let w = self.db.get_wire(id);
-            let p = if start { w.start } else { w.end };
-            ui.painter()
-                .circle_filled(p, EDGE_THRESHOLD, COLOR_ENDPOINT_HOVER);
+                // Wire is highlighted when drawing
+                InstanceKind::Wire => {}
+            },
         }
     }
 
@@ -900,7 +979,7 @@ impl App {
                 InstanceKind::Gate(_) => {
                     let g = self.db.get_gate(id);
                     let r = Rect::from_center_size(
-                        g.pos,
+                        g.pos - self.viewport_offset,
                         self.canvas_config.base_gate_size + vec2(6.0, 6.0),
                     );
                     ui.painter().rect_stroke(
@@ -913,7 +992,7 @@ impl App {
                 InstanceKind::Power => {
                     let p = self.db.get_power(id);
                     let r = Rect::from_center_size(
-                        p.pos,
+                        p.pos - self.viewport_offset,
                         self.canvas_config.base_gate_size + vec2(6.0, 6.0),
                     );
                     ui.painter().rect_stroke(
@@ -1055,6 +1134,7 @@ impl App {
         .ok();
         writeln!(out, "hovered: {:?}", self.hovered).ok();
         writeln!(out, "drag: {:?}", self.drag).ok();
+        writeln!(out, "viewport_offset: {:?}", self.viewport_offset).ok();
         writeln!(out, "potential_conns: {}", self.potential_connections.len()).ok();
         writeln!(out, "clipboard: {:?}", self.clipboard).ok();
         writeln!(out, "selected: {:?}", self.selected).ok();
@@ -1116,6 +1196,74 @@ impl App {
         }
 
         out
+    }
+
+    fn copy_to_clipboard(&mut self) {
+        let mut points = vec![];
+        for &selected in &self.selected {
+            match self.db.ty(selected) {
+                InstanceKind::Gate(_) => {
+                    let g = self.db.get_gate(selected);
+                    points.push(g.pos);
+                }
+                InstanceKind::Power => {
+                    let p = self.db.get_power(selected);
+                    points.push(p.pos);
+                }
+                InstanceKind::Wire => {
+                    let w = self.db.get_wire(selected);
+                    points.push(w.start);
+                    points.push(w.end);
+                }
+            }
+        }
+        let rect = Rect::from_points(&points);
+        let center = rect.center();
+
+        let mut object_pos = vec![];
+
+        for &selected in &self.selected {
+            let ty = self.db.ty(selected);
+            match ty {
+                InstanceKind::Gate(kind) => {
+                    let g = self.db.get_gate(selected);
+                    object_pos.push(InstancePosOffset::Gate(kind, center - g.pos));
+                }
+                InstanceKind::Power => {
+                    let p = self.db.get_power(selected);
+                    object_pos.push(InstancePosOffset::Power(center - p.pos));
+                }
+                InstanceKind::Wire => {
+                    let w = self.db.get_wire(selected);
+                    object_pos.push(InstancePosOffset::Wire(center - w.start, center - w.end));
+                }
+            }
+        }
+
+        self.clipboard = object_pos;
+    }
+
+    fn paste_from_clipboard(&mut self, mouse: Pos2) {
+        self.selected.clear(); // Clear existing selection before pasting new items
+        for to_paste in self.clipboard.clone() {
+            let id = match to_paste {
+                InstancePosOffset::Gate(gate_kind, offset) => self.db.new_gate(Gate {
+                    kind: gate_kind,
+                    pos: mouse - offset,
+                }),
+                InstancePosOffset::Power(offset) => self.db.new_power(Power {
+                    pos: mouse - offset,
+                    on: false,
+                }),
+                InstancePosOffset::Wire(s, e) => self.db.new_wire(Wire {
+                    start: mouse - s,
+                    end: mouse - e,
+                }),
+            };
+            self.potential_connections = self.compute_potential_connections_for_instance(id);
+            self.finalize_connections_for_instance(id);
+            self.selected.insert(id); // Add newly pasted instance to selection
+        }
     }
 }
 

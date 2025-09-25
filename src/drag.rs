@@ -1,10 +1,10 @@
 use std::collections::HashSet;
 
-use egui::{CornerRadius, Pos2, Rect, Stroke, StrokeKind, Ui, Vec2, pos2, vec2};
+use egui::{CornerRadius, Pos2, Rect, Stroke, StrokeKind, Ui, Vec2, pos2};
 
 use crate::app::{
-    App, COLOR_SELECTION_BOX, Connection, EDGE_THRESHOLD, Gate, InstanceId, InstanceKind, Pin,
-    Power, WIRE_HIT_DISTANCE, Wire,
+    App, COLOR_SELECTION_BOX, Connection, Gate, Hover, InstanceId, InstanceKind, Pin, Power,
+    SNAP_THRESHOLD, Wire,
 };
 
 #[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
@@ -16,6 +16,7 @@ pub enum Drag {
     Canvas {
         id: InstanceId,
         offset: Vec2,
+        detach: bool,
     },
     Resize {
         id: InstanceId,
@@ -45,31 +46,6 @@ impl App {
         }
     }
 
-    pub fn interacted_instance(&self, mouse_pos: Pos2) -> Option<InstanceId> {
-        // Prioritize smaller/overlay items first: Power over Gates, then Wires
-        for (k, power) in &self.db.powers {
-            let rect = Rect::from_center_size(power.pos, self.canvas_config.base_gate_size);
-            if rect.contains(mouse_pos) {
-                return Some(k);
-            }
-        }
-
-        for (k, gate) in &self.db.gates {
-            let rect = Rect::from_center_size(gate.pos, self.canvas_config.base_gate_size);
-            if rect.contains(mouse_pos) {
-                return Some(k);
-            }
-        }
-
-        for (k, wire) in &self.db.wires {
-            let dist = distance_point_to_segment(mouse_pos, wire.start, wire.end);
-            if dist < WIRE_HIT_DISTANCE {
-                return Some(k);
-            }
-        }
-        None
-    }
-
     pub fn handle_drag_start_canvas(&mut self, mouse_pos: Pos2) {
         if self.drag.is_some() {
             return;
@@ -84,112 +60,83 @@ impl App {
             return;
         }
 
-        if let Some(hovered) = self.hovered {
-            match self.db.ty(hovered) {
+        let Some(hovered) = self.hovered else {
+            self.drag = Some(Drag::Selecting { start: mouse_pos });
+            self.potential_connections.clear();
+            return;
+        };
+        match hovered {
+            Hover::Pin(pin) => {
+                if matches!(self.db.ty(pin.ins), InstanceKind::Wire) {
+                    self.drag = Some(Drag::Resize {
+                        id: pin.ins,
+                        start: pin.index == 0,
+                    });
+                    return;
+                } else if self.is_pin_connected(pin) {
+                    let offset = -self.db.pin_offset(pin);
+                    self.drag = Some(Drag::Canvas {
+                        id: pin.ins,
+                        offset,
+                        detach: true,
+                    });
+                    return;
+                }
+                let pin_pos = self.db.pin_position(pin);
+                let wire_id = self.db.new_wire(Wire {
+                    start: pin_pos,
+                    end: mouse_pos,
+                });
+                self.db.connections.insert(Connection::new(
+                    pin,
+                    Pin {
+                        ins: wire_id,
+                        index: 0,
+                    },
+                ));
+                self.drag = Some(Drag::PinToWire {
+                    source_pin: pin,
+                    wire_id,
+                });
+                self.current_dirty = true;
+            }
+            Hover::Instance(hovered) => match self.db.ty(hovered) {
                 InstanceKind::Gate(_) => {
-                    if let Some(pin) = self.find_near_pin(hovered, mouse_pos) {
-                        if self.is_pin_connected(pin) {
-                            self.detach_pin(pin);
-                        } else {
-                            let pin_pos = self.db.pin_position(pin);
-                            let wire_id = self.db.new_wire(Wire {
-                                start: pin_pos,
-                                end: mouse_pos,
-                            });
-                            self.db.connections.insert(Connection::new(
-                                pin,
-                                Pin {
-                                    ins: wire_id,
-                                    index: 0,
-                                },
-                            ));
-                            self.drag = Some(Drag::PinToWire {
-                                source_pin: pin,
-                                wire_id,
-                            });
-                            self.current_dirty = true;
-                            return;
-                        }
-                    }
                     let gate = self.db.get_gate(hovered);
                     let offset = gate.pos - mouse_pos;
                     self.drag = Some(Drag::Canvas {
                         id: hovered,
+                        detach: false,
                         offset,
                     });
                 }
                 InstanceKind::Power => {
-                    if let Some(pin) = self.find_near_pin(hovered, mouse_pos) {
-                        if self.is_pin_connected(pin) {
-                            self.detach_pin(pin);
-                        } else {
-                            let pin_pos = self.db.pin_position(pin);
-                            let wire_id = self.db.new_wire(Wire {
-                                start: pin_pos,
-                                end: mouse_pos,
-                            });
-                            self.db.connections.insert(Connection::new(
-                                pin,
-                                Pin {
-                                    ins: wire_id,
-                                    index: 0,
-                                },
-                            ));
-                            self.drag = Some(Drag::PinToWire {
-                                source_pin: pin,
-                                wire_id,
-                            });
-                            self.current_dirty = true;
-                            return;
-                        }
-                    }
                     let power = self.db.get_power(hovered);
                     let offset = power.pos - mouse_pos;
                     self.drag = Some(Drag::Canvas {
                         id: hovered,
+                        detach: false,
                         offset,
                     });
                 }
                 InstanceKind::Wire => {
                     let wire = self.db.get_wire(hovered);
-                    if mouse_pos.distance(wire.start) < EDGE_THRESHOLD {
-                        self.detach_pin(Pin {
-                            ins: hovered,
-                            index: 0,
-                        });
-                        self.drag = Some(Drag::Resize {
-                            id: hovered,
-                            start: true,
-                        });
-                    } else if mouse_pos.distance(wire.end) < EDGE_THRESHOLD {
-                        self.detach_pin(Pin {
-                            ins: hovered,
-                            index: 1,
-                        });
-                        self.drag = Some(Drag::Resize {
-                            id: hovered,
-                            start: false,
-                        });
-                    } else {
-                        let wire_center = pos2(
-                            (wire.start.x + wire.end.x) * 0.5,
-                            (wire.start.y + wire.end.y) * 0.5,
-                        );
-                        let offset = wire_center - mouse_pos;
-                        self.drag = Some(Drag::Canvas {
-                            id: hovered,
-                            offset,
-                        });
-                    }
+                    let wire_center = pos2(
+                        (wire.start.x + wire.end.x) * 0.5,
+                        (wire.start.y + wire.end.y) * 0.5,
+                    );
+                    let offset = wire_center - mouse_pos;
+                    self.drag = Some(Drag::Canvas {
+                        id: hovered,
+                        detach: false,
+                        offset,
+                    });
                 }
-            }
-        } else {
-            self.drag = Some(Drag::Selecting { start: mouse_pos });
-            self.potential_connections.clear();
+            },
         }
     }
 
-    pub fn handle_dragging(&mut self, ui: &mut Ui, mouse: Pos2, canvas_rect: &Rect) {
+    pub fn handle_dragging(&mut self, ui: &mut Ui, mouse: Pos2) {
         match self.drag {
             Some(Drag::Panel { pos: _, kind }) => match kind {
                 InstanceKind::Gate(gate_kind) => self.draw_gate_preview(ui, gate_kind, mouse),
@@ -197,8 +144,16 @@ impl App {
                 InstanceKind::Wire => self.draw_wire(ui, default_wire(mouse), false, false),
             },
             Some(Drag::Selecting { start }) => {
-                let min = pos2(start.x.min(mouse.x), start.y.min(mouse.y));
-                let max = pos2(start.x.max(mouse.x), start.y.max(mouse.y));
+                let start_screen = start - self.viewport_offset;
+                let mouse_screen = mouse - self.viewport_offset;
+                let min = pos2(
+                    start_screen.x.min(mouse_screen.x),
+                    start_screen.y.min(mouse_screen.y),
+                );
+                let max = pos2(
+                    start_screen.x.max(mouse_screen.x),
+                    start_screen.y.max(mouse_screen.y),
+                );
                 let rect = Rect::from_min_max(min, max);
                 ui.painter().rect_stroke(
                     rect,
@@ -216,21 +171,16 @@ impl App {
                     let group_set = self.collect_connected_instances_from_many(&self.selected);
                     let group: Vec<InstanceId> = group_set.iter().copied().collect();
                     if !group.is_empty() {
-                        let delta = self.compute_within_bounds_delta(&group, desired, *canvas_rect);
-                        if delta != Vec2::ZERO {
-                            self.move_nonwires_and_resize_wires(&group, delta);
-                            if let Some(Drag::MoveSelection { start, has_dragged }) =
-                                self.drag.as_mut()
-                            {
-                                *start += delta;
-                                *has_dragged = true;
-                            }
+                        self.move_nonwires_and_resize_wires(&group, desired);
+                        if let Some(Drag::MoveSelection { start, has_dragged }) = self.drag.as_mut()
+                        {
+                            *start += desired;
+                            *has_dragged = true;
                         }
                     }
                 }
-                self.potential_connections.clear();
             }
-            Some(Drag::Canvas { id, offset }) => {
+            Some(Drag::Canvas { id, detach, offset }) => {
                 let new_pos = mouse + offset;
                 match self.db.ty(id) {
                     InstanceKind::Gate(_) | InstanceKind::Power => {
@@ -241,33 +191,33 @@ impl App {
                         };
                         let desired = new_pos - current_pos;
                         let ids = [id];
-                        let moved_delta =
-                            self.compute_within_bounds_delta(&ids, desired, *canvas_rect);
-                        if moved_delta != Vec2::ZERO {
-                            self.move_nonwires_and_resize_wires(&ids, moved_delta);
+                        if detach {
+                            if let InstanceKind::Gate(_) = self.db.ty(id) {
+                                self.db.get_gate_mut(id).pos += desired;
+                            } else {
+                                self.db.get_power_mut(id).pos += desired;
+                            }
+                        } else {
+                            self.move_nonwires_and_resize_wires(&ids, desired);
                         }
                     }
                     InstanceKind::Wire => {
                         let w = self.db.get_wire_mut(id);
                         let center = pos2((w.start.x + w.end.x) * 0.5, (w.start.y + w.end.y) * 0.5);
                         let desired = new_pos - center;
-                        let delta = clamp_wire_move(w, desired, canvas_rect);
-                        w.start += delta;
-                        w.end += delta;
+                        w.start += desired;
+                        w.end += desired;
                     }
                 }
 
                 self.potential_connections = self.compute_potential_connections_for_instance(id);
             }
             Some(Drag::Resize { id, start }) => {
-                let mut p = mouse;
-                p.x = p.x.clamp(canvas_rect.left(), canvas_rect.right());
-                p.y = p.y.clamp(canvas_rect.top(), canvas_rect.bottom());
                 let wire = self.db.get_wire_mut(id);
                 if start {
-                    wire.start = p;
+                    wire.start = mouse;
                 } else {
-                    wire.end = p;
+                    wire.end = mouse;
                 }
 
                 self.potential_connections = self.compute_potential_connections_for_pin(Pin {
@@ -279,11 +229,8 @@ impl App {
                 source_pin: _,
                 wire_id,
             }) => {
-                let mut p = mouse;
-                p.x = p.x.clamp(canvas_rect.left(), canvas_rect.right());
-                p.y = p.y.clamp(canvas_rect.top(), canvas_rect.bottom());
                 let wire = self.db.get_wire_mut(wire_id);
-                wire.end = p;
+                wire.end = mouse;
 
                 self.potential_connections = self.compute_potential_connections_for_pin(Pin {
                     ins: wire_id,
@@ -298,7 +245,7 @@ impl App {
         }
     }
 
-    pub fn handle_drag_end(&mut self, canvas_rect: &Rect, mouse_pos: Option<Pos2>) {
+    pub fn handle_drag_end(&mut self, canvas_rect: &Rect, mouse_pos: Pos2) {
         let Some(drag) = self.drag.take() else {
             return;
         };
@@ -319,11 +266,8 @@ impl App {
                 self.current_dirty = true;
             }
             Drag::Selecting { start } => {
-                let Some(mouse) = mouse_pos else {
-                    return;
-                };
-                let min = pos2(start.x.min(mouse.x), start.y.min(mouse.y));
-                let max = pos2(start.x.max(mouse.x), start.y.max(mouse.y));
+                let min = pos2(start.x.min(mouse_pos.x), start.y.min(mouse_pos.y));
+                let max = pos2(start.x.max(mouse_pos.x), start.y.max(mouse_pos.y));
                 let rect = Rect::from_min_max(min, max);
                 let mut sel: HashSet<InstanceId> = HashSet::new();
                 for (id, g) in &self.db.gates {
@@ -355,34 +299,29 @@ impl App {
                 }
                 self.potential_connections.clear();
             }
-            Drag::Canvas { id, offset: _ } => {
-                if !self.potential_connections.is_empty() {
-                    self.finalize_connections_for_instance(id, canvas_rect);
-                }
-                self.potential_connections.clear();
+            Drag::Canvas {
+                id,
+                detach: _,
+                offset: _,
+            } => {
+                self.finalize_connections_for_instance(id);
             }
             Drag::Resize { id, start } => {
-                if !self.potential_connections.is_empty() {
-                    let pin = Pin {
-                        ins: id,
-                        index: u32::from(!start),
-                    };
-                    self.finalize_connections_for_pin(pin, canvas_rect);
-                }
-                self.potential_connections.clear();
+                let pin = Pin {
+                    ins: id,
+                    index: u32::from(!start),
+                };
+                self.finalize_connections_for_pin(pin);
             }
             Drag::PinToWire {
                 source_pin: _,
                 wire_id,
             } => {
-                if !self.potential_connections.is_empty() {
-                    let pin = Pin {
-                        ins: wire_id,
-                        index: 1,
-                    };
-                    self.finalize_connections_for_pin(pin, canvas_rect);
-                }
-                self.potential_connections.clear();
+                let pin = Pin {
+                    ins: wire_id,
+                    index: 1,
+                };
+                self.finalize_connections_for_pin(pin);
             }
         }
     }
@@ -395,6 +334,7 @@ impl App {
         self.db.wires.remove(id);
         self.db.connections.retain(|c| !c.involves_instance(id));
         self.hovered.take();
+        self.drag.take();
         self.selected.remove(&id);
         self.current.retain(|p| p.ins != id);
         self.current_dirty = true;
@@ -413,7 +353,7 @@ impl App {
                 }
                 for other_pin in self.db.pins_of(other_id) {
                     let other_pos = self.db.pin_position(other_pin);
-                    if (pos - other_pos).length() <= EDGE_THRESHOLD {
+                    if (pos - other_pos).length() <= SNAP_THRESHOLD {
                         out.insert(Connection::new(my_pin, other_pin));
                     }
                 }
@@ -431,7 +371,7 @@ impl App {
             }
             for other_pin in self.db.pins_of(other_id) {
                 let other_pos = self.db.pin_position(other_pin);
-                if (pos - other_pos).length() <= EDGE_THRESHOLD {
+                if (pos - other_pos).length() <= SNAP_THRESHOLD {
                     out.insert(Connection::new(pin, other_pin));
                 }
             }
@@ -439,7 +379,7 @@ impl App {
         out
     }
 
-    pub fn finalize_connections_for_instance(&mut self, id: InstanceId, canvas_rect: &Rect) {
+    pub fn finalize_connections_for_instance(&mut self, id: InstanceId) {
         let to_add: Vec<Connection> = self
             .potential_connections
             .iter()
@@ -452,7 +392,7 @@ impl App {
             } else {
                 (c.b, c.a)
             };
-            self.snap_pin_to_other(moving_pin, other_pin, canvas_rect);
+            self.snap_pin_to_other(moving_pin, other_pin);
         }
 
         let mut new_set = HashSet::with_capacity(self.db.connections.len());
@@ -460,7 +400,7 @@ impl App {
             if c.involves_instance(id) {
                 let p1 = self.db.pin_position(c.a);
                 let p2 = self.db.pin_position(c.b);
-                if (p1 - p2).length() <= EDGE_THRESHOLD {
+                if (p1 - p2).length() <= SNAP_THRESHOLD {
                     new_set.insert(*c);
                 }
             } else {
@@ -474,7 +414,7 @@ impl App {
         self.current_dirty = true;
     }
 
-    pub fn finalize_connections_for_pin(&mut self, pin: Pin, canvas_rect: &Rect) {
+    pub fn finalize_connections_for_pin(&mut self, pin: Pin) {
         let to_add: Vec<Connection> = self
             .potential_connections
             .iter()
@@ -483,10 +423,10 @@ impl App {
             .collect();
         for c in &to_add {
             if c.a == pin {
-                self.snap_pin_to_other(c.a, c.b, canvas_rect);
+                self.snap_pin_to_other(c.a, c.b);
             }
             if c.b == pin {
-                self.snap_pin_to_other(c.b, c.a, canvas_rect);
+                self.snap_pin_to_other(c.b, c.a);
             }
         }
         // Rebuild connections set, dropping stale ones for this pin
@@ -495,7 +435,7 @@ impl App {
             if c.a == pin || c.b == pin {
                 let p1 = self.db.pin_position(c.a);
                 let p2 = self.db.pin_position(c.b);
-                if (p1 - p2).length() <= EDGE_THRESHOLD {
+                if (p1 - p2).length() <= SNAP_THRESHOLD {
                     new_set.insert(*c);
                 }
             } else {
@@ -509,7 +449,7 @@ impl App {
         self.current_dirty = true;
     }
 
-    pub fn snap_pin_to_other(&mut self, src: Pin, dst: Pin, canvas_rect: &Rect) {
+    pub fn snap_pin_to_other(&mut self, src: Pin, dst: Pin) {
         let target = self.db.pin_position(dst);
         match self.db.ty(src.ins) {
             InstanceKind::Wire => {
@@ -525,30 +465,16 @@ impl App {
                 let info = gk.graphics().pins[src.index as usize];
                 let current = g.pos + info.offset;
                 let desired = target - current;
-                let half = self.canvas_config.base_gate_size * 0.5;
-                let delta = clamp_gate_move(g.pos, desired, canvas_rect, half);
-                g.pos += delta;
+                g.pos += desired;
             }
             InstanceKind::Power => {
                 let p = self.db.get_power_mut(src.ins);
                 let info = crate::assets::POWER_ON_GRAPHICS.pins[src.index as usize];
                 let current = p.pos + info.offset;
                 let desired = target - current;
-                let half = self.canvas_config.base_gate_size * 0.5;
-                let delta = clamp_gate_move(p.pos, desired, canvas_rect, half);
-                p.pos += delta;
+                p.pos += desired;
             }
         }
-    }
-
-    pub fn find_near_pin(&self, id: InstanceId, mouse: Pos2) -> Option<Pin> {
-        for pin in self.db.pins_of(id) {
-            let p = self.db.pin_position(pin);
-            if mouse.distance(p) <= EDGE_THRESHOLD {
-                return Some(pin);
-            }
-        }
-        None
     }
 
     pub fn detach_pin(&mut self, pin: Pin) {
@@ -583,53 +509,6 @@ impl App {
             }
         }
         out
-    }
-
-    pub fn compute_within_bounds_delta(
-        &self,
-        ids: &[InstanceId],
-        desired: Vec2,
-        rect: Rect,
-    ) -> Vec2 {
-        let half_w = self.canvas_config.base_gate_size.x * 0.5;
-        let half_h = self.canvas_config.base_gate_size.y * 0.5;
-        let mut dx_min = f32::NEG_INFINITY;
-        let mut dx_max = f32::INFINITY;
-        let mut dy_min = f32::NEG_INFINITY;
-        let mut dy_max = f32::INFINITY;
-
-        for id in ids {
-            match self.db.ty(*id) {
-                InstanceKind::Gate(_) => {
-                    let g = self.db.get_gate(*id);
-                    let q = g.pos;
-                    dx_min = dx_min.max(rect.left() + half_w - q.x);
-                    dx_max = dx_max.min(rect.right() - half_w - q.x);
-                    dy_min = dy_min.max(rect.top() + half_h - q.y);
-                    dy_max = dy_max.min(rect.bottom() - half_h - q.y);
-                }
-                InstanceKind::Power => {
-                    let p = self.db.get_power(*id);
-                    let q = p.pos;
-                    dx_min = dx_min.max(rect.left() + half_w - q.x);
-                    dx_max = dx_max.min(rect.right() - half_w - q.x);
-                    dy_min = dy_min.max(rect.top() + half_h - q.y);
-                    dy_max = dy_max.min(rect.bottom() - half_h - q.y);
-                }
-                InstanceKind::Wire => {
-                    let w = self.db.get_wire(*id);
-                    for q in [w.start, w.end] {
-                        dx_min = dx_min.max(rect.left() - q.x);
-                        dx_max = dx_max.min(rect.right() - q.x);
-                        dy_min = dy_min.max(rect.top() - q.y);
-                        dy_max = dy_max.min(rect.bottom() - q.y);
-                    }
-                }
-            }
-        }
-        let safe_dx = desired.x.clamp(dx_min, dx_max);
-        let safe_dy = desired.y.clamp(dy_min, dy_max);
-        vec2(safe_dx, safe_dy)
     }
 
     pub fn move_nonwires_and_resize_wires(&mut self, ids: &[InstanceId], delta: Vec2) {
@@ -669,50 +548,4 @@ pub fn default_wire(pos: Pos2) -> Wire {
         start: pos2(pos.x - 30.0, pos.y),
         end: pos2(pos.x + 30.0, pos.y),
     }
-}
-
-pub fn distance_point_to_segment(p: Pos2, a: Pos2, b: Pos2) -> f32 {
-    let ab: Vec2 = b - a;
-    let ap: Vec2 = p - a;
-
-    let ab_len2 = ab.x * ab.x + ab.y * ab.y;
-    if ab_len2 == 0.0 {
-        return (p - a).length();
-    }
-
-    let t = ((ap.x * ab.x + ap.y * ab.y) / ab_len2).clamp(0.0, 1.0);
-
-    let closest = a + ab * t;
-    (p - closest).length()
-}
-
-pub fn clamp_gate_move(current: Pos2, desired: Vec2, rect: &Rect, half: Vec2) -> Vec2 {
-    let target = current + desired;
-    let clamped_x = target.x.clamp(rect.left() + half.x, rect.right() - half.x);
-    let clamped_y = target.y.clamp(rect.top() + half.y, rect.bottom() - half.y);
-    vec2(clamped_x - current.x, clamped_y - current.y)
-}
-
-pub fn clamp_wire_move(wire: &Wire, desired: Vec2, rect: &Rect) -> Vec2 {
-    let ts = wire.start + desired;
-    let te = wire.end + desired;
-    let sx = ts.x.clamp(rect.left(), rect.right());
-    let sy = ts.y.clamp(rect.top(), rect.bottom());
-    let ex = te.x.clamp(rect.left(), rect.right());
-    let ey = te.y.clamp(rect.top(), rect.bottom());
-    let safe_dx_start = sx - wire.start.x;
-    let safe_dy_start = sy - wire.start.y;
-    let safe_dx_end = ex - wire.end.x;
-    let safe_dy_end = ey - wire.end.y;
-    let safe_dx = if desired.x.is_sign_positive() {
-        safe_dx_start.min(safe_dx_end)
-    } else {
-        safe_dx_start.max(safe_dx_end)
-    };
-    let safe_dy = if desired.y.is_sign_positive() {
-        safe_dy_start.min(safe_dy_end)
-    } else {
-        safe_dy_start.max(safe_dy_end)
-    };
-    vec2(safe_dx, safe_dy)
 }
