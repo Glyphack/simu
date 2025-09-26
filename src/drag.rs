@@ -38,11 +38,11 @@ pub enum Drag {
 impl App {
     pub fn inside_rect(&self, canvas: &Rect, kind: InstanceKind, pos: Pos2) -> bool {
         match kind {
-            InstanceKind::Gate(_) | InstanceKind::Power => {
+            InstanceKind::Wire => canvas.contains(pos2(pos.x + 30.0, pos.y)),
+            InstanceKind::Gate(_) | InstanceKind::Power | InstanceKind::CustomCircuit(_) => {
                 let rect = Rect::from_center_size(pos, self.canvas_config.base_gate_size);
                 canvas.contains_rect(rect)
             }
-            InstanceKind::Wire => canvas.contains(pos2(pos.x + 30.0, pos.y)),
         }
     }
 
@@ -132,6 +132,15 @@ impl App {
                         offset,
                     });
                 }
+                InstanceKind::CustomCircuit(_) => {
+                    let cc = self.db.get_custom_circuit(hovered);
+                    let offset = cc.pos - mouse_pos;
+                    self.drag = Some(Drag::Canvas {
+                        id: hovered,
+                        detach: false,
+                        offset,
+                    });
+                }
             },
         }
     }
@@ -142,6 +151,9 @@ impl App {
                 InstanceKind::Gate(gate_kind) => self.draw_gate_preview(ui, gate_kind, mouse),
                 InstanceKind::Power => self.draw_power_preview(ui, mouse),
                 InstanceKind::Wire => self.draw_wire(ui, default_wire(mouse), false, false),
+                InstanceKind::CustomCircuit(def) => {
+                    self.draw_custom_circuit_preview(ui, def, mouse);
+                }
             },
             Some(Drag::Selecting { start }) => {
                 let start_screen = start - self.viewport_offset;
@@ -208,6 +220,10 @@ impl App {
                         w.start += desired;
                         w.end += desired;
                     }
+                    InstanceKind::CustomCircuit(_) => {
+                        let cc = self.db.get_custom_circuit_mut(id);
+                        cc.pos = new_pos;
+                    }
                 }
 
                 self.potential_connections = self.compute_potential_connections_for_instance(id);
@@ -254,13 +270,26 @@ impl App {
                 if !self.inside_rect(canvas_rect, kind, pos) {
                     return;
                 }
-                match kind {
+                if let InstanceKind::CustomCircuit(definition_index) = kind
+                    && definition_index >= self.db.custom_circuit_definitions.len()
+                {
+                    return;
+                }
+
+                let _id = match kind {
                     InstanceKind::Gate(gate_kind) => self.db.new_gate(Gate {
                         kind: gate_kind,
                         pos,
                     }),
                     InstanceKind::Power => self.db.new_power(Power { pos, on: true }),
                     InstanceKind::Wire => self.db.new_wire(default_wire(pos)),
+                    InstanceKind::CustomCircuit(definition_index) => {
+                        self.db
+                            .new_custom_circuit(crate::custom_circuit::CustomCircuit {
+                                pos,
+                                definition_index,
+                            })
+                    }
                 };
                 self.potential_connections.clear();
                 self.current_dirty = true;
@@ -332,6 +361,7 @@ impl App {
         self.db.gates.remove(id);
         self.db.powers.remove(id);
         self.db.wires.remove(id);
+        self.db.custom_circuits.remove(id);
         self.db.connections.retain(|c| !c.involves_instance(id));
         self.hovered.take();
         self.drag.take();
@@ -474,6 +504,12 @@ impl App {
                 let desired = target - current;
                 p.pos += desired;
             }
+            InstanceKind::CustomCircuit(_) => {
+                let cc = self.db.get_custom_circuit_mut(src.ins);
+                let current = cc.pos;
+                let desired = target - current;
+                cc.pos += desired;
+            }
         }
     }
 
@@ -524,6 +560,10 @@ impl App {
                     p.pos += delta;
                 }
                 InstanceKind::Wire => {}
+                InstanceKind::CustomCircuit(_) => {
+                    let cc = self.db.get_custom_circuit_mut(*id);
+                    cc.pos += delta;
+                }
             }
         }
 

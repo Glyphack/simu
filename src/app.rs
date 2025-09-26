@@ -8,7 +8,12 @@ use egui::{
 };
 use slotmap::{Key as _, SecondaryMap, SlotMap};
 
-use crate::{assets, config::CanvasConfig, drag::Drag};
+use crate::{
+    assets,
+    config::CanvasConfig,
+    custom_circuit::{self, CustomCircuit, CustomCircuitDefinition},
+    drag::Drag,
+};
 
 pub const PANEL_BUTTON_MAX_HEIGH: f32 = 70.0;
 
@@ -60,6 +65,8 @@ pub enum InstancePosOffset {
     Gate(GateKind, Vec2),
     Power(Vec2),
     Wire(Vec2, Vec2),
+    // Index to definition
+    CustomCircuit(usize, Vec2),
 }
 
 #[derive(serde::Deserialize, serde::Serialize, Copy, Debug, Clone)]
@@ -67,6 +74,7 @@ pub enum InstanceKind {
     Gate(GateKind),
     Power,
     Wire,
+    CustomCircuit(usize),
 }
 
 // A specific pin on an instance
@@ -216,6 +224,9 @@ pub struct DB {
     pub gates: SecondaryMap<InstanceId, Gate>,
     pub powers: SecondaryMap<InstanceId, Power>,
     pub wires: SecondaryMap<InstanceId, Wire>,
+    pub custom_circuits: SecondaryMap<InstanceId, CustomCircuit>,
+    // Definition of custom circuits created by the user
+    pub custom_circuit_definitions: Vec<CustomCircuitDefinition>,
     pub connections: HashSet<Connection>,
 }
 
@@ -243,6 +254,15 @@ impl DB {
         let k = self.instances.insert(());
         self.wires.insert(k, w);
         self.types.insert(k, InstanceKind::Wire);
+        k
+    }
+
+    pub fn new_custom_circuit(&mut self, c: crate::custom_circuit::CustomCircuit) -> InstanceId {
+        let k = self.instances.insert(());
+        let definition_index = c.definition_index;
+        self.custom_circuits.insert(k, c);
+        self.types
+            .insert(k, InstanceKind::CustomCircuit(definition_index));
         k
     }
 
@@ -277,6 +297,21 @@ impl DB {
         self.wires.get_mut(id).expect("wire not found (mut)")
     }
 
+    pub fn get_custom_circuit(&self, id: InstanceId) -> &crate::custom_circuit::CustomCircuit {
+        self.custom_circuits
+            .get(id)
+            .expect("custom circuit not found")
+    }
+
+    pub fn get_custom_circuit_mut(
+        &mut self,
+        id: InstanceId,
+    ) -> &mut crate::custom_circuit::CustomCircuit {
+        self.custom_circuits
+            .get_mut(id)
+            .expect("custom circuit not found (mut)")
+    }
+
     pub fn pins_of(&self, id: InstanceId) -> Vec<Pin> {
         match self.ty(id) {
             InstanceKind::Gate(gk) => {
@@ -284,11 +319,21 @@ impl DB {
                 (0..n as u32).map(|i| Pin { ins: id, index: i }).collect()
             }
             InstanceKind::Power => {
-                // power graphics depends on on/off, but pin layout is identical
                 let n = assets::POWER_ON_GRAPHICS.pins.len();
                 (0..n as u32).map(|i| Pin { ins: id, index: i }).collect()
             }
             InstanceKind::Wire => vec![Pin { ins: id, index: 0 }, Pin { ins: id, index: 1 }],
+            InstanceKind::CustomCircuit(_) => {
+                let cc = self.get_custom_circuit(id);
+                if cc.definition_index < self.custom_circuit_definitions.len() {
+                    let def = &self.custom_circuit_definitions[cc.definition_index];
+                    (0..def.external_pins.len() as u32)
+                        .map(|i| Pin { ins: id, index: i })
+                        .collect()
+                } else {
+                    Vec::new()
+                }
+            }
         }
     }
 
@@ -307,6 +352,10 @@ impl DB {
             InstanceKind::Wire => {
                 let w = self.get_wire(pin.ins);
                 if pin.index == 0 { w.start } else { w.end }
+            }
+            InstanceKind::CustomCircuit(_) => {
+                let cc = self.get_custom_circuit(pin.ins);
+                cc.pos + self.pin_offset(pin)
             }
         }
     }
@@ -330,6 +379,11 @@ impl DB {
                 } else {
                     center - w.end
                 }
+            }
+            InstanceKind::CustomCircuit(_) => {
+                let cc = self.get_custom_circuit(pin.ins);
+                let def = &self.custom_circuit_definitions[cc.definition_index];
+                def.external_pins[pin.index as usize].offset
             }
         }
     }
@@ -373,6 +427,11 @@ pub struct App {
     pub panning: bool,
     #[serde(skip)]
     pub panel_width: f32,
+    // Context menu state
+    #[serde(skip)]
+    pub show_right_click_actions_menu: bool,
+    #[serde(skip)]
+    pub context_menu_pos: Pos2,
 }
 
 impl Default for App {
@@ -384,6 +443,8 @@ impl Default for App {
                 gates: Default::default(),
                 powers: Default::default(),
                 wires: Default::default(),
+                custom_circuits: Default::default(),
+                custom_circuit_definitions: Default::default(),
                 connections: Default::default(),
             },
             canvas_config: Default::default(),
@@ -399,6 +460,8 @@ impl Default for App {
             viewport_offset: Vec2::ZERO,
             panning: false,
             panel_width: 0.0,
+            show_right_click_actions_menu: false,
+            context_menu_pos: Pos2::ZERO,
         }
     }
 }
@@ -500,33 +563,48 @@ impl App {
     }
 
     fn draw_panel(&mut self, ui: &mut Ui) {
-        self.draw_panel_button(ui, InstanceKind::Gate(GateKind::And));
-        self.draw_panel_button(ui, InstanceKind::Gate(GateKind::Nand));
-        self.draw_panel_button(ui, InstanceKind::Gate(GateKind::Or));
-        self.draw_panel_button(ui, InstanceKind::Gate(GateKind::Nor));
-        self.draw_panel_button(ui, InstanceKind::Gate(GateKind::Xor));
-        self.draw_panel_button(ui, InstanceKind::Gate(GateKind::Xnor));
-        self.draw_panel_button(ui, InstanceKind::Power);
-        self.draw_panel_button(ui, InstanceKind::Wire);
+        egui::ScrollArea::vertical()
+            .auto_shrink([true; 2])
+            .show(ui, |ui| {
+                self.draw_panel_button(ui, InstanceKind::Gate(GateKind::And));
+                self.draw_panel_button(ui, InstanceKind::Gate(GateKind::Nand));
+                self.draw_panel_button(ui, InstanceKind::Gate(GateKind::Or));
+                self.draw_panel_button(ui, InstanceKind::Gate(GateKind::Nor));
+                self.draw_panel_button(ui, InstanceKind::Gate(GateKind::Xor));
+                self.draw_panel_button(ui, InstanceKind::Gate(GateKind::Xnor));
+                self.draw_panel_button(ui, InstanceKind::Power);
+                self.draw_panel_button(ui, InstanceKind::Wire);
 
-        ui.add_space(8.0);
+                if !self.db.custom_circuit_definitions.is_empty() {
+                    ui.add_space(8.0);
+                    ui.label("Custom Circuits:");
+                }
+                let custom_circuit_indices: Vec<usize> =
+                    (0..self.db.custom_circuit_definitions.len()).collect();
+                for i in custom_circuit_indices {
+                    self.draw_panel_button(ui, InstanceKind::CustomCircuit(i));
+                }
 
-        if Button::new("Clear Canvas")
-            .min_size(vec2(48.0, 30.0))
-            .ui(ui)
-            .clicked()
-        {
-            self.db.gates.clear();
-            self.db.powers.clear();
-            self.db.wires.clear();
-            self.db.types.clear();
-            self.db.instances.clear();
-            self.db.connections.clear();
-            self.hovered = None;
-            self.drag = None;
-            self.current.clear();
-            self.current_dirty = false;
-        }
+                ui.add_space(8.0);
+
+                if Button::new("Clear Canvas")
+                    .min_size(vec2(48.0, 30.0))
+                    .ui(ui)
+                    .clicked()
+                {
+                    self.db.gates.clear();
+                    self.db.powers.clear();
+                    self.db.wires.clear();
+                    self.db.custom_circuits.clear();
+                    self.db.types.clear();
+                    self.db.instances.clear();
+                    self.db.connections.clear();
+                    self.hovered = None;
+                    self.drag = None;
+                    self.current.clear();
+                    self.current_dirty = false;
+                }
+            });
     }
 
     fn draw_panel_button(&mut self, ui: &mut Ui, kind: InstanceKind) -> Response {
@@ -553,6 +631,11 @@ impl App {
             InstanceKind::Wire => ui.add(
                 Button::new("Wire")
                     .sense(Sense::click_and_drag())
+                    .min_size(vec2(78.0, 30.0)),
+            ),
+            InstanceKind::CustomCircuit(_) => ui.add(
+                Button::new("Custom")
+                    .sense(Sense::hover())
                     .min_size(vec2(78.0, 30.0)),
             ),
         };
@@ -669,6 +752,15 @@ impl App {
             self.current_dirty = true;
         }
 
+        // Handle context menu for selected components
+        if right_clicked
+            && !self.selected.is_empty()
+            && let Some(mouse_world) = mouse_pos_world
+        {
+            self.show_right_click_actions_menu = true;
+            self.context_menu_pos = mouse_world - self.viewport_offset; // Convert to screen coordinates
+        }
+
         if self.current_dirty {
             self.recompute_current();
         }
@@ -678,6 +770,9 @@ impl App {
         }
         for (id, power) in &self.db.powers {
             self.draw_power(ui, id, power);
+        }
+        for (id, custom_circuit) in &self.db.custom_circuits {
+            self.draw_custom_circuit(ui, id, custom_circuit);
         }
         for (id, wire) in &self.db.wires {
             let has_current = self.current.contains(&Pin { ins: id, index: 0 });
@@ -741,6 +836,8 @@ impl App {
             self.highlight_hovered(ui);
         }
         self.draw_selection_highlight(ui);
+
+        self.draw_right_click_actions_menu(ui);
     }
 
     fn draw_grid(ui: &Ui, canvas_rect: Rect, viewport_offset: Vec2) {
@@ -842,6 +939,109 @@ impl App {
         let screen_center = pos - self.viewport_offset;
         self.draw_instance_graphics(ui, power.graphics(), screen_center, |_| false);
     }
+
+    fn draw_custom_circuit(
+        &self,
+        ui: &Ui,
+        id: InstanceId,
+        custom_circuit: &crate::custom_circuit::CustomCircuit,
+    ) {
+        let screen_center = custom_circuit.pos - self.viewport_offset;
+
+        // Get the definition for this custom circuit
+        if let Some(definition) = self
+            .db
+            .custom_circuit_definitions
+            .get(custom_circuit.definition_index)
+        {
+            // Draw as a dark blue rectangle with the name
+            let rect = Rect::from_center_size(screen_center, self.canvas_config.base_gate_size);
+            ui.painter()
+                .rect_filled(rect, CornerRadius::default(), egui::Color32::DARK_BLUE);
+
+            // Draw the name
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                &definition.name,
+                egui::FontId::default(),
+                egui::Color32::WHITE,
+            );
+
+            // Draw external pins
+            for (pin_index, ext_pin) in definition.external_pins.iter().enumerate() {
+                let pin_world_pos = custom_circuit.pos + ext_pin.offset;
+                let pin_screen_pos = pin_world_pos - self.viewport_offset;
+
+                // Determine pin color based on whether it has current
+                let has_current = self.current.contains(&Pin {
+                    ins: id,
+                    index: pin_index as u32,
+                });
+
+                let pin_color = match ext_pin.kind {
+                    crate::assets::PinKind::Input => egui::Color32::LIGHT_GREEN,
+                    crate::assets::PinKind::Output => egui::Color32::LIGHT_RED,
+                };
+
+                // Draw the pin
+                ui.painter().circle_filled(
+                    pin_screen_pos,
+                    self.canvas_config.base_pin_size,
+                    pin_color,
+                );
+
+                // Add outline if it has current
+                if has_current {
+                    ui.painter().circle_stroke(
+                        pin_screen_pos,
+                        self.canvas_config.base_pin_size + 3.0,
+                        egui::Stroke::new(2.0, COLOR_PIN_POWERED_OUTLINE),
+                    );
+                }
+            }
+        }
+    }
+
+    pub fn draw_custom_circuit_preview(&self, ui: &Ui, definition_index: usize, pos: Pos2) {
+        let screen_center = pos - self.viewport_offset;
+
+        // Get the definition for this custom circuit
+        if let Some(definition) = self.db.custom_circuit_definitions.get(definition_index) {
+            // Draw as a dark blue rectangle with the name
+            let rect = Rect::from_center_size(screen_center, self.canvas_config.base_gate_size);
+            ui.painter()
+                .rect_filled(rect, CornerRadius::default(), egui::Color32::DARK_BLUE);
+
+            // Draw the name
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                &definition.name,
+                egui::FontId::default(),
+                egui::Color32::WHITE,
+            );
+
+            // Draw external pins (no current highlighting in preview)
+            for ext_pin in &definition.external_pins {
+                let pin_world_pos = pos + ext_pin.offset;
+                let pin_screen_pos = pin_world_pos - self.viewport_offset;
+
+                let pin_color = match ext_pin.kind {
+                    crate::assets::PinKind::Input => egui::Color32::LIGHT_GREEN,
+                    crate::assets::PinKind::Output => egui::Color32::LIGHT_RED,
+                };
+
+                // Draw the pin
+                ui.painter().circle_filled(
+                    pin_screen_pos,
+                    self.canvas_config.base_pin_size,
+                    pin_color,
+                );
+            }
+        }
+    }
+
     pub fn draw_wire(&self, ui: &Ui, mouse: Wire, hovered: bool, has_current: bool) {
         let mut color = if has_current {
             COLOR_WIRE_POWERED
@@ -965,6 +1165,19 @@ impl App {
                 }
                 // Wire is highlighted when drawing
                 InstanceKind::Wire => {}
+                InstanceKind::CustomCircuit(_) => {
+                    let cc = self.db.get_custom_circuit(hovered);
+                    let outer = Rect::from_center_size(
+                        cc.pos - self.viewport_offset,
+                        self.canvas_config.base_gate_size + vec2(3.0, 3.0),
+                    );
+                    ui.painter().rect_stroke(
+                        outer,
+                        CornerRadius::default(),
+                        Stroke::new(2.0, COLOR_HOVER_INSTANCE_OUTLINE),
+                        StrokeKind::Middle,
+                    );
+                }
             },
         }
     }
@@ -1003,6 +1216,19 @@ impl App {
                     );
                 }
                 InstanceKind::Wire => {}
+                InstanceKind::CustomCircuit(_) => {
+                    let cc = self.db.get_custom_circuit(id);
+                    let r = Rect::from_center_size(
+                        cc.pos - self.viewport_offset,
+                        self.canvas_config.base_gate_size + vec2(6.0, 6.0),
+                    );
+                    ui.painter().rect_stroke(
+                        r,
+                        CornerRadius::default(),
+                        Stroke::new(2.0, COLOR_SELECTION_HIGHLIGHT),
+                        StrokeKind::Outside,
+                    );
+                }
             }
         }
     }
@@ -1060,6 +1286,142 @@ impl App {
                     current.insert(out);
                 }
             }
+            InstanceKind::CustomCircuit(_) => {
+                let cc = self.db.get_custom_circuit(id);
+                if let Some(definition) =
+                    self.db.custom_circuit_definitions.get(cc.definition_index)
+                {
+                    self.eval_custom_circuit(id, definition, current);
+                }
+            }
+        }
+    }
+
+    fn eval_custom_circuit(
+        &self,
+        custom_circuit_id: InstanceId,
+        definition: &CustomCircuitDefinition,
+        current: &mut HashSet<Pin>,
+    ) {
+        // Create a mapping from external pins to their current state
+        let mut internal_current = HashSet::new();
+
+        // For each external input pin, check if it has current and activate the corresponding internal pin
+        for (external_pin_index, external_pin) in definition.external_pins.iter().enumerate() {
+            if external_pin.kind == crate::assets::PinKind::Input {
+                let external_pin_obj = Pin {
+                    ins: custom_circuit_id,
+                    index: external_pin_index as u32,
+                };
+
+                // Check if this external input pin has current flowing into it
+                let mut visiting = HashSet::new();
+                if self.eval_pin(external_pin_obj, current, &mut visiting) {
+                    // Activate the corresponding internal pin
+                    internal_current.insert(external_pin.internal_pin);
+                }
+            }
+        }
+
+        // Simulate the internal circuit components
+        // This is a simplified simulation that processes components in order
+        // A full implementation might need topological sorting or iterative convergence
+        let mut changed = true;
+        let mut iterations = 0;
+        const MAX_ITERATIONS: u32 = 100; // Prevent infinite loops
+
+        while changed && iterations < MAX_ITERATIONS {
+            changed = false;
+            let old_size = internal_current.len();
+
+            // Evaluate each internal component
+            for component in &definition.internal_components {
+                match component {
+                    crate::app::InstancePosOffset::Gate(gate_kind, _offset) => {
+                        // For simplicity, we'll implement a basic gate evaluation
+                        // This assumes the standard gate pin layout: input A (0), output (1), input B (2)
+                        // Note: This is a simplified approach - a full implementation would need
+                        // to create a temporary DB and simulate properly
+                        Self::eval_internal_gate(
+                            *gate_kind,
+                            &definition.internal_connections,
+                            &mut internal_current,
+                        );
+                    }
+                    crate::app::InstancePosOffset::Power(_offset) => {
+                        // Powers in the internal circuit should activate their output pins
+                        // For now, we'll assume they're always on when included in a custom circuit
+                        // A full implementation would track their state
+                    }
+                    crate::app::InstancePosOffset::Wire(..)
+                    | crate::app::InstancePosOffset::CustomCircuit(..) => {
+                        // Wires propagate current from one end to the other
+                        // Nested custom circuits would need recursive evaluation
+                        // For now, these cases are handled by connection processing
+                    }
+                }
+            }
+
+            // Propagate current through internal connections
+            let mut new_current = internal_current.clone();
+            for connection in &definition.internal_connections {
+                if internal_current.contains(&connection.a) {
+                    new_current.insert(connection.b);
+                }
+                if internal_current.contains(&connection.b) {
+                    new_current.insert(connection.a);
+                }
+            }
+
+            if new_current.len() != old_size {
+                changed = true;
+            }
+            internal_current = new_current;
+            iterations += 1;
+        }
+
+        // Map internal outputs back to external outputs
+        for (external_pin_index, external_pin) in definition.external_pins.iter().enumerate() {
+            if external_pin.kind == crate::assets::PinKind::Output
+                && internal_current.contains(&external_pin.internal_pin)
+            {
+                current.insert(Pin {
+                    ins: custom_circuit_id,
+                    index: external_pin_index as u32,
+                });
+            }
+        }
+    }
+
+    fn eval_internal_gate(
+        _gate_kind: GateKind,
+        connections: &[Connection],
+        internal_current: &mut HashSet<Pin>,
+    ) {
+        // This is a simplified gate evaluation for internal components
+        // In a full implementation, we would need to properly identify which pins
+        // belong to which internal component instances
+
+        // For now, we'll implement a basic version that looks for gate patterns in connections
+        // This is not a complete implementation but provides a foundation
+
+        // Note: This is a placeholder implementation
+        // A proper implementation would require:
+        // 1. Mapping internal components to their pins
+        // 2. Proper gate logic evaluation
+        // 3. Handling of component positioning and identification
+
+        // For the current implementation, we'll use a simplified approach
+        // that just propagates current through connections
+        for connection in connections {
+            if internal_current.contains(&connection.a) && !internal_current.contains(&connection.b)
+            {
+                internal_current.insert(connection.b);
+            }
+            if internal_current.contains(&connection.b) && !internal_current.contains(&connection.a)
+            {
+                internal_current.insert(connection.a);
+            }
         }
     }
 
@@ -1115,6 +1477,10 @@ impl App {
                         }
                     }
                 }
+                InstanceKind::CustomCircuit(_) => {
+                    // Custom circuits need special handling in simulation
+                    // For now, we don't propagate through them
+                }
             }
         }
         visiting.remove(&pin);
@@ -1125,10 +1491,12 @@ impl App {
         let mut out = String::new();
         writeln!(
             out,
-            "counts: gates={}, powers={}, wires={}, conns={}",
+            "counts: gates={}, powers={}, wires={}, custom_circuits={}, custom_defs={}, conns={}",
             self.db.gates.len(),
             self.db.powers.len(),
             self.db.wires.len(),
+            self.db.custom_circuits.len(),
+            self.db.custom_circuit_definitions.len(),
             self.db.connections.len()
         )
         .ok();
@@ -1198,22 +1566,29 @@ impl App {
         out
     }
 
-    fn copy_to_clipboard(&mut self) {
+    pub fn extract_instances_with_offsets(
+        &self,
+        instances: &HashSet<InstanceId>,
+    ) -> (Rect, Vec<InstancePosOffset>) {
         let mut points = vec![];
-        for &selected in &self.selected {
-            match self.db.ty(selected) {
+        for &id in instances {
+            match self.db.ty(id) {
                 InstanceKind::Gate(_) => {
-                    let g = self.db.get_gate(selected);
+                    let g = self.db.get_gate(id);
                     points.push(g.pos);
                 }
                 InstanceKind::Power => {
-                    let p = self.db.get_power(selected);
+                    let p = self.db.get_power(id);
                     points.push(p.pos);
                 }
                 InstanceKind::Wire => {
-                    let w = self.db.get_wire(selected);
+                    let w = self.db.get_wire(id);
                     points.push(w.start);
                     points.push(w.end);
+                }
+                InstanceKind::CustomCircuit(_) => {
+                    let cc = self.db.get_custom_circuit(id);
+                    points.push(cc.pos);
                 }
             }
         }
@@ -1222,24 +1597,36 @@ impl App {
 
         let mut object_pos = vec![];
 
-        for &selected in &self.selected {
-            let ty = self.db.ty(selected);
+        for &id in instances {
+            let ty = self.db.ty(id);
             match ty {
                 InstanceKind::Gate(kind) => {
-                    let g = self.db.get_gate(selected);
+                    let g = self.db.get_gate(id);
                     object_pos.push(InstancePosOffset::Gate(kind, center - g.pos));
                 }
                 InstanceKind::Power => {
-                    let p = self.db.get_power(selected);
+                    let p = self.db.get_power(id);
                     object_pos.push(InstancePosOffset::Power(center - p.pos));
                 }
                 InstanceKind::Wire => {
-                    let w = self.db.get_wire(selected);
+                    let w = self.db.get_wire(id);
                     object_pos.push(InstancePosOffset::Wire(center - w.start, center - w.end));
+                }
+                InstanceKind::CustomCircuit(_) => {
+                    let cc = self.db.get_custom_circuit(id);
+                    object_pos.push(InstancePosOffset::CustomCircuit(
+                        cc.definition_index,
+                        center - cc.pos,
+                    ));
                 }
             }
         }
 
+        (rect, object_pos)
+    }
+
+    fn copy_to_clipboard(&mut self) {
+        let (_, object_pos) = self.extract_instances_with_offsets(&self.selected);
         self.clipboard = object_pos;
     }
 
@@ -1259,10 +1646,58 @@ impl App {
                     start: mouse - s,
                     end: mouse - e,
                 }),
+                InstancePosOffset::CustomCircuit(def_index, offset) => {
+                    self.db.new_custom_circuit(custom_circuit::CustomCircuit {
+                        pos: mouse - offset,
+                        definition_index: def_index,
+                    })
+                }
             };
             self.potential_connections = self.compute_potential_connections_for_instance(id);
             self.finalize_connections_for_instance(id);
             self.selected.insert(id); // Add newly pasted instance to selection
+        }
+    }
+
+    fn draw_right_click_actions_menu(&mut self, ui: &Ui) {
+        if !self.show_right_click_actions_menu {
+            return;
+        }
+
+        let mut should_close = false;
+        egui::Window::new("Context Menu")
+            .title_bar(false)
+            .resizable(false)
+            .collapsible(false)
+            .fixed_pos(self.context_menu_pos)
+            .show(ui.ctx(), |ui| {
+                ui.set_min_width(150.0);
+                if ui.button("Create Custom Circuit").clicked() {
+                    // Generate a unique name for the custom circuit
+                    let circuit_name = format!(
+                        "CustomCircuit_{}",
+                        self.db.custom_circuit_definitions.len() + 1
+                    );
+
+                    match self.create_custom_circuit(circuit_name, &self.selected.clone()) {
+                        Ok(()) => {
+                            log::info!("Custom circuit created successfully");
+                            self.selected.clear();
+                        }
+                        Err(e) => {
+                            log::error!("Failed to create custom circuit: {e}");
+                        }
+                    }
+                    should_close = true;
+                }
+
+                if ui.button("Cancel").clicked() {
+                    should_close = true;
+                }
+            });
+
+        if should_close {
+            self.show_right_click_actions_menu = false;
         }
     }
 }

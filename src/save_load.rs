@@ -5,6 +5,7 @@ use slotmap::{Key as _, SecondaryMap, SlotMap};
 use crate::{
     App,
     app::{Connection, DB, Gate, InstanceId, InstanceKind, Power, Wire},
+    custom_circuit::{CustomCircuit, CustomCircuitDefinition},
 };
 
 // Custom serialization format for DB that avoids SlotMap version issues
@@ -13,6 +14,8 @@ struct SerializableDB {
     gates: Vec<(u64, Gate)>,
     powers: Vec<(u64, Power)>,
     wires: Vec<(u64, Wire)>,
+    custom_circuits: Vec<(u64, CustomCircuit)>,
+    custom_circuit_definitions: Vec<CustomCircuitDefinition>,
     connections: HashSet<Connection>,
 }
 
@@ -24,6 +27,7 @@ impl serde::Serialize for DB {
         let mut gates = Vec::new();
         let mut powers = Vec::new();
         let mut wires = Vec::new();
+        let mut custom_circuits = Vec::new();
 
         for (id, gate) in &self.gates {
             gates.push((id.data().as_ffi(), *gate));
@@ -34,11 +38,16 @@ impl serde::Serialize for DB {
         for (id, wire) in &self.wires {
             wires.push((id.data().as_ffi(), *wire));
         }
+        for (id, custom_circuit) in &self.custom_circuits {
+            custom_circuits.push((id.data().as_ffi(), custom_circuit.clone()));
+        }
 
         let serializable = SerializableDB {
             gates,
             powers,
             wires,
+            custom_circuits,
+            custom_circuit_definitions: self.custom_circuit_definitions.clone(),
             connections: self.connections.clone(),
         };
 
@@ -59,6 +68,8 @@ impl<'de> serde::Deserialize<'de> for DB {
             gates: SecondaryMap::new(),
             powers: SecondaryMap::new(),
             wires: SecondaryMap::new(),
+            custom_circuits: SecondaryMap::new(),
+            custom_circuit_definitions: serializable.custom_circuit_definitions,
             connections: serializable.connections,
         };
 
@@ -100,6 +111,21 @@ impl<'de> serde::Deserialize<'de> for DB {
 
             db.wires.insert(id, wire);
             db.types.insert(id, InstanceKind::Wire);
+        }
+
+        // Reconstruct custom circuits
+        for (raw_id, custom_circuit) in serializable.custom_circuits {
+            let key_data = slotmap::KeyData::from_ffi(raw_id);
+            let id = InstanceId::from(key_data);
+
+            while db.instances.len() <= id.data().as_ffi() as usize {
+                db.instances.insert(());
+            }
+
+            let definition_index = custom_circuit.definition_index;
+            db.custom_circuits.insert(id, custom_circuit);
+            db.types
+                .insert(id, InstanceKind::CustomCircuit(definition_index));
         }
 
         Ok(db)
