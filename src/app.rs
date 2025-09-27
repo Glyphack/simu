@@ -37,6 +37,8 @@ pub const PIN_HOVER_THRESHOLD: f32 = 10.0;
 pub const COLOR_POTENTIAL_CONN_HIGHLIGHT: Color32 = Color32::LIGHT_BLUE;
 pub const WIRE_HIT_DISTANCE: f32 = 10.0;
 pub const SNAP_THRESHOLD: f32 = 10.0;
+pub const PIN_MOVE_HINT_D: f32 = 10.0;
+pub const PIN_MOVE_HINT_COLOR: Color32 = Color32::GRAY;
 
 pub const COLOR_SELECTION_HIGHLIGHT: Color32 = Color32::GRAY;
 pub const COLOR_SELECTION_BOX: Color32 = Color32::LIGHT_BLUE;
@@ -415,7 +417,8 @@ pub struct App {
     pub current_dirty: bool,
     pub show_debug: bool,
     // selection set and move preview
-    pub selected: std::collections::HashSet<InstanceId>,
+    pub selected: HashSet<InstanceId>,
+    pub clicked_on: Option<InstanceId>,
     //Copied. Items with their offset compared to a middle point in the rectangle
     pub clipboard: Vec<InstancePosOffset>,
     // Where are we in the world
@@ -455,6 +458,7 @@ impl Default for App {
             current_dirty: true,
             show_debug: true,
             selected: Default::default(),
+            clicked_on: Default::default(),
             clipboard: Default::default(),
             pending_load_json: None,
             viewport_offset: Vec2::ZERO,
@@ -554,7 +558,7 @@ impl App {
             ui.separator();
             ui.vertical(|ui| {
                 ui.heading("Canvas");
-                ui.label("press d to remove object");
+                ui.label("press backspace/d to remove object");
                 ui.label("right click on powers to toggle");
                 ui.label("right click on canvas to drag");
                 self.draw_canvas(ui);
@@ -654,6 +658,90 @@ impl App {
         resp
     }
 
+    fn handle_panning(
+        &mut self,
+        ui: &Ui,
+        right_down: bool,
+        right_released: bool,
+        mouse_is_visible: bool,
+    ) {
+        if right_down && self.hovered.is_none() {
+            self.panning = true;
+        }
+
+        if right_released || !mouse_is_visible {
+            self.panning = false;
+        }
+
+        if self.panning {
+            self.viewport_offset += ui.input(|i| i.pointer.delta());
+        }
+    }
+
+    fn handle_copy_pasting(&mut self, ui: &Ui, mouse_pos_world: Option<Pos2>) {
+        let mut copy_event_detected = false;
+        let mut paste_event_detected = false;
+        ui.ctx().input(|i| {
+            for event in &i.events {
+                if matches!(event, egui::Event::Copy) {
+                    log::info!("Copy detected");
+                    copy_event_detected = true;
+                }
+                if let egui::Event::Paste(_) = event {
+                    // TODO(paste-json): If user pasted json convert it to gates and add it.
+                    paste_event_detected = true;
+                }
+            }
+        });
+
+        if copy_event_detected && !self.selected.is_empty() {
+            self.copy_to_clipboard();
+        }
+
+        if paste_event_detected
+            && !self.clipboard.is_empty()
+            && let Some(mouse) = mouse_pos_world
+        {
+            self.paste_from_clipboard(mouse);
+        }
+    }
+
+    fn handle_deletion(&mut self, ui: &Ui) {
+        let bs_pressed = ui.input(|i| i.key_pressed(egui::Key::Backspace));
+        let d_pressed = ui.input(|i| i.key_pressed(egui::Key::D));
+
+        if bs_pressed || d_pressed {
+            if let Some(id) = self.hovered.take() {
+                let id = match id {
+                    Hover::Pin(pin) => pin.ins,
+                    Hover::Instance(instance_id) => instance_id,
+                };
+                self.delete_instance(id);
+            } else if self.hovered.is_none() && !self.selected.is_empty() {
+                // Collect Iavoid mutable borrow conflict
+                let ids_to_delete: Vec<InstanceId> = self.selected.drain().collect();
+                for id in ids_to_delete {
+                    self.delete_instance(id);
+                }
+            }
+        }
+    }
+
+    pub fn delete_instance(&mut self, id: InstanceId) {
+        self.db.instances.remove(id);
+        self.db.types.remove(id);
+        self.db.gates.remove(id);
+        self.db.powers.remove(id);
+        self.db.wires.remove(id);
+        self.db.custom_circuits.remove(id);
+        self.db.connections.retain(|c| !c.involves_instance(id));
+        self.hovered.take();
+        self.drag.take();
+        self.selected.remove(&id);
+        self.current.retain(|p| p.ins != id);
+        self.current_dirty = true;
+    }
+
     fn draw_canvas(&mut self, ui: &mut Ui) {
         let (resp, _painter) = ui.allocate_painter(ui.available_size(), Sense::hover());
         let canvas_rect = resp.rect;
@@ -674,75 +762,42 @@ impl App {
             .map(|p| self.screen_to_world(p));
         let mouse_is_visible = ui.ctx().input(|i| i.pointer.has_pointer());
 
-        if right_down && self.hovered.is_none() {
-            self.panning = true;
-        }
+        self.handle_panning(ui, right_down, right_released, mouse_is_visible);
+        self.handle_copy_pasting(ui, mouse_pos_world);
+        self.handle_deletion(ui);
 
-        if right_released || !mouse_is_visible {
-            self.panning = false;
-        }
-
-        if self.panning && right_down {
-            self.viewport_offset += ui.input(|i| i.pointer.delta());
-        }
-
-        let mut copy_event_detected = false;
-        let mut paste_event_detected = false;
-        ui.ctx().input(|i| {
-            for event in &i.events {
-                if matches!(event, egui::Event::Copy) {
-                    log::info!("Copy detected");
-                    copy_event_detected = true;
-                }
-                if let egui::Event::Paste(_) = event {
-                    // TODO(paste-json): If user pasted json convert it to gates and add it.
-                    paste_event_detected = true;
-                }
-            }
-        });
-
-        let d_pressed = ui.input(|i| i.key_pressed(egui::Key::D));
-
-        if d_pressed && let Some(id) = self.hovered.take() {
-            let id = match id {
-                Hover::Pin(pin) => pin.ins,
-                Hover::Instance(instance_id) => instance_id,
-            };
-            self.delete_instance(id);
-        } else if d_pressed && self.hovered.is_none() && !self.selected.is_empty() {
-            // Collect IDs to delete to avoid mutable borrow conflict
-            let ids_to_delete: Vec<InstanceId> = self.selected.drain().collect();
-            for id in ids_to_delete {
-                self.delete_instance(id);
-            }
-        }
-
-        if copy_event_detected && !self.selected.is_empty() {
-            self.copy_to_clipboard();
-        }
-
-        if paste_event_detected
-            && !self.clipboard.is_empty()
-            && let Some(mouse) = mouse_pos_world
-        {
-            self.paste_from_clipboard(mouse);
-        }
-
-        if let Some(mouse_world) = mouse_pos_world {
+        if let Some(mouse) = mouse_pos_world {
             if mouse_clicked {
-                self.handle_drag_start_canvas(mouse_world);
+                self.handle_drag_start_canvas(mouse);
             }
+
             if self.drag.is_some() {
-                self.handle_dragging(ui, mouse_world);
+                self.handle_dragging(ui, mouse);
             } else {
-                self.hovered = self.get_hovered(mouse_world);
+                self.hovered = self.get_hovered(mouse);
+            }
+
+            if mouse_clicked && let Some(Hover::Instance(instance_id)) = self.hovered {
+                self.clicked_on = Some(instance_id);
+            }
+            if mouse_up
+                && let Some(clicked_on) = self.clicked_on
+                && let Some(hovered) = self.hovered
+                && clicked_on == hovered.instance()
+            {
+                self.selected.clear();
+                self.selected.insert(clicked_on);
+            }
+
+            if mouse_up {
+                self.handle_drag_end(mouse);
             }
         }
-
-        if mouse_up && let Some(mouse) = mouse_pos_world {
-            self.handle_drag_end(&canvas_rect, mouse);
+        if self.selected.len() == 1 {
+            self.highlight_selected_actions(ui, mouse_pos_world, mouse_clicked);
         }
 
+        // Toggle power
         if right_clicked
             && let Some(id) = self.hovered.as_ref().map(|i| i.instance())
             && matches!(self.db.ty(id), InstanceKind::Power)
@@ -765,6 +820,7 @@ impl App {
             self.recompute_current();
         }
 
+        // Draw world
         for (id, gate) in &self.db.gates {
             self.draw_gate(ui, id, gate);
         }
@@ -779,7 +835,9 @@ impl App {
             self.draw_wire(
                 ui,
                 *wire,
-                self.hovered.as_ref().is_some_and(|f| f.instance() == id),
+                self.hovered
+                    .as_ref()
+                    .is_some_and(|f| matches!(f, Hover::Instance(_)) && f.instance() == id),
                 has_current,
             );
         }
@@ -1063,18 +1121,25 @@ impl App {
     }
 
     pub fn get_hovered(&self, mouse_pos: Pos2) -> Option<Hover> {
-        // Prioritize smaller/overlay items first: Power over Gates, then Wires
-        for (k, wire) in &self.db.wires {
-            for pin in self.db.pins_of(k) {
-                if self.db.pin_position(pin).distance(mouse_pos) < PIN_HOVER_THRESHOLD {
-                    return Some(Hover::Pin(pin));
+        // Give higher priority to selected instances when hovering
+        for selected in &self.selected {
+            match self.db.ty(*selected) {
+                InstanceKind::Wire => {
+                    for pin in self.db.pins_of(*selected) {
+                        if self.db.pin_position(pin).distance(mouse_pos) < PIN_HOVER_THRESHOLD {
+                            return Some(Hover::Pin(pin));
+                        }
+                    }
+                    let wire = self.db.get_wire(*selected);
+                    let dist = wire.distance_point_to_segment(mouse_pos);
+                    if dist < WIRE_HIT_DISTANCE {
+                        return Some(Hover::Instance(*selected));
+                    }
                 }
-            }
-            let dist = wire.distance_point_to_segment(mouse_pos);
-            if dist < WIRE_HIT_DISTANCE {
-                return Some(Hover::Instance(k));
+                InstanceKind::Gate(_) | InstanceKind::Power | InstanceKind::CustomCircuit(_) => {}
             }
         }
+
         for (k, power) in &self.db.powers {
             let rect = Rect::from_center_size(power.pos, self.canvas_config.base_gate_size);
             for pin in self.db.pins_of(k) {
@@ -1098,6 +1163,21 @@ impl App {
                 return Some(Hover::Instance(k));
             }
         }
+        for (k, wire) in &self.db.wires {
+            for pin in self.db.pins_of(k) {
+                if self.is_pin_connected(pin) {
+                    continue;
+                }
+                if self.db.pin_position(pin).distance(mouse_pos) < PIN_HOVER_THRESHOLD {
+                    return Some(Hover::Pin(pin));
+                }
+            }
+            let dist = wire.distance_point_to_segment(mouse_pos);
+            if dist < WIRE_HIT_DISTANCE {
+                return Some(Hover::Instance(k));
+            }
+        }
+
         None
     }
 
@@ -1108,11 +1188,7 @@ impl App {
 
         match hovered {
             Hover::Pin(pin) => {
-                let color = if self.is_pin_connected(pin) {
-                    COLOR_HOVER_PIN_DETACH
-                } else {
-                    COLOR_HOVER_PIN_TO_WIRE
-                };
+                let color = COLOR_HOVER_PIN_TO_WIRE;
                 let pin_pos = self.db.pin_position(pin) - self.viewport_offset;
                 ui.painter()
                     .circle_filled(pin_pos, PIN_HOVER_THRESHOLD, color);
@@ -1698,6 +1774,37 @@ impl App {
 
         if should_close {
             self.show_right_click_actions_menu = false;
+        }
+    }
+
+    fn highlight_selected_actions(&mut self, ui: &Ui, mouse: Option<Pos2>, mouse_down: bool) {
+        let Some(selected) = self.selected.iter().next() else {
+            return;
+        };
+        let selected = *selected;
+
+        match self.db.ty(selected) {
+            InstanceKind::Wire => {
+                for pin in self.db.pins_of(selected) {
+                    let pos = self.db.pin_position(pin);
+                    ui.painter().circle_filled(
+                        pos - self.viewport_offset,
+                        PIN_MOVE_HINT_D,
+                        PIN_MOVE_HINT_COLOR,
+                    );
+
+                    if let Some(mouse) = mouse
+                        && mouse_down
+                        && mouse.distance(pos) < PIN_MOVE_HINT_D
+                    {
+                        self.drag = Some(Drag::Resize {
+                            id: selected,
+                            start: pin.index == 0,
+                        });
+                    }
+                }
+            }
+            InstanceKind::Gate(_) | InstanceKind::Power | InstanceKind::CustomCircuit(_) => {}
         }
     }
 }

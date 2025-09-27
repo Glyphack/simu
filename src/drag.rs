@@ -13,10 +13,10 @@ pub enum Drag {
         pos: Pos2,
         kind: InstanceKind,
     },
+    // TODO: canvas and move selection can be merged.
     Canvas {
         id: InstanceId,
         offset: Vec2,
-        detach: bool,
     },
     Resize {
         id: InstanceId,
@@ -36,27 +36,8 @@ pub enum Drag {
 }
 
 impl App {
-    pub fn inside_rect(&self, canvas: &Rect, kind: InstanceKind, pos: Pos2) -> bool {
-        match kind {
-            InstanceKind::Wire => canvas.contains(pos2(pos.x + 30.0, pos.y)),
-            InstanceKind::Gate(_) | InstanceKind::Power | InstanceKind::CustomCircuit(_) => {
-                let rect = Rect::from_center_size(pos, self.canvas_config.base_gate_size);
-                canvas.contains_rect(rect)
-            }
-        }
-    }
-
     pub fn handle_drag_start_canvas(&mut self, mouse_pos: Pos2) {
         if self.drag.is_some() {
-            return;
-        }
-
-        if !self.selected.is_empty() {
-            self.drag = Some(Drag::MoveSelection {
-                start: mouse_pos,
-                has_dragged: false,
-            });
-            self.potential_connections.clear();
             return;
         }
 
@@ -65,20 +46,13 @@ impl App {
             self.potential_connections.clear();
             return;
         };
+
         match hovered {
             Hover::Pin(pin) => {
                 if matches!(self.db.ty(pin.ins), InstanceKind::Wire) {
                     self.drag = Some(Drag::Resize {
                         id: pin.ins,
                         start: pin.index == 0,
-                    });
-                    return;
-                } else if self.is_pin_connected(pin) {
-                    let offset = -self.db.pin_offset(pin);
-                    self.drag = Some(Drag::Canvas {
-                        id: pin.ins,
-                        offset,
-                        detach: true,
                     });
                     return;
                 }
@@ -106,7 +80,6 @@ impl App {
                     let offset = gate.pos - mouse_pos;
                     self.drag = Some(Drag::Canvas {
                         id: hovered,
-                        detach: false,
                         offset,
                     });
                 }
@@ -115,7 +88,6 @@ impl App {
                     let offset = power.pos - mouse_pos;
                     self.drag = Some(Drag::Canvas {
                         id: hovered,
-                        detach: false,
                         offset,
                     });
                 }
@@ -128,7 +100,6 @@ impl App {
                     let offset = wire_center - mouse_pos;
                     self.drag = Some(Drag::Canvas {
                         id: hovered,
-                        detach: false,
                         offset,
                     });
                 }
@@ -137,7 +108,6 @@ impl App {
                     let offset = cc.pos - mouse_pos;
                     self.drag = Some(Drag::Canvas {
                         id: hovered,
-                        detach: false,
                         offset,
                     });
                 }
@@ -192,7 +162,7 @@ impl App {
                     }
                 }
             }
-            Some(Drag::Canvas { id, detach, offset }) => {
+            Some(Drag::Canvas { id, offset }) => {
                 let new_pos = mouse + offset;
                 match self.db.ty(id) {
                     InstanceKind::Gate(_) | InstanceKind::Power => {
@@ -203,15 +173,7 @@ impl App {
                         };
                         let desired = new_pos - current_pos;
                         let ids = [id];
-                        if detach {
-                            if let InstanceKind::Gate(_) = self.db.ty(id) {
-                                self.db.get_gate_mut(id).pos += desired;
-                            } else {
-                                self.db.get_power_mut(id).pos += desired;
-                            }
-                        } else {
-                            self.move_nonwires_and_resize_wires(&ids, desired);
-                        }
+                        self.move_nonwires_and_resize_wires(&ids, desired);
                     }
                     InstanceKind::Wire => {
                         let w = self.db.get_wire_mut(id);
@@ -261,15 +223,12 @@ impl App {
         }
     }
 
-    pub fn handle_drag_end(&mut self, canvas_rect: &Rect, mouse_pos: Pos2) {
+    pub fn handle_drag_end(&mut self, mouse_pos: Pos2) {
         let Some(drag) = self.drag.take() else {
             return;
         };
         match drag {
             Drag::Panel { pos, kind } => {
-                if !self.inside_rect(canvas_rect, kind, pos) {
-                    return;
-                }
                 if let InstanceKind::CustomCircuit(definition_index) = kind
                     && definition_index >= self.db.custom_circuit_definitions.len()
                 {
@@ -328,11 +287,7 @@ impl App {
                 }
                 self.potential_connections.clear();
             }
-            Drag::Canvas {
-                id,
-                detach: _,
-                offset: _,
-            } => {
+            Drag::Canvas { id, offset: _ } => {
                 self.finalize_connections_for_instance(id);
             }
             Drag::Resize { id, start } => {
@@ -353,21 +308,6 @@ impl App {
                 self.finalize_connections_for_pin(pin);
             }
         }
-    }
-
-    pub fn delete_instance(&mut self, id: InstanceId) {
-        self.db.instances.remove(id);
-        self.db.types.remove(id);
-        self.db.gates.remove(id);
-        self.db.powers.remove(id);
-        self.db.wires.remove(id);
-        self.db.custom_circuits.remove(id);
-        self.db.connections.retain(|c| !c.involves_instance(id));
-        self.hovered.take();
-        self.drag.take();
-        self.selected.remove(&id);
-        self.current.retain(|p| p.ins != id);
-        self.current_dirty = true;
     }
 
     pub fn compute_potential_connections_for_instance(
