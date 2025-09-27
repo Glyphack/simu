@@ -419,6 +419,7 @@ pub struct App {
     // selection set and move preview
     pub selected: HashSet<InstanceId>,
     pub clicked_on: Option<InstanceId>,
+    pub drag_had_movement: bool,
     //Copied. Items with their offset compared to a middle point in the rectangle
     pub clipboard: Vec<InstancePosOffset>,
     // Where are we in the world
@@ -459,6 +460,7 @@ impl Default for App {
             show_debug: true,
             selected: Default::default(),
             clicked_on: Default::default(),
+            drag_had_movement: false,
             clipboard: Default::default(),
             pending_load_json: None,
             viewport_offset: Vec2::ZERO,
@@ -767,31 +769,40 @@ impl App {
         self.handle_deletion(ui);
 
         if let Some(mouse) = mouse_pos_world {
+            let hovered_now = self.get_hovered(mouse);
+
             if mouse_clicked {
+                self.hovered = hovered_now;
+                self.clicked_on = hovered_now.map(|h| h.instance());
                 self.handle_drag_start_canvas(mouse);
             }
 
-            if self.drag.is_some() {
+            let dragging = self.drag.is_some();
+
+            if dragging {
                 self.handle_dragging(ui, mouse);
             } else {
-                self.hovered = self.get_hovered(mouse);
+                self.hovered = hovered_now;
             }
 
-            if mouse_clicked && let Some(Hover::Instance(instance_id)) = self.hovered {
-                self.clicked_on = Some(instance_id);
-            }
             if mouse_up {
-                self.selected.clear();
-                if let Some(clicked_on) = self.clicked_on
-                    && let Some(hovered) = self.hovered
-                    && clicked_on == hovered.instance()
-                {
-                    self.selected.insert(clicked_on);
+                if dragging {
+                    let drag_had_movement = self.drag_had_movement;
+                    self.handle_drag_end(mouse);
+                    if !drag_had_movement {
+                        self.selected.clear();
+                        if let Some(Hover::Instance(id)) = hovered_now {
+                            self.selected.insert(id);
+                        }
+                    }
+                } else {
+                    self.selected.clear();
+                    if let Some(Hover::Instance(id)) = hovered_now {
+                        self.selected.insert(id);
+                    }
                 }
-            }
-
-            if mouse_up {
-                self.handle_drag_end(mouse);
+                self.clicked_on = None;
+                self.hovered = hovered_now;
             }
         }
         if self.selected.len() == 1 {
@@ -843,19 +854,12 @@ impl App {
             );
         }
 
+        // TODO: Highlight the pin that will be attached to
         if !self.potential_connections.is_empty() {
             for c in &self.potential_connections {
                 // Highlight the pin belonging to the currently moving instance if any
                 let pin_to_highlight = match self.drag {
-                    Some(Drag::Canvas { id, .. }) => {
-                        if c.a.ins == id {
-                            c.a
-                        } else if c.b.ins == id {
-                            c.b
-                        } else {
-                            continue;
-                        }
-                    }
+                    Some(Drag::CanvasNew { .. }) => c.a,
                     Some(Drag::Resize { id, start }) => {
                         // Only highlight the endpoint being resized
                         let target_pin = Pin {
@@ -1638,6 +1642,22 @@ impl App {
                 c.a.ins, c.a.index, c.b.ins, c.b.index, p1.x, p1.y, p2.x, p2.y
             )
             .ok();
+        }
+
+        if self.potential_connections.is_empty() {
+            writeln!(out, "\nPotential Connections: none").ok();
+        } else {
+            writeln!(out, "\nPotential Connections:").ok();
+            for c in &self.potential_connections {
+                let p1 = self.db.pin_position(c.a);
+                let p2 = self.db.pin_position(c.b);
+                writeln!(
+                    out,
+                    "  ({:?}:{}) <-> ({:?}:{}) | ({:.1},{:.1})<->({:.1},{:.1})",
+                    c.a.ins, c.a.index, c.b.ins, c.b.index, p1.x, p1.y, p2.x, p2.y
+                )
+                .ok();
+            }
         }
 
         out
