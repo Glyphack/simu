@@ -7,13 +7,19 @@ use crate::app::{
     SNAP_THRESHOLD, Wire,
 };
 
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone, Copy)]
+pub enum CanvasDrag {
+    Single { id: InstanceId, offset: Vec2 },
+    Selected { offset: Vec2 },
+}
+
 #[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
 pub enum Drag {
     Panel {
         pos: Pos2,
         kind: InstanceKind,
     },
-    // TODO: canvas and move selection can be merged.
+    CanvasNew(CanvasDrag),
     Canvas {
         id: InstanceId,
         offset: Vec2,
@@ -38,6 +44,25 @@ pub enum Drag {
 impl App {
     pub fn handle_drag_start_canvas(&mut self, mouse_pos: Pos2) {
         if self.drag.is_some() {
+            return;
+        }
+
+        if !self.selected.is_empty() {
+            let first = self.selected.iter().next().expect("Checked is not empty");
+            let first = *first;
+            let first_offset = {
+                match self.db.ty(first) {
+                    InstanceKind::Gate(_) => mouse_pos - self.db.get_gate(first).pos,
+                    InstanceKind::Power => mouse_pos - self.db.get_power(first).pos,
+                    InstanceKind::Wire => mouse_pos - self.db.get_wire(first).start,
+                    InstanceKind::CustomCircuit(_) => {
+                        mouse_pos - self.db.get_custom_circuit(first).pos
+                    }
+                }
+            };
+            self.drag = Some(Drag::CanvasNew(CanvasDrag::Selected {
+                offset: first_offset,
+            }));
             return;
         }
 
@@ -190,6 +215,68 @@ impl App {
 
                 self.potential_connections = self.compute_potential_connections_for_instance(id);
             }
+            Some(Drag::CanvasNew(canvas_drag)) => match canvas_drag {
+                CanvasDrag::Single { id, offset } => {
+                    let new_pos = mouse + offset;
+                    match self.db.ty(id) {
+                        InstanceKind::Gate(_) | InstanceKind::Power => {
+                            let current_pos = if let InstanceKind::Gate(_) = self.db.ty(id) {
+                                self.db.get_gate(id).pos
+                            } else {
+                                self.db.get_power(id).pos
+                            };
+                            let desired = new_pos - current_pos;
+                            let ids = [id];
+                            self.move_nonwires_and_resize_wires(&ids, desired);
+                        }
+                        InstanceKind::Wire => {
+                            let w = self.db.get_wire_mut(id);
+                            let center =
+                                pos2((w.start.x + w.end.x) * 0.5, (w.start.y + w.end.y) * 0.5);
+                            let desired = new_pos - center;
+                            w.start += desired;
+                            w.end += desired;
+                        }
+                        InstanceKind::CustomCircuit(_) => {
+                            let cc = self.db.get_custom_circuit_mut(id);
+                            cc.pos = new_pos;
+                        }
+                    }
+
+                    self.potential_connections =
+                        self.compute_potential_connections_for_instance(id);
+                }
+                CanvasDrag::Selected { offset } => {
+                    if self.selected.is_empty() {
+                        return;
+                    }
+
+                    let first = self.selected.iter().next().expect("Checked is not empty");
+                    let first = *first;
+                    let new_pos = mouse + offset;
+                    let desired = match self.db.ty(first) {
+                        InstanceKind::Gate(_) => new_pos - self.db.get_gate(first).pos,
+                        InstanceKind::Power => new_pos - self.db.get_power(first).pos,
+                        InstanceKind::Wire => new_pos - self.db.get_wire(first).start,
+                        InstanceKind::CustomCircuit(_) => {
+                            new_pos - self.db.get_custom_circuit(first).pos
+                        }
+                    };
+                    if desired != Vec2::ZERO {
+                        let group_set = self.collect_connected_instances_from_many(&self.selected);
+                        let group: Vec<InstanceId> = group_set.iter().copied().collect();
+                        if !group.is_empty() {
+                            self.move_nonwires_and_resize_wires(&group, desired);
+                            if let Some(Drag::MoveSelection { start, has_dragged }) =
+                                self.drag.as_mut()
+                            {
+                                *start += desired;
+                                *has_dragged = true;
+                            }
+                        }
+                    }
+                }
+            },
             Some(Drag::Resize { id, start }) => {
                 let wire = self.db.get_wire_mut(id);
                 if start {
@@ -307,6 +394,16 @@ impl App {
                 };
                 self.finalize_connections_for_pin(pin);
             }
+            Drag::CanvasNew(canvas_drag) => match canvas_drag {
+                CanvasDrag::Single { id, offset: _ } => {
+                    self.finalize_connections_for_instance(id);
+                }
+                CanvasDrag::Selected { offset: _ } => {
+                    for id in self.selected.clone() {
+                        self.finalize_connections_for_instance(id);
+                    }
+                }
+            },
         }
     }
 

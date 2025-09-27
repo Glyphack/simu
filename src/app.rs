@@ -780,13 +780,14 @@ impl App {
             if mouse_clicked && let Some(Hover::Instance(instance_id)) = self.hovered {
                 self.clicked_on = Some(instance_id);
             }
-            if mouse_up
-                && let Some(clicked_on) = self.clicked_on
-                && let Some(hovered) = self.hovered
-                && clicked_on == hovered.instance()
-            {
+            if mouse_up {
                 self.selected.clear();
-                self.selected.insert(clicked_on);
+                if let Some(clicked_on) = self.clicked_on
+                    && let Some(hovered) = self.hovered
+                    && clicked_on == hovered.instance()
+                {
+                    self.selected.insert(clicked_on);
+                }
             }
 
             if mouse_up {
