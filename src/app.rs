@@ -9,7 +9,7 @@ use egui::{
 use slotmap::{Key as _, SecondaryMap, SlotMap};
 
 use crate::{
-    assets,
+    assets::{self, PinInfo, PinKind},
     config::CanvasConfig,
     custom_circuit::{self, CustomCircuit, CustomCircuitDefinition},
     drag::Drag,
@@ -31,7 +31,7 @@ pub const COLOR_WIRE_HOVER: Color32 = Color32::GRAY;
 pub const COLOR_HOVER_INSTANCE_OUTLINE: Color32 = Color32::GRAY;
 pub const COLOR_HOVER_PIN_TO_WIRE: Color32 = Color32::GRAY;
 pub const COLOR_HOVER_PIN_DETACH: Color32 = Color32::RED;
-pub const PIN_HOVER_THRESHOLD: f32 = 10.0;
+pub const PIN_HOVER_THRESHOLD: f32 = 8.0;
 
 // Connections
 pub const COLOR_POTENTIAL_CONN_HIGHLIGHT: Color32 = Color32::LIGHT_BLUE;
@@ -185,13 +185,21 @@ impl Power {
 
 // Power end
 
-#[derive(serde::Deserialize, serde::Serialize, Copy, Debug, Clone)]
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
 pub struct Wire {
     pub start: Pos2,
     pub end: Pos2,
+    pub extra_pins: Vec<PinInfo>,
 }
 
 impl Wire {
+    pub fn new(start: Pos2, end: Pos2) -> Self {
+        Self {
+            start,
+            end,
+            extra_pins: Vec::new(),
+        }
+    }
     pub fn distance_point_to_segment(&self, p: Pos2) -> f32 {
         let a = self.start;
         let b = self.end;
@@ -353,7 +361,17 @@ impl DB {
             }
             InstanceKind::Wire => {
                 let w = self.get_wire(pin.ins);
-                if pin.index == 0 { w.start } else { w.end }
+                if pin.index == 0 {
+                    w.start
+                } else if pin.index == 1 {
+                    w.end
+                } else {
+                    w.start
+                        + w.extra_pins
+                            .get(pin.index as usize - 2)
+                            .expect("Must exist")
+                            .offset
+                }
             }
             InstanceKind::CustomCircuit(_) => {
                 let cc = self.get_custom_circuit(pin.ins);
@@ -544,7 +562,7 @@ impl App {
             if self.show_debug {
                 let full_h = ui.available_height();
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    let mut dbg = self.debug_string();
+                    let mut dbg = self.debug_string(ui);
                     ui.add_sized(vec2(320.0, full_h), egui::TextEdit::multiline(&mut dbg));
                 });
             }
@@ -820,13 +838,14 @@ impl App {
         }
 
         // Handle context menu for selected components
-        if right_clicked
-            && !self.selected.is_empty()
-            && let Some(mouse_world) = mouse_pos_world
-        {
-            self.show_right_click_actions_menu = true;
-            self.context_menu_pos = mouse_world - self.viewport_offset; // Convert to screen coordinates
-        }
+        // TODO: Custom circuits
+        // if right_clicked
+        //     && !self.selected.is_empty()
+        //     && let Some(mouse_world) = mouse_pos_world
+        // {
+        //     self.show_right_click_actions_menu = true;
+        //     self.context_menu_pos = mouse_world - self.viewport_offset; // Convert to screen coordinates
+        // }
 
         if self.current_dirty {
             self.recompute_current();
@@ -844,13 +863,22 @@ impl App {
         }
         for (id, wire) in &self.db.wires {
             let has_current = self.current.contains(&Pin { ins: id, index: 0 });
+            let mut extra_pins = Vec::new();
+            for (i, extra_pin) in wire.extra_pins.iter().enumerate() {
+                let pin_pos = self.db.pin_position(Pin {
+                    ins: id,
+                    index: i as u32 + 2,
+                });
+                extra_pins.push(pin_pos);
+            }
             self.draw_wire(
                 ui,
-                *wire,
+                wire,
                 self.hovered
                     .as_ref()
                     .is_some_and(|f| matches!(f, Hover::Instance(_)) && f.instance() == id),
                 has_current,
+                extra_pins,
             );
         }
 
@@ -901,6 +929,40 @@ impl App {
         self.draw_selection_highlight(ui);
 
         self.draw_right_click_actions_menu(ui);
+
+        if !self.selected.is_empty()
+            && let Some(hovered) = self.hovered
+            && let Some(mouse) = mouse_pos_world
+        {
+            let Hover::Instance(instance_id) = hovered else {
+                return;
+            };
+            if !self.selected.contains(&instance_id) {
+                return;
+            }
+            if !matches!(self.db.ty(instance_id), InstanceKind::Wire) {
+                return;
+            }
+            let wire = self.db.get_wire_mut(instance_id);
+
+            if !Rect::from_two_pos(wire.start, wire.end).contains(mouse) {
+                return;
+            }
+            // TODO: highlight a point on the line between start and end of the wire not the
+            // mouse position
+            ui.painter()
+                .circle_filled(mouse, PIN_HOVER_THRESHOLD, COLOR_HOVER_PIN_TO_WIRE);
+            if mouse_clicked {
+                let pin = PinInfo {
+                    kind: PinKind::Output,
+                    offset: mouse - wire.start,
+                };
+                if wire.extra_pins.contains(&pin) {
+                    return;
+                }
+                wire.extra_pins.push(pin);
+            }
+        }
     }
 
     fn draw_grid(ui: &Ui, canvas_rect: Rect, viewport_offset: Vec2) {
@@ -1105,7 +1167,14 @@ impl App {
         }
     }
 
-    pub fn draw_wire(&self, ui: &Ui, mouse: Wire, hovered: bool, has_current: bool) {
+    pub fn draw_wire(
+        &self,
+        ui: &Ui,
+        wire: &Wire,
+        hovered: bool,
+        has_current: bool,
+        extra_pins: Vec<Pos2>,
+    ) {
         let mut color = if has_current {
             COLOR_WIRE_POWERED
         } else {
@@ -1118,11 +1187,18 @@ impl App {
 
         ui.painter().line_segment(
             [
-                mouse.start - self.viewport_offset,
-                mouse.end - self.viewport_offset,
+                wire.start - self.viewport_offset,
+                wire.end - self.viewport_offset,
             ],
             Stroke::new(self.canvas_config.wire_thickness, color),
         );
+        for pin in extra_pins {
+            ui.painter().circle_filled(
+                pin,
+                self.canvas_config.base_pin_size,
+                self.canvas_config.base_output_pin_color,
+            );
+        }
     }
 
     pub fn get_hovered(&self, mouse_pos: Pos2) -> Option<Hover> {
@@ -1136,6 +1212,19 @@ impl App {
                         }
                     }
                     let wire = self.db.get_wire(*selected);
+                    for (i, _) in wire.extra_pins.iter().enumerate() {
+                        let pin = Pin {
+                            ins: *selected,
+                            index: i as u32 + 2,
+                        };
+                        if self.db.pin_position(pin).distance(mouse_pos) < PIN_HOVER_THRESHOLD {
+                            log::info!(
+                                "distance: {}",
+                                self.db.pin_position(pin).distance(mouse_pos)
+                            );
+                            return Some(Hover::Pin(pin));
+                        }
+                    }
                     let dist = wire.distance_point_to_segment(mouse_pos);
                     if dist < WIRE_HIT_DISTANCE {
                         return Some(Hover::Instance(*selected));
@@ -1568,7 +1657,7 @@ impl App {
         false
     }
 
-    fn debug_string(&self) -> String {
+    fn debug_string(&self, ui: &Ui) -> String {
         let mut out = String::new();
         writeln!(
             out,
@@ -1587,6 +1676,12 @@ impl App {
         writeln!(out, "potential_conns: {}", self.potential_connections.len()).ok();
         writeln!(out, "clipboard: {:?}", self.clipboard).ok();
         writeln!(out, "selected: {:?}", self.selected).ok();
+
+        let mouse_pos_world = ui
+            .ctx()
+            .pointer_interact_pos()
+            .map(|p| self.screen_to_world(p));
+        writeln!(out, "mouse: {:?}", mouse_pos_world).ok();
 
         writeln!(out, "\nGates:").ok();
         for (id, g) in &self.db.gates {
@@ -1626,10 +1721,18 @@ impl App {
         for (id, w) in &self.db.wires {
             writeln!(
                 out,
-                "  {:?}: start=({:.1},{:.1}) end=({:.1},{:.1})",
+                "  {:?}:\n start=({:.1},{:.1}) end=({:.1},{:.1})",
                 id, w.start.x, w.start.y, w.end.x, w.end.y
             )
             .ok();
+            for (i, extra_pins) in w.extra_pins.iter().enumerate() {
+                let pin = Pin {
+                    ins: id,
+                    index: i as u32 + 2,
+                };
+                let pin_pos = self.db.pin_position(pin);
+                writeln!(out, " pin_{}=({:.1},{:.1})", i, pin_pos.x, pin_pos.y).ok();
+            }
         }
 
         writeln!(out, "\nConnections:").ok();
@@ -1739,10 +1842,7 @@ impl App {
                     pos: mouse - offset,
                     on: false,
                 }),
-                InstancePosOffset::Wire(s, e) => self.db.new_wire(Wire {
-                    start: mouse - s,
-                    end: mouse - e,
-                }),
+                InstancePosOffset::Wire(s, e) => self.db.new_wire(Wire::new(mouse - s, mouse - e)),
                 InstancePosOffset::CustomCircuit(def_index, offset) => {
                     self.db.new_custom_circuit(custom_circuit::CustomCircuit {
                         pos: mouse - offset,

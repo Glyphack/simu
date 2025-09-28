@@ -1,10 +1,13 @@
 use std::collections::HashSet;
 
-use egui::{CornerRadius, Pos2, Rect, Stroke, StrokeKind, Ui, Vec2, pos2};
+use egui::{CornerRadius, Pos2, Rect, Stroke, StrokeKind, Ui, Vec2, pos2, vec2};
 
-use crate::app::{
-    App, COLOR_SELECTION_BOX, Connection, Gate, Hover, InstanceId, InstanceKind, Pin, Power,
-    SNAP_THRESHOLD, Wire,
+use crate::{
+    app::{
+        App, COLOR_SELECTION_BOX, Connection, Gate, Hover, InstanceId, InstanceKind, Pin, Power,
+        SNAP_THRESHOLD, Wire,
+    },
+    assets::{PinInfo, PinKind},
 };
 
 #[derive(serde::Deserialize, serde::Serialize, Debug, Clone, Copy)]
@@ -49,8 +52,16 @@ impl App {
         self.drag_had_movement = false;
 
         if !self.selected.is_empty() {
-            self.drag = Some(Drag::CanvasNew(CanvasDrag::Selected { start: mouse_pos }));
-            return;
+            if !self.selected.len() == 1
+                && matches!(
+                    self.db
+                        .ty(*self.selected.iter().next().expect("checked size")),
+                    InstanceKind::Wire
+                )
+            {
+                self.drag = Some(Drag::CanvasNew(CanvasDrag::Selected { start: mouse_pos }));
+                return;
+            }
         }
 
         let Some(hovered) = self.hovered else {
@@ -61,7 +72,7 @@ impl App {
 
         match hovered {
             Hover::Pin(pin) => {
-                if matches!(self.db.ty(pin.ins), InstanceKind::Wire) {
+                if matches!(self.db.ty(pin.ins), InstanceKind::Wire) && pin.index <= 1 {
                     self.drag = Some(Drag::Resize {
                         id: pin.ins,
                         start: pin.index == 0,
@@ -69,17 +80,15 @@ impl App {
                     return;
                 }
                 let pin_pos = self.db.pin_position(pin);
-                let wire_id = self.db.new_wire(Wire {
-                    start: pin_pos,
-                    end: mouse_pos,
-                });
-                self.db.connections.insert(Connection::new(
-                    pin,
-                    Pin {
-                        ins: wire_id,
-                        index: 0,
-                    },
-                ));
+                let wire_id = self.db.new_wire(Wire::new(pin_pos, mouse_pos));
+                // TODO: Connections
+                // self.db.connections.insert(Connection::new(
+                //     pin,
+                //     Pin {
+                //         ins: wire_id,
+                //         index: 0,
+                //     },
+                // ));
                 self.drag = Some(Drag::PinToWire {
                     source_pin: pin,
                     wire_id,
@@ -132,7 +141,9 @@ impl App {
             Some(Drag::Panel { pos: _, kind }) => match kind {
                 InstanceKind::Gate(gate_kind) => self.draw_gate_preview(ui, gate_kind, mouse),
                 InstanceKind::Power => self.draw_power_preview(ui, mouse),
-                InstanceKind::Wire => self.draw_wire(ui, default_wire(mouse), false, false),
+                InstanceKind::Wire => {
+                    self.draw_wire(ui, &default_wire(mouse), false, false, Vec::new())
+                }
                 InstanceKind::CustomCircuit(def) => {
                     self.draw_custom_circuit_preview(ui, def, mouse);
                 }
@@ -249,10 +260,10 @@ impl App {
                     self.drag_had_movement = true;
                 }
 
-                self.potential_connections = self.compute_potential_connections_for_pin(Pin {
-                    ins: wire_id,
-                    index: 1,
-                });
+                // self.potential_connections = self.compute_potential_connections_for_pin(Pin {
+                //     ins: wire_id,
+                //     index: 1,
+                // });
             }
             None => {}
         }
@@ -280,7 +291,10 @@ impl App {
                         pos,
                     }),
                     InstanceKind::Power => self.db.new_power(Power { pos, on: true }),
-                    InstanceKind::Wire => self.db.new_wire(default_wire(pos)),
+                    InstanceKind::Wire => {
+                        let w = default_wire(pos);
+                        self.db.new_wire(w)
+                    }
                     InstanceKind::CustomCircuit(definition_index) => {
                         self.db
                             .new_custom_circuit(crate::custom_circuit::CustomCircuit {
@@ -561,8 +575,5 @@ impl App {
 }
 
 pub fn default_wire(pos: Pos2) -> Wire {
-    Wire {
-        start: pos2(pos.x - 30.0, pos.y),
-        end: pos2(pos.x + 30.0, pos.y),
-    }
+    Wire::new(pos2(pos.x - 30.0, pos.y), pos2(pos.x + 30.0, pos.y))
 }
