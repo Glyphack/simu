@@ -11,6 +11,7 @@ use slotmap::{Key as _, SecondaryMap, SlotMap};
 use crate::{
     assets::{self},
     config::CanvasConfig,
+    connection_manager::ConnectionManager,
     custom_circuit::{self, CustomCircuit, CustomCircuitDefinition},
     drag::Drag,
 };
@@ -84,7 +85,9 @@ pub enum InstanceKind {
 }
 
 // A specific pin on an instance
-#[derive(serde::Deserialize, serde::Serialize, Copy, Debug, Clone, Eq, PartialEq, Hash)]
+#[derive(
+    serde::Deserialize, serde::Serialize, Copy, Debug, Clone, Eq, PartialEq, Hash, Ord, PartialOrd,
+)]
 pub struct Pin {
     pub ins: InstanceId,
     pub index: u32,
@@ -423,6 +426,9 @@ pub struct App {
     pub drag: Option<Drag>,
     pub hovered: Option<Hover>,
     pub db: DB,
+    // connection manager for handling spatial indexing and validation
+    #[serde(skip)]
+    pub connection_manager: ConnectionManager,
     // possible connections while dragging
     pub potential_connections: HashSet<Connection>,
     // energized pins based on current simulation
@@ -468,6 +474,7 @@ impl Default for App {
             canvas_config: Default::default(),
             drag: Default::default(),
             hovered: Default::default(),
+            connection_manager: ConnectionManager::new(),
             potential_connections: Default::default(),
             current: Default::default(),
             current_dirty: true,
@@ -755,6 +762,12 @@ impl App {
         self.hovered.take();
         self.drag.take();
         self.selected.remove(&id);
+
+        // Remove from connection manager tracking
+        self.connection_manager.dirty_instances.remove(&id);
+        self.connection_manager
+            .dirty_pins
+            .retain(|pin| pin.ins != id);
         self.current.retain(|p| p.ins != id);
         self.current_dirty = true;
     }
@@ -778,6 +791,10 @@ impl App {
             .pointer_interact_pos()
             .map(|p| self.screen_to_world(p));
         let mouse_is_visible = ui.ctx().input(|i| i.pointer.has_pointer());
+
+        if self.connection_manager.update_connections(&mut self.db) {
+            self.current_dirty = true;
+        }
 
         self.handle_panning(ui, right_down, right_released, mouse_is_visible);
         self.handle_copy_pasting(ui, mouse_pos_world);
@@ -1241,7 +1258,7 @@ impl App {
                     .circle_filled(pin_pos, PIN_HOVER_THRESHOLD, color);
             }
             Hover::Instance(hovered) => match self.db.ty(hovered) {
-                InstanceKind::Gate(gate_kind) => {
+                InstanceKind::Gate(_) => {
                     let gate = self.db.get_gate(hovered);
                     let outer = Rect::from_center_size(
                         gate.pos - self.viewport_offset,
@@ -1253,26 +1270,6 @@ impl App {
                         Stroke::new(2.0, COLOR_HOVER_INSTANCE_OUTLINE),
                         StrokeKind::Middle,
                     );
-
-                    if let Some(mouse) = ui.ctx().pointer_interact_pos() {
-                        for (i, pin_info) in gate_kind.graphics().pins.iter().enumerate() {
-                            let pin = Pin {
-                                ins: hovered,
-                                index: i as u32,
-                            };
-                            let pin_offset = pin_info.offset;
-                            let pin_pos = gate.pos + pin_offset - self.viewport_offset;
-                            if mouse.distance(pin_pos) < SNAP_THRESHOLD
-                                && self.is_pin_connected(pin)
-                            {
-                                ui.painter().circle_filled(
-                                    pin_pos,
-                                    SNAP_THRESHOLD,
-                                    COLOR_PIN_DETACH_HINT,
-                                );
-                            }
-                        }
-                    }
                 }
                 InstanceKind::Power => {
                     let power = self.db.get_power(hovered);
@@ -1807,9 +1804,8 @@ impl App {
                     })
                 }
             };
-            self.potential_connections = self.compute_potential_connections_for_instance(id);
-            self.finalize_connections_for_instance(id);
-            self.selected.insert(id); // Add newly pasted instance to selection
+            self.connection_manager.mark_instance_dirty(id);
+            self.selected.insert(id);
         }
     }
 
@@ -1895,37 +1891,8 @@ impl App {
         let original_wire_mut = self.db.get_wire_mut(wire_id);
         original_wire_mut.end = split_point;
 
-        let original_end_pin = Pin {
-            ins: wire_id,
-            index: 1,
-        };
-        let new_start_pin = Pin {
-            ins: new_wire_id,
-            index: 0,
-        };
-
-        // Find all connections involving the original wire's end pin
-        let connections_to_update: Vec<Connection> = self
-            .db
-            .connections
-            .iter()
-            .filter(|conn| conn.a == original_end_pin || conn.b == original_end_pin)
-            .copied()
-            .collect();
-
-        // Remove old connections and add new ones
-        for old_connection in connections_to_update {
-            self.db.connections.remove(&old_connection);
-
-            let new_connection = if old_connection.a == original_end_pin {
-                Connection::new(new_start_pin, old_connection.b)
-            } else {
-                Connection::new(old_connection.a, new_start_pin)
-            };
-            self.db.connections.insert(new_connection);
-        }
-
-        // Mark simulation as dirty since we've changed the circuit
+        self.connection_manager
+            .mark_instances_dirty(&[wire_id, new_wire_id]);
         self.current_dirty = true;
     }
 
