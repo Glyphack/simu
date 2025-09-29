@@ -2,14 +2,10 @@ use std::collections::HashSet;
 
 use egui::{CornerRadius, Pos2, Rect, Stroke, StrokeKind, Ui, Vec2, pos2};
 
-use crate::{
-    app::{
-        App, COLOR_SELECTION_BOX, Connection, Gate, Hover, InstanceId, InstanceKind, Pin, Power,
-        SNAP_THRESHOLD, Wire,
-    },
-    assets::PinPosition,
+use crate::app::{
+    App, COLOR_HOVER_PIN_TO_WIRE, COLOR_SELECTION_BOX, Connection, Gate, Hover, InstanceId,
+    InstanceKind, MIN_WIRE_SIZE, NEW_PIN_ON_WIRE_THRESHOLD, Pin, Power, SNAP_THRESHOLD, Wire,
 };
-const MIN_WIRE_SIZE: f32 = 40.0;
 
 #[derive(serde::Deserialize, serde::Serialize, Debug, Clone, Copy)]
 pub enum CanvasDrag {
@@ -41,6 +37,12 @@ pub enum Drag {
     PinToWire {
         source_pin: Pin,
         wire_id: InstanceId,
+    },
+    WireFromMiddle {
+        original_wire_id: InstanceId,
+        split_point: Pos2,
+        start_mouse_pos: Pos2,
+        new_wire_id: Option<InstanceId>, // Created only when drag distance is sufficient
     },
 }
 
@@ -114,6 +116,27 @@ impl App {
                 }
                 InstanceKind::Wire => {
                     let wire = self.db.get_wire(hovered);
+
+                    // Check if click is near the middle of the wire for branching
+                    if wire.dist_to_closest_point_on_line(mouse_pos) <= NEW_PIN_ON_WIRE_THRESHOLD {
+                        let split_point = wire.closest_point_on_line(mouse_pos);
+
+                        // Check if split point is far enough from endpoints
+                        if (split_point - wire.start).length() >= MIN_WIRE_SIZE
+                            && (split_point - wire.end).length() >= MIN_WIRE_SIZE
+                        {
+                            // Start wire-from-middle drag (don't split yet)
+                            self.drag = Some(Drag::WireFromMiddle {
+                                original_wire_id: hovered,
+                                split_point,
+                                start_mouse_pos: mouse_pos,
+                                new_wire_id: None, // Created later when drag distance is sufficient
+                            });
+                            return;
+                        }
+                    }
+
+                    // Default wire dragging behavior (move whole wire)
                     let wire_center = pos2(
                         (wire.start.x + wire.end.x) * 0.5,
                         (wire.start.y + wire.end.y) * 0.5,
@@ -142,7 +165,7 @@ impl App {
                 InstanceKind::Gate(gate_kind) => self.draw_gate_preview(ui, gate_kind, mouse),
                 InstanceKind::Power => self.draw_power_preview(ui, mouse),
                 InstanceKind::Wire => {
-                    self.draw_wire(ui, &default_wire(mouse), false, false, Vec::new());
+                    self.draw_wire(ui, &default_wire(mouse), false, false);
                 }
                 InstanceKind::CustomCircuit(def) => {
                     self.draw_custom_circuit_preview(ui, def, mouse);
@@ -272,6 +295,57 @@ impl App {
                 //     index: 1,
                 // });
             }
+            Some(Drag::WireFromMiddle {
+                original_wire_id,
+                split_point,
+                start_mouse_pos,
+                new_wire_id,
+            }) => {
+                let drag_distance = (mouse - start_mouse_pos).length();
+
+                // Only create the new wire once we've dragged far enough
+                if drag_distance >= MIN_WIRE_SIZE {
+                    // If we haven't created the new wire yet, create it now
+                    if new_wire_id.is_none() {
+                        // Split the original wire
+                        self.split_wire_at_point(original_wire_id, split_point);
+
+                        // Create the new branch wire
+                        let branch_wire = Wire::new(split_point, mouse);
+                        let branch_wire_id = self.db.new_wire(branch_wire);
+
+                        // Update the drag state to track the new wire
+                        if let Some(Drag::WireFromMiddle {
+                            new_wire_id: nwid, ..
+                        }) = &mut self.drag
+                        {
+                            *nwid = Some(branch_wire_id);
+                        }
+
+                        self.drag_had_movement = true;
+                    } else {
+                        // Update the existing branch wire's endpoint
+                        if let Some(wire_id) = new_wire_id {
+                            let branch_wire = self.db.get_wire_mut(wire_id);
+                            branch_wire.end = mouse;
+                            self.drag_had_movement = true;
+                        }
+                    }
+                } else {
+                    // Not dragged far enough - just show a preview
+                    if drag_distance > 2.0 {
+                        // Small movement to show intent
+                        // Draw preview line
+                        ui.painter().line_segment(
+                            [
+                                split_point - self.viewport_offset,
+                                mouse - self.viewport_offset,
+                            ],
+                            Stroke::new(2.0, COLOR_HOVER_PIN_TO_WIRE),
+                        );
+                    }
+                }
+            }
             None => {}
         }
 
@@ -362,6 +436,28 @@ impl App {
                     index: 1,
                 };
                 self.finalize_connections_for_pin(pin);
+            }
+            Drag::WireFromMiddle {
+                original_wire_id: _,
+                split_point: _,
+                start_mouse_pos,
+                new_wire_id,
+            } => {
+                let drag_distance = (mouse_pos - start_mouse_pos).length();
+
+                // If we didn't drag far enough, clean up any temporary state
+                if drag_distance < MIN_WIRE_SIZE {
+                    // If a new wire was created, remove it
+                    if let Some(wire_id) = new_wire_id {
+                        self.delete_instance(wire_id);
+                    }
+                } else {
+                    // Successful drag - finalize connections for the new wire
+                    if let Some(wire_id) = new_wire_id {
+                        self.finalize_connections_for_instance(wire_id);
+                        self.current_dirty = true;
+                    }
+                }
             }
         }
         self.potential_connections.clear();
@@ -499,12 +595,7 @@ impl App {
             InstanceKind::Gate(gk) => {
                 let g = self.db.get_gate_mut(src.ins);
                 let info = gk.graphics().pins[src.index as usize];
-                let pin_offset = match info.position {
-                    PinPosition::Offset(offset) => offset,
-                    PinPosition::Parametric(_) => {
-                        panic!("Gate graphics should not have parametric pins");
-                    }
-                };
+                let pin_offset = info.offset;
                 let current = g.pos + pin_offset;
                 let desired = target - current;
                 g.pos += desired;
@@ -512,12 +603,7 @@ impl App {
             InstanceKind::Power => {
                 let p = self.db.get_power_mut(src.ins);
                 let info = crate::assets::POWER_ON_GRAPHICS.pins[src.index as usize];
-                let pin_offset = match info.position {
-                    PinPosition::Offset(offset) => offset,
-                    PinPosition::Parametric(_) => {
-                        panic!("Power graphics should not have parametric pins");
-                    }
-                };
+                let pin_offset = info.offset;
                 let current = p.pos + pin_offset;
                 let desired = target - current;
                 p.pos += desired;

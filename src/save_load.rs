@@ -36,7 +36,7 @@ impl serde::Serialize for DB {
             powers.push((id.data().as_ffi(), *power));
         }
         for (id, wire) in &self.wires {
-            wires.push((id.data().as_ffi(), wire.clone()));
+            wires.push((id.data().as_ffi(), *wire));
         }
         for (id, custom_circuit) in &self.custom_circuits {
             custom_circuits.push((id.data().as_ffi(), custom_circuit.clone()));

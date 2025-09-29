@@ -11,16 +11,10 @@ pub enum PinKind {
     Output,
 }
 
-#[derive(serde::Deserialize, serde::Serialize, Debug, Clone, Copy, PartialEq)]
-pub enum PinPosition {
-    Offset(Vec2),    // For gates - absolute offset from center
-    Parametric(f32), // For wires - t value along wire (0.0 to 1.0)
-}
-
-#[derive(serde::Deserialize, serde::Serialize, Debug, Clone, Copy, PartialEq)]
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PinInfo {
     pub kind: PinKind,
-    pub position: PinPosition,
+    pub offset: Vec2,
 }
 
 pub static NAND_GRAPHICS: InstanceGraphics = InstanceGraphics {
@@ -29,15 +23,15 @@ pub static NAND_GRAPHICS: InstanceGraphics = InstanceGraphics {
     pins: &[
         PinInfo {
             kind: PinKind::Input,
-            position: PinPosition::Offset(Vec2::new(-37.0, 14.5)),
+            offset: Vec2::new(-37.0, 14.5),
         },
         PinInfo {
             kind: PinKind::Output,
-            position: PinPosition::Offset(Vec2::new(40.0, 0.2)),
+            offset: Vec2::new(40.0, 0.2),
         },
         PinInfo {
             kind: PinKind::Input,
-            position: PinPosition::Offset(Vec2::new(-37.0, -14.5)),
+            offset: Vec2::new(-37.0, -14.5),
         },
     ],
 };
@@ -47,15 +41,15 @@ pub static AND_GRAPHICS: InstanceGraphics = InstanceGraphics {
     pins: &[
         PinInfo {
             kind: PinKind::Input,
-            position: PinPosition::Offset(Vec2::new(-37.0, 14.5)),
+            offset: Vec2::new(-37.0, 14.5),
         },
         PinInfo {
             kind: PinKind::Output,
-            position: PinPosition::Offset(Vec2::new(40.0, 0.2)),
+            offset: Vec2::new(40.0, 0.2),
         },
         PinInfo {
             kind: PinKind::Input,
-            position: PinPosition::Offset(Vec2::new(-37.0, -14.5)),
+            offset: Vec2::new(-37.0, -14.5),
         },
     ],
 };
@@ -65,15 +59,15 @@ pub static OR_GRAPHICS: InstanceGraphics = InstanceGraphics {
     pins: &[
         PinInfo {
             kind: PinKind::Input,
-            position: PinPosition::Offset(Vec2::new(-37.0, 14.5)),
+            offset: Vec2::new(-37.0, 14.5),
         },
         PinInfo {
             kind: PinKind::Output,
-            position: PinPosition::Offset(Vec2::new(40.0, 0.2)),
+            offset: Vec2::new(40.0, 0.2),
         },
         PinInfo {
             kind: PinKind::Input,
-            position: PinPosition::Offset(Vec2::new(-37.0, -14.5)),
+            offset: Vec2::new(-37.0, -14.5),
         },
     ],
 };
@@ -83,15 +77,15 @@ pub static NOR_GRAPHICS: InstanceGraphics = InstanceGraphics {
     pins: &[
         PinInfo {
             kind: PinKind::Input,
-            position: PinPosition::Offset(Vec2::new(-37.0, 14.5)),
+            offset: Vec2::new(-37.0, 14.5),
         },
         PinInfo {
             kind: PinKind::Output,
-            position: PinPosition::Offset(Vec2::new(40.0, 0.2)),
+            offset: Vec2::new(40.0, 0.2),
         },
         PinInfo {
             kind: PinKind::Input,
-            position: PinPosition::Offset(Vec2::new(-37.0, -14.5)),
+            offset: Vec2::new(-37.0, -14.5),
         },
     ],
 };
@@ -101,15 +95,15 @@ pub static XOR_GRAPHICS: InstanceGraphics = InstanceGraphics {
     pins: &[
         PinInfo {
             kind: PinKind::Input,
-            position: PinPosition::Offset(Vec2::new(-37.0, 14.5)),
+            offset: Vec2::new(-37.0, 14.5),
         },
         PinInfo {
             kind: PinKind::Output,
-            position: PinPosition::Offset(Vec2::new(40.0, 0.2)),
+            offset: Vec2::new(40.0, 0.2),
         },
         PinInfo {
             kind: PinKind::Input,
-            position: PinPosition::Offset(Vec2::new(-37.0, -14.5)),
+            offset: Vec2::new(-37.0, -14.5),
         },
     ],
 };
@@ -119,15 +113,15 @@ pub static XNOR_GRAPHICS: InstanceGraphics = InstanceGraphics {
     pins: &[
         PinInfo {
             kind: PinKind::Input,
-            position: PinPosition::Offset(Vec2::new(-37.0, 14.5)),
+            offset: Vec2::new(-37.0, 14.5),
         },
         PinInfo {
             kind: PinKind::Output,
-            position: PinPosition::Offset(Vec2::new(40.0, 0.2)),
+            offset: Vec2::new(40.0, 0.2),
         },
         PinInfo {
             kind: PinKind::Input,
-            position: PinPosition::Offset(Vec2::new(-37.0, -14.5)),
+            offset: Vec2::new(-37.0, -14.5),
         },
     ],
 };
@@ -136,7 +130,7 @@ pub static POWER_ON_GRAPHICS: InstanceGraphics = InstanceGraphics {
     svg: include_image!("../assets/switch-on.svg"),
     pins: &[PinInfo {
         kind: PinKind::Output,
-        position: PinPosition::Offset(Vec2::new(40.0, 0.0)),
+        offset: Vec2::new(40.0, 0.0),
     }],
 };
 
@@ -144,6 +138,6 @@ pub static POWER_OFF_GRAPHICS: InstanceGraphics = InstanceGraphics {
     svg: include_image!("../assets/switch-off.svg"),
     pins: &[PinInfo {
         kind: PinKind::Output,
-        position: PinPosition::Offset(Vec2::new(40.0, 0.0)),
+        offset: Vec2::new(40.0, 0.0),
     }],
 };
