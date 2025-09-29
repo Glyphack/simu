@@ -11,7 +11,7 @@ pub enum PinKind {
     Output,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PinInfo {
     pub kind: PinKind,
     pub offset: Vec2,

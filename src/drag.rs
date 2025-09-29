@@ -3,8 +3,8 @@ use std::collections::HashSet;
 use egui::{CornerRadius, Pos2, Rect, Stroke, StrokeKind, Ui, Vec2, pos2};
 
 use crate::app::{
-    App, COLOR_SELECTION_BOX, Connection, Gate, Hover, InstanceId, InstanceKind, Pin, Power,
-    SNAP_THRESHOLD, Wire,
+    App, COLOR_HOVER_PIN_TO_WIRE, COLOR_SELECTION_BOX, Connection, Gate, Hover, InstanceId,
+    InstanceKind, MIN_WIRE_SIZE, Pin, Power, SNAP_THRESHOLD, Wire,
 };
 
 #[derive(serde::Deserialize, serde::Serialize, Debug, Clone, Copy)]
@@ -26,7 +26,7 @@ pub enum Drag {
         pos: Pos2,
         kind: InstanceKind,
     },
-    CanvasNew(CanvasDrag),
+    Canvas(CanvasDrag),
     Resize {
         id: InstanceId,
         start: bool,
@@ -38,30 +38,42 @@ pub enum Drag {
         source_pin: Pin,
         wire_id: InstanceId,
     },
+    BranchWire {
+        original_wire_id: InstanceId,
+        split_point: Pos2,
+        start_mouse_pos: Pos2,
+    },
 }
 
 impl App {
-    pub fn handle_drag_start_canvas(&mut self, mouse_pos: Pos2) {
+    pub fn handle_drag_start_canvas(&mut self, mouse: Pos2) {
         if self.drag.is_some() {
             return;
         }
 
         self.drag_had_movement = false;
 
-        if !self.selected.is_empty() {
-            self.drag = Some(Drag::CanvasNew(CanvasDrag::Selected { start: mouse_pos }));
+        if !self.selected.is_empty()
+            && !self.selected.len() == 1
+            && matches!(
+                self.db
+                    .ty(*self.selected.iter().next().expect("checked size")),
+                InstanceKind::Wire
+            )
+        {
+            self.drag = Some(Drag::Canvas(CanvasDrag::Selected { start: mouse }));
             return;
         }
 
         let Some(hovered) = self.hovered else {
-            self.drag = Some(Drag::Selecting { start: mouse_pos });
+            self.drag = Some(Drag::Selecting { start: mouse });
             self.potential_connections.clear();
             return;
         };
 
         match hovered {
             Hover::Pin(pin) => {
-                if matches!(self.db.ty(pin.ins), InstanceKind::Wire) {
+                if matches!(self.db.ty(pin.ins), InstanceKind::Wire) && pin.index <= 1 {
                     self.drag = Some(Drag::Resize {
                         id: pin.ins,
                         start: pin.index == 0,
@@ -69,57 +81,57 @@ impl App {
                     return;
                 }
                 let pin_pos = self.db.pin_position(pin);
-                let wire_id = self.db.new_wire(Wire {
-                    start: pin_pos,
-                    end: mouse_pos,
-                });
-                self.db.connections.insert(Connection::new(
-                    pin,
-                    Pin {
-                        ins: wire_id,
-                        index: 0,
-                    },
-                ));
+                let wire_id = self.db.new_wire(Wire::new(pin_pos, mouse));
                 self.drag = Some(Drag::PinToWire {
                     source_pin: pin,
                     wire_id,
                 });
                 self.current_dirty = true;
             }
-            Hover::Instance(hovered) => match self.db.ty(hovered) {
+            Hover::Instance(instance) => match self.db.ty(instance) {
                 InstanceKind::Gate(_) => {
-                    let gate = self.db.get_gate(hovered);
-                    let offset = gate.pos - mouse_pos;
-                    self.drag = Some(Drag::CanvasNew(CanvasDrag::Single {
-                        id: hovered,
+                    let gate = self.db.get_gate(instance);
+                    let offset = gate.pos - mouse;
+                    self.drag = Some(Drag::Canvas(CanvasDrag::Single {
+                        id: instance,
                         offset,
                     }));
                 }
                 InstanceKind::Power => {
-                    let power = self.db.get_power(hovered);
-                    let offset = power.pos - mouse_pos;
-                    self.drag = Some(Drag::CanvasNew(CanvasDrag::Single {
-                        id: hovered,
+                    let power = self.db.get_power(instance);
+                    let offset = power.pos - mouse;
+                    self.drag = Some(Drag::Canvas(CanvasDrag::Single {
+                        id: instance,
                         offset,
                     }));
                 }
                 InstanceKind::Wire => {
-                    let wire = self.db.get_wire(hovered);
+                    let wire = self.db.get_wire(instance);
+
+                    if let Some(split_point) = self.wire_branching_action_point(mouse, hovered) {
+                        self.drag = Some(Drag::BranchWire {
+                            original_wire_id: instance,
+                            split_point,
+                            start_mouse_pos: mouse,
+                        });
+                        return;
+                    }
+
                     let wire_center = pos2(
                         (wire.start.x + wire.end.x) * 0.5,
                         (wire.start.y + wire.end.y) * 0.5,
                     );
-                    let offset = wire_center - mouse_pos;
-                    self.drag = Some(Drag::CanvasNew(CanvasDrag::Single {
-                        id: hovered,
+                    let offset = wire_center - mouse;
+                    self.drag = Some(Drag::Canvas(CanvasDrag::Single {
+                        id: instance,
                         offset,
                     }));
                 }
                 InstanceKind::CustomCircuit(_) => {
-                    let cc = self.db.get_custom_circuit(hovered);
-                    let offset = cc.pos - mouse_pos;
-                    self.drag = Some(Drag::CanvasNew(CanvasDrag::Single {
-                        id: hovered,
+                    let cc = self.db.get_custom_circuit(instance);
+                    let offset = cc.pos - mouse;
+                    self.drag = Some(Drag::Canvas(CanvasDrag::Single {
+                        id: instance,
                         offset,
                     }));
                 }
@@ -132,7 +144,9 @@ impl App {
             Some(Drag::Panel { pos: _, kind }) => match kind {
                 InstanceKind::Gate(gate_kind) => self.draw_gate_preview(ui, gate_kind, mouse),
                 InstanceKind::Power => self.draw_power_preview(ui, mouse),
-                InstanceKind::Wire => self.draw_wire(ui, default_wire(mouse), false, false),
+                InstanceKind::Wire => {
+                    self.draw_wire(ui, &default_wire(mouse), false, false);
+                }
                 InstanceKind::CustomCircuit(def) => {
                     self.draw_custom_circuit_preview(ui, def, mouse);
                 }
@@ -159,7 +173,7 @@ impl App {
                     self.drag_had_movement = true;
                 }
             }
-            Some(Drag::CanvasNew(canvas_drag)) => match canvas_drag {
+            Some(Drag::Canvas(canvas_drag)) => match canvas_drag {
                 CanvasDrag::Single { id, offset } => {
                     let new_pos = mouse + offset;
                     let mut moved = false;
@@ -204,7 +218,7 @@ impl App {
                         return;
                     }
                     let desired = mouse - start;
-                    self.drag = Some(Drag::CanvasNew(CanvasDrag::Selected { start: mouse }));
+                    self.drag = Some(Drag::Canvas(CanvasDrag::Selected { start: mouse }));
 
                     let group: Vec<InstanceId> = self.selected.iter().copied().collect();
                     self.move_nonwires_and_resize_wires(&group, desired);
@@ -221,14 +235,21 @@ impl App {
             Some(Drag::Resize { id, start }) => {
                 let wire = self.db.get_wire_mut(id);
                 let mut moved = false;
+
                 if start {
-                    if wire.start != mouse {
-                        wire.start = mouse;
+                    let new_start = mouse;
+                    let wire_length = (wire.end - new_start).length();
+                    if wire_length >= MIN_WIRE_SIZE && wire.start != new_start {
+                        wire.start = new_start;
                         moved = true;
                     }
-                } else if wire.end != mouse {
-                    wire.end = mouse;
-                    moved = true;
+                } else {
+                    let new_end = mouse;
+                    let wire_length = (wire.start - new_end).length();
+                    if wire_length >= MIN_WIRE_SIZE && wire.end != new_end {
+                        wire.end = new_end;
+                        moved = true;
+                    }
                 }
 
                 self.potential_connections = self.compute_potential_connections_for_pin(Pin {
@@ -249,10 +270,38 @@ impl App {
                     self.drag_had_movement = true;
                 }
 
-                self.potential_connections = self.compute_potential_connections_for_pin(Pin {
-                    ins: wire_id,
-                    index: 1,
-                });
+                // self.potential_connections = self.compute_potential_connections_for_pin(Pin {
+                //     ins: wire_id,
+                //     index: 1,
+                // });
+            }
+            Some(Drag::BranchWire {
+                original_wire_id,
+                split_point,
+                start_mouse_pos,
+            }) => {
+                let drag_distance = (mouse - start_mouse_pos).length();
+
+                if drag_distance >= MIN_WIRE_SIZE {
+                    self.split_wire_at_point(original_wire_id, split_point);
+                    let branch_wire = Wire::new(split_point, mouse);
+                    let branch_wire_id = self.db.new_wire(branch_wire);
+
+                    self.drag = Some(Drag::Resize {
+                        id: branch_wire_id,
+                        start: false,
+                    });
+
+                    self.drag_had_movement = true;
+                } else if drag_distance > 2.0 {
+                    ui.painter().line_segment(
+                        [
+                            split_point - self.viewport_offset,
+                            mouse - self.viewport_offset,
+                        ],
+                        Stroke::new(2.0, COLOR_HOVER_PIN_TO_WIRE),
+                    );
+                }
             }
             None => {}
         }
@@ -280,7 +329,10 @@ impl App {
                         pos,
                     }),
                     InstanceKind::Power => self.db.new_power(Power { pos, on: true }),
-                    InstanceKind::Wire => self.db.new_wire(default_wire(pos)),
+                    InstanceKind::Wire => {
+                        let w = default_wire(pos);
+                        self.db.new_wire(w)
+                    }
                     InstanceKind::CustomCircuit(definition_index) => {
                         self.db
                             .new_custom_circuit(crate::custom_circuit::CustomCircuit {
@@ -291,7 +343,7 @@ impl App {
                 };
                 self.current_dirty = true;
             }
-            Drag::CanvasNew(canvas_drag) => match canvas_drag {
+            Drag::Canvas(canvas_drag) => match canvas_drag {
                 CanvasDrag::Single { id, offset: _ } => {
                     self.finalize_connections_for_instance(id);
                 }
@@ -342,6 +394,11 @@ impl App {
                 };
                 self.finalize_connections_for_pin(pin);
             }
+            Drag::BranchWire {
+                original_wire_id: _,
+                split_point: _,
+                start_mouse_pos: _,
+            } => {}
         }
         self.potential_connections.clear();
         self.drag_had_movement = false;
@@ -460,24 +517,34 @@ impl App {
         let target = self.db.pin_position(dst);
         match self.db.ty(src.ins) {
             InstanceKind::Wire => {
-                let w = self.db.get_wire_mut(src.ins);
                 if src.index == 0 {
+                    let w = self.db.get_wire_mut(src.ins);
                     w.start = target;
-                } else {
+                } else if src.index == 1 {
+                    let w = self.db.get_wire_mut(src.ins);
                     w.end = target;
+                } else {
+                    // Handle extra pin snapping - move entire wire to preserve parametric position
+                    let current_pos = self.db.pin_position(src);
+                    let delta = target - current_pos;
+                    let w = self.db.get_wire_mut(src.ins);
+                    w.start += delta;
+                    w.end += delta;
                 }
             }
             InstanceKind::Gate(gk) => {
                 let g = self.db.get_gate_mut(src.ins);
                 let info = gk.graphics().pins[src.index as usize];
-                let current = g.pos + info.offset;
+                let pin_offset = info.offset;
+                let current = g.pos + pin_offset;
                 let desired = target - current;
                 g.pos += desired;
             }
             InstanceKind::Power => {
                 let p = self.db.get_power_mut(src.ins);
                 let info = crate::assets::POWER_ON_GRAPHICS.pins[src.index as usize];
-                let current = p.pos + info.offset;
+                let pin_offset = info.offset;
+                let current = p.pos + pin_offset;
                 let desired = target - current;
                 p.pos += desired;
             }
@@ -561,8 +628,5 @@ impl App {
 }
 
 pub fn default_wire(pos: Pos2) -> Wire {
-    Wire {
-        start: pos2(pos.x - 30.0, pos.y),
-        end: pos2(pos.x + 30.0, pos.y),
-    }
+    Wire::new(pos2(pos.x - 30.0, pos.y), pos2(pos.x + 30.0, pos.y))
 }
