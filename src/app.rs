@@ -15,7 +15,7 @@ use crate::{
     drag::Drag,
 };
 
-pub const PANEL_BUTTON_MAX_HEIGH: f32 = 70.0;
+pub const PANEL_BUTTON_MAX_HEIGHT: f32 = 70.0;
 
 // Grid
 pub const GRID_SIZE: f32 = 20.0;
@@ -632,7 +632,7 @@ impl App {
         let resp = match kind {
             InstanceKind::Gate(gate_kind) => {
                 let s = get_icon(ui, gate_kind.graphics().svg.clone())
-                    .max_height(PANEL_BUTTON_MAX_HEIGH);
+                    .max_height(PANEL_BUTTON_MAX_HEIGHT);
                 ui.add(egui::ImageButton::new(s).sense(Sense::click_and_drag()))
             }
             InstanceKind::Power => {
@@ -646,7 +646,7 @@ impl App {
                     .svg
                     .clone(),
                 )
-                .max_height(PANEL_BUTTON_MAX_HEIGH);
+                .max_height(PANEL_BUTTON_MAX_HEIGHT);
                 ui.add(egui::ImageButton::new(s).sense(Sense::click_and_drag()))
             }
             InstanceKind::Wire => ui.add(
