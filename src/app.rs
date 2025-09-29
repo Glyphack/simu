@@ -289,7 +289,7 @@ impl DB {
         self.types
             .get(id)
             .copied()
-            .expect("instance type missing for id")
+            .unwrap_or_else(|| panic!("instance type missing for id: {id:?}"))
     }
 
     pub fn get_gate(&self, id: InstanceId) -> &Gate {
@@ -460,21 +460,23 @@ pub struct App {
 
 impl Default for App {
     fn default() -> Self {
+        let db = DB {
+            instances: Default::default(),
+            types: Default::default(),
+            gates: Default::default(),
+            powers: Default::default(),
+            wires: Default::default(),
+            custom_circuits: Default::default(),
+            custom_circuit_definitions: Default::default(),
+            connections: Default::default(),
+        };
+        let c = ConnectionManager::new(&db);
         Self {
-            db: DB {
-                instances: Default::default(),
-                types: Default::default(),
-                gates: Default::default(),
-                powers: Default::default(),
-                wires: Default::default(),
-                custom_circuits: Default::default(),
-                custom_circuit_definitions: Default::default(),
-                connections: Default::default(),
-            },
+            db,
             canvas_config: Default::default(),
             drag: Default::default(),
             hovered: Default::default(),
-            connection_manager: ConnectionManager::new(),
+            connection_manager: c,
             potential_connections: Default::default(),
             current: Default::default(),
             current_dirty: true,
@@ -631,6 +633,7 @@ impl App {
                     self.drag = None;
                     self.current.clear();
                     self.current_dirty = false;
+                    self.connection_manager = ConnectionManager::new(&self.db);
                 }
             });
     }
@@ -792,9 +795,9 @@ impl App {
             .map(|p| self.screen_to_world(p));
         let mouse_is_visible = ui.ctx().input(|i| i.pointer.has_pointer());
 
-        if self.connection_manager.update_connections(&mut self.db) {
-            self.current_dirty = true;
-        }
+        // TODO Fix persisting index
+        self.connection_manager.rebuild_spatial_index(&self.db);
+        self.connection_manager.update_connections(&mut self.db);
 
         self.handle_panning(ui, right_down, right_released, mouse_is_visible);
         self.handle_copy_pasting(ui, mouse_pos_world);
@@ -1716,6 +1719,8 @@ impl App {
                 .ok();
             }
         }
+
+        writeln!(out, "\n{}", self.connection_manager.debug_info()).ok();
 
         out
     }

@@ -44,8 +44,10 @@ pub struct ConnectionManager {
 }
 
 impl ConnectionManager {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(db: &DB) -> Self {
+        let mut new = Self::default();
+        new.rebuild_spatial_index(db);
+        new
     }
 
     /// Mark an instance as needing connection updates
@@ -66,7 +68,7 @@ impl ConnectionManager {
     }
 
     /// Update the spatial index for all pins in the database
-    fn rebuild_spatial_index(&mut self, db: &DB) {
+    pub fn rebuild_spatial_index(&mut self, db: &DB) {
         self.spatial_index.clear();
         self.pin_position_cache.clear();
 
@@ -271,18 +273,14 @@ impl ConnectionManager {
             new_connections.extend(self.find_potential_connections_for_pin(db, pin));
         }
 
-        // Remove old connections involving dirty pins/instances
         let mut connections_to_keep = HashSet::new();
         for connection in &db.connections {
-            let keep_connection =
-                // Keep connections that don't involve any dirty instances
-                !self.dirty_instances.contains(&connection.a.ins)
+            let keep_connection = !self.dirty_instances.contains(&connection.a.ins)
                 && !self.dirty_instances.contains(&connection.b.ins)
                 && !self.dirty_pins.contains(&connection.a)
                 && !self.dirty_pins.contains(&connection.b);
 
             if keep_connection {
-                // But only keep them if they're still close enough
                 let p1 = db.pin_position(connection.a);
                 let p2 = db.pin_position(connection.b);
                 if (p1 - p2).length() <= SNAP_THRESHOLD {
@@ -291,9 +289,7 @@ impl ConnectionManager {
             }
         }
 
-        // Snap pins and add new connections
         for connection in &new_connections {
-            // Determine which pin should move (prefer wires and newly created instances)
             let (moving_pin, target_pin) = if self.dirty_instances.contains(&connection.a.ins)
                 && !self.dirty_instances.contains(&connection.b.ins)
             {
@@ -315,23 +311,19 @@ impl ConnectionManager {
             connections_to_keep.insert(*connection);
         }
 
-        // Update the database connections
         db.connections = connections_to_keep;
 
-        // Clear dirty sets
         self.dirty_instances.clear();
         self.dirty_pins.clear();
 
-        true // Connections were updated
+        true
     }
 
     /// Get debug information about the connection manager
     pub fn debug_info(&self) -> String {
         format!(
-            "ConnectionManager: {} dirty instances, {} dirty pins, {} grid cells",
-            self.dirty_instances.len(),
-            self.dirty_pins.len(),
-            self.spatial_index.len()
+            "ConnectionManager:\n  dirty_instances: {:?}\n  dirty_pins: {:?}\n  spatial_index: {:#?}",
+            self.dirty_instances, self.dirty_pins, self.spatial_index
         )
     }
 }
