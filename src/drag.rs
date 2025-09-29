@@ -4,7 +4,7 @@ use egui::{CornerRadius, Pos2, Rect, Stroke, StrokeKind, Ui, Vec2, pos2};
 
 use crate::app::{
     App, COLOR_HOVER_PIN_TO_WIRE, COLOR_SELECTION_BOX, Connection, Gate, Hover, InstanceId,
-    InstanceKind, MIN_WIRE_SIZE, NEW_PIN_ON_WIRE_THRESHOLD, Pin, Power, SNAP_THRESHOLD, Wire,
+    InstanceKind, MIN_WIRE_SIZE, Pin, Power, SNAP_THRESHOLD, Wire,
 };
 
 #[derive(serde::Deserialize, serde::Serialize, Debug, Clone, Copy)]
@@ -26,7 +26,7 @@ pub enum Drag {
         pos: Pos2,
         kind: InstanceKind,
     },
-    CanvasNew(CanvasDrag),
+    Canvas(CanvasDrag),
     Resize {
         id: InstanceId,
         start: bool,
@@ -38,16 +38,15 @@ pub enum Drag {
         source_pin: Pin,
         wire_id: InstanceId,
     },
-    WireFromMiddle {
+    BranchWire {
         original_wire_id: InstanceId,
         split_point: Pos2,
         start_mouse_pos: Pos2,
-        new_wire_id: Option<InstanceId>, // Created only when drag distance is sufficient
     },
 }
 
 impl App {
-    pub fn handle_drag_start_canvas(&mut self, mouse_pos: Pos2) {
+    pub fn handle_drag_start_canvas(&mut self, mouse: Pos2) {
         if self.drag.is_some() {
             return;
         }
@@ -62,12 +61,12 @@ impl App {
                 InstanceKind::Wire
             )
         {
-            self.drag = Some(Drag::CanvasNew(CanvasDrag::Selected { start: mouse_pos }));
+            self.drag = Some(Drag::Canvas(CanvasDrag::Selected { start: mouse }));
             return;
         }
 
         let Some(hovered) = self.hovered else {
-            self.drag = Some(Drag::Selecting { start: mouse_pos });
+            self.drag = Some(Drag::Selecting { start: mouse });
             self.potential_connections.clear();
             return;
         };
@@ -82,76 +81,57 @@ impl App {
                     return;
                 }
                 let pin_pos = self.db.pin_position(pin);
-                let wire_id = self.db.new_wire(Wire::new(pin_pos, mouse_pos));
-                // TODO: Connections
-                // self.db.connections.insert(Connection::new(
-                //     pin,
-                //     Pin {
-                //         ins: wire_id,
-                //         index: 0,
-                //     },
-                // ));
+                let wire_id = self.db.new_wire(Wire::new(pin_pos, mouse));
                 self.drag = Some(Drag::PinToWire {
                     source_pin: pin,
                     wire_id,
                 });
                 self.current_dirty = true;
             }
-            Hover::Instance(hovered) => match self.db.ty(hovered) {
+            Hover::Instance(instance) => match self.db.ty(instance) {
                 InstanceKind::Gate(_) => {
-                    let gate = self.db.get_gate(hovered);
-                    let offset = gate.pos - mouse_pos;
-                    self.drag = Some(Drag::CanvasNew(CanvasDrag::Single {
-                        id: hovered,
+                    let gate = self.db.get_gate(instance);
+                    let offset = gate.pos - mouse;
+                    self.drag = Some(Drag::Canvas(CanvasDrag::Single {
+                        id: instance,
                         offset,
                     }));
                 }
                 InstanceKind::Power => {
-                    let power = self.db.get_power(hovered);
-                    let offset = power.pos - mouse_pos;
-                    self.drag = Some(Drag::CanvasNew(CanvasDrag::Single {
-                        id: hovered,
+                    let power = self.db.get_power(instance);
+                    let offset = power.pos - mouse;
+                    self.drag = Some(Drag::Canvas(CanvasDrag::Single {
+                        id: instance,
                         offset,
                     }));
                 }
                 InstanceKind::Wire => {
-                    let wire = self.db.get_wire(hovered);
+                    let wire = self.db.get_wire(instance);
 
-                    // Check if click is near the middle of the wire for branching
-                    if wire.dist_to_closest_point_on_line(mouse_pos) <= NEW_PIN_ON_WIRE_THRESHOLD {
-                        let split_point = wire.closest_point_on_line(mouse_pos);
-
-                        // Check if split point is far enough from endpoints
-                        if (split_point - wire.start).length() >= MIN_WIRE_SIZE
-                            && (split_point - wire.end).length() >= MIN_WIRE_SIZE
-                        {
-                            // Start wire-from-middle drag (don't split yet)
-                            self.drag = Some(Drag::WireFromMiddle {
-                                original_wire_id: hovered,
-                                split_point,
-                                start_mouse_pos: mouse_pos,
-                                new_wire_id: None, // Created later when drag distance is sufficient
-                            });
-                            return;
-                        }
+                    if let Some(split_point) = self.wire_branching_action_point(mouse, hovered) {
+                        self.drag = Some(Drag::BranchWire {
+                            original_wire_id: instance,
+                            split_point,
+                            start_mouse_pos: mouse,
+                        });
+                        return;
                     }
 
-                    // Default wire dragging behavior (move whole wire)
                     let wire_center = pos2(
                         (wire.start.x + wire.end.x) * 0.5,
                         (wire.start.y + wire.end.y) * 0.5,
                     );
-                    let offset = wire_center - mouse_pos;
-                    self.drag = Some(Drag::CanvasNew(CanvasDrag::Single {
-                        id: hovered,
+                    let offset = wire_center - mouse;
+                    self.drag = Some(Drag::Canvas(CanvasDrag::Single {
+                        id: instance,
                         offset,
                     }));
                 }
                 InstanceKind::CustomCircuit(_) => {
-                    let cc = self.db.get_custom_circuit(hovered);
-                    let offset = cc.pos - mouse_pos;
-                    self.drag = Some(Drag::CanvasNew(CanvasDrag::Single {
-                        id: hovered,
+                    let cc = self.db.get_custom_circuit(instance);
+                    let offset = cc.pos - mouse;
+                    self.drag = Some(Drag::Canvas(CanvasDrag::Single {
+                        id: instance,
                         offset,
                     }));
                 }
@@ -193,7 +173,7 @@ impl App {
                     self.drag_had_movement = true;
                 }
             }
-            Some(Drag::CanvasNew(canvas_drag)) => match canvas_drag {
+            Some(Drag::Canvas(canvas_drag)) => match canvas_drag {
                 CanvasDrag::Single { id, offset } => {
                     let new_pos = mouse + offset;
                     let mut moved = false;
@@ -238,7 +218,7 @@ impl App {
                         return;
                     }
                     let desired = mouse - start;
-                    self.drag = Some(Drag::CanvasNew(CanvasDrag::Selected { start: mouse }));
+                    self.drag = Some(Drag::Canvas(CanvasDrag::Selected { start: mouse }));
 
                     let group: Vec<InstanceId> = self.selected.iter().copied().collect();
                     self.move_nonwires_and_resize_wires(&group, desired);
@@ -295,55 +275,32 @@ impl App {
                 //     index: 1,
                 // });
             }
-            Some(Drag::WireFromMiddle {
+            Some(Drag::BranchWire {
                 original_wire_id,
                 split_point,
                 start_mouse_pos,
-                new_wire_id,
             }) => {
                 let drag_distance = (mouse - start_mouse_pos).length();
 
-                // Only create the new wire once we've dragged far enough
                 if drag_distance >= MIN_WIRE_SIZE {
-                    // If we haven't created the new wire yet, create it now
-                    if new_wire_id.is_none() {
-                        // Split the original wire
-                        self.split_wire_at_point(original_wire_id, split_point);
+                    self.split_wire_at_point(original_wire_id, split_point);
+                    let branch_wire = Wire::new(split_point, mouse);
+                    let branch_wire_id = self.db.new_wire(branch_wire);
 
-                        // Create the new branch wire
-                        let branch_wire = Wire::new(split_point, mouse);
-                        let branch_wire_id = self.db.new_wire(branch_wire);
+                    self.drag = Some(Drag::Resize {
+                        id: branch_wire_id,
+                        start: false,
+                    });
 
-                        // Update the drag state to track the new wire
-                        if let Some(Drag::WireFromMiddle {
-                            new_wire_id: nwid, ..
-                        }) = &mut self.drag
-                        {
-                            *nwid = Some(branch_wire_id);
-                        }
-
-                        self.drag_had_movement = true;
-                    } else {
-                        // Update the existing branch wire's endpoint
-                        if let Some(wire_id) = new_wire_id {
-                            let branch_wire = self.db.get_wire_mut(wire_id);
-                            branch_wire.end = mouse;
-                            self.drag_had_movement = true;
-                        }
-                    }
-                } else {
-                    // Not dragged far enough - just show a preview
-                    if drag_distance > 2.0 {
-                        // Small movement to show intent
-                        // Draw preview line
-                        ui.painter().line_segment(
-                            [
-                                split_point - self.viewport_offset,
-                                mouse - self.viewport_offset,
-                            ],
-                            Stroke::new(2.0, COLOR_HOVER_PIN_TO_WIRE),
-                        );
-                    }
+                    self.drag_had_movement = true;
+                } else if drag_distance > 2.0 {
+                    ui.painter().line_segment(
+                        [
+                            split_point - self.viewport_offset,
+                            mouse - self.viewport_offset,
+                        ],
+                        Stroke::new(2.0, COLOR_HOVER_PIN_TO_WIRE),
+                    );
                 }
             }
             None => {}
@@ -386,7 +343,7 @@ impl App {
                 };
                 self.current_dirty = true;
             }
-            Drag::CanvasNew(canvas_drag) => match canvas_drag {
+            Drag::Canvas(canvas_drag) => match canvas_drag {
                 CanvasDrag::Single { id, offset: _ } => {
                     self.finalize_connections_for_instance(id);
                 }
@@ -437,28 +394,11 @@ impl App {
                 };
                 self.finalize_connections_for_pin(pin);
             }
-            Drag::WireFromMiddle {
+            Drag::BranchWire {
                 original_wire_id: _,
                 split_point: _,
-                start_mouse_pos,
-                new_wire_id,
-            } => {
-                let drag_distance = (mouse_pos - start_mouse_pos).length();
-
-                // If we didn't drag far enough, clean up any temporary state
-                if drag_distance < MIN_WIRE_SIZE {
-                    // If a new wire was created, remove it
-                    if let Some(wire_id) = new_wire_id {
-                        self.delete_instance(wire_id);
-                    }
-                } else {
-                    // Successful drag - finalize connections for the new wire
-                    if let Some(wire_id) = new_wire_id {
-                        self.finalize_connections_for_instance(wire_id);
-                        self.current_dirty = true;
-                    }
-                }
-            }
+                start_mouse_pos: _,
+            } => {}
         }
         self.potential_connections.clear();
         self.drag_had_movement = false;

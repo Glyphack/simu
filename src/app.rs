@@ -875,7 +875,7 @@ impl App {
             for c in &self.potential_connections {
                 // Highlight the pin belonging to the currently moving instance if any
                 let pin_to_highlight = match self.drag {
-                    Some(Drag::CanvasNew { .. }) => c.a,
+                    Some(Drag::Canvas { .. }) => c.a,
                     Some(Drag::Resize { id, start }) => {
                         // Only highlight the endpoint being resized
                         let target_pin = Pin {
@@ -918,13 +918,18 @@ impl App {
 
         self.draw_right_click_actions_menu(ui);
 
+        // Preview wire branching
         if !self.selected.is_empty()
             && let Some(hovered) = self.hovered
             && let Some(mouse) = mouse_pos_world
             && self.drag.is_none()
+            && let Some(split_point) = self.wire_branching_action_point(mouse, hovered)
         {
-            // Only show preview when not dragging - actual wire splitting is handled in input phase
-            self.preview_wire_branching_position(ui, mouse, hovered);
+            ui.painter().circle_filled(
+                split_point - self.viewport_offset,
+                PIN_HOVER_THRESHOLD,
+                COLOR_HOVER_PIN_TO_WIRE,
+            );
         }
     }
 
@@ -1149,10 +1154,21 @@ impl App {
             ],
             Stroke::new(self.canvas_config.wire_thickness, color),
         );
+        ui.painter().circle(
+            wire.start - self.viewport_offset,
+            PIN_HOVER_THRESHOLD / 2.0,
+            color,
+            Stroke::NONE,
+        );
+        ui.painter().circle(
+            wire.end - self.viewport_offset,
+            PIN_HOVER_THRESHOLD / 2.0,
+            color,
+            Stroke::NONE,
+        );
     }
 
     pub fn get_hovered(&self, mouse_pos: Pos2) -> Option<Hover> {
-        // Give higher priority to selected instances when hovering
         for selected in &self.selected {
             match self.db.ty(*selected) {
                 InstanceKind::Wire => {
@@ -1323,7 +1339,16 @@ impl App {
                         StrokeKind::Outside,
                     );
                 }
-                InstanceKind::Wire => {}
+                InstanceKind::Wire => {
+                    for pin in self.db.pins_of(id) {
+                        let pos = self.db.pin_position(pin);
+                        ui.painter().circle_filled(
+                            pos - self.viewport_offset,
+                            PIN_MOVE_HINT_D,
+                            PIN_MOVE_HINT_COLOR,
+                        );
+                    }
+                }
                 InstanceKind::CustomCircuit(_) => {
                     let cc = self.db.get_custom_circuit(id);
                     let r = Rect::from_center_size(
@@ -1904,37 +1929,30 @@ impl App {
         self.current_dirty = true;
     }
 
-    fn preview_wire_branching_position(&self, ui: &Ui, mouse: Pos2, hovered: Hover) -> bool {
+    pub fn wire_branching_action_point(&self, mouse: Pos2, hovered: Hover) -> Option<Pos2> {
         let Hover::Instance(instance_id) = hovered else {
-            return false;
+            return None;
         };
-        if !self.selected.contains(&instance_id) {
-            return false;
+        if !self.selected.contains(&instance_id) || self.selected.len() != 1 {
+            return None;
         }
         if !matches!(self.db.ty(instance_id), InstanceKind::Wire) {
-            return false;
+            return None;
         }
         let wire = self.db.get_wire(instance_id);
 
         if wire.dist_to_closest_point_on_line(mouse) > NEW_PIN_ON_WIRE_THRESHOLD {
-            return false;
+            return None;
         }
 
         let split_point = wire.closest_point_on_line(mouse);
         if (split_point - wire.start).length() < MIN_WIRE_SIZE
             || (split_point - wire.end).length() < MIN_WIRE_SIZE
         {
-            return false;
+            return None;
         }
 
-        // Only show visual preview - no immediate splitting on click
-        ui.painter().circle_filled(
-            split_point - self.viewport_offset,
-            PIN_HOVER_THRESHOLD,
-            COLOR_HOVER_PIN_TO_WIRE,
-        );
-
-        false // Never handle click events - let drag system handle wire middle clicks
+        Some(split_point)
     }
 }
 
