@@ -33,6 +33,8 @@ pub const COLOR_HOVER_PIN_TO_WIRE: Color32 = Color32::GRAY;
 pub const COLOR_HOVER_PIN_DETACH: Color32 = Color32::RED;
 pub const PIN_HOVER_THRESHOLD: f32 = 8.0;
 
+pub const NEW_PIN_ON_WIRE_THRESHOLD: f32 = 10.0;
+
 // Connections
 pub const COLOR_POTENTIAL_CONN_HIGHLIGHT: Color32 = Color32::LIGHT_BLUE;
 pub const WIRE_HIT_DISTANCE: f32 = 10.0;
@@ -84,6 +86,33 @@ pub enum InstanceKind {
 pub struct Pin {
     pub ins: InstanceId,
     pub index: u32,
+}
+
+impl Pin {
+    fn is_wire_extra_pin(&self, db: &DB) -> bool {
+        match db.ty(self.ins) {
+            InstanceKind::Wire => self.index > 1,
+            _ => false,
+        }
+    }
+
+    /// Convert a Pin with wire `extra_pin` index to `extra_pins` array index
+    /// For wire pins: index 0,1 are endpoints, index 2+ are `extra_pins`[0], `extra_pins`[1], etc.
+    pub fn to_extra_pins_index(&self) -> Option<usize> {
+        if self.index >= 2 {
+            Some((self.index - 2) as usize)
+        } else {
+            None
+        }
+    }
+
+    /// Create a Pin for a wire `extra_pin` from the `extra_pins` array index
+    pub fn from_extra_pins_index(ins: InstanceId, extra_pins_index: usize) -> Self {
+        Self {
+            ins,
+            index: extra_pins_index as u32 + 2,
+        }
+    }
 }
 
 // A normalized, order-independent connection between two pins
@@ -200,7 +229,8 @@ impl Wire {
             extra_pins: Vec::new(),
         }
     }
-    pub fn distance_point_to_segment(&self, p: Pos2) -> f32 {
+
+    pub fn closest_point_on_line(&self, p: Pos2) -> Pos2 {
         let a = self.start;
         let b = self.end;
         let ab: Vec2 = b - a;
@@ -208,12 +238,16 @@ impl Wire {
 
         let ab_len2 = ab.x * ab.x + ab.y * ab.y;
         if ab_len2 == 0.0 {
-            return (p - a).length();
+            return a;
         }
 
         let t = ((ap.x * ab.x + ap.y * ab.y) / ab_len2).clamp(0.0, 1.0);
 
-        let closest = a + ab * t;
+        a + ab * t
+    }
+
+    pub fn dist_to_closest_point_on_line(&self, p: Pos2) -> f32 {
+        let closest = self.closest_point_on_line(p);
         (p - closest).length()
     }
 
@@ -332,7 +366,14 @@ impl DB {
                 let n = assets::POWER_ON_GRAPHICS.pins.len();
                 (0..n as u32).map(|i| Pin { ins: id, index: i }).collect()
             }
-            InstanceKind::Wire => vec![Pin { ins: id, index: 0 }, Pin { ins: id, index: 1 }],
+            InstanceKind::Wire => {
+                let wire = self.get_wire(id);
+                let mut pins = vec![Pin { ins: id, index: 0 }, Pin { ins: id, index: 1 }];
+                for i in 0..wire.extra_pins.len() {
+                    pins.push(Pin::from_extra_pins_index(id, i));
+                }
+                pins
+            }
             InstanceKind::CustomCircuit(_) => {
                 let cc = self.get_custom_circuit(id);
                 if cc.definition_index < self.custom_circuit_definitions.len() {
@@ -352,12 +393,24 @@ impl DB {
             InstanceKind::Gate(gk) => {
                 let g = self.get_gate(pin.ins);
                 let info = gk.graphics().pins[pin.index as usize];
-                g.pos + info.offset
+                match info.position {
+                    crate::assets::PinPosition::Offset(offset) => g.pos + offset,
+                    crate::assets::PinPosition::Parametric(_) => {
+                        // Gates don't use parametric positioning
+                        panic!("Gates should not have parametric pin positions");
+                    }
+                }
             }
             InstanceKind::Power => {
                 let p = self.get_power(pin.ins);
                 let info = p.graphics().pins[pin.index as usize];
-                p.pos + info.offset
+                match info.position {
+                    crate::assets::PinPosition::Offset(offset) => p.pos + offset,
+                    crate::assets::PinPosition::Parametric(_) => {
+                        // Power sources don't use parametric positioning
+                        panic!("Power sources should not have parametric pin positions");
+                    }
+                }
             }
             InstanceKind::Wire => {
                 let w = self.get_wire(pin.ins);
@@ -366,11 +419,20 @@ impl DB {
                 } else if pin.index == 1 {
                     w.end
                 } else {
-                    w.start
-                        + w.extra_pins
-                            .get(pin.index as usize - 2)
-                            .expect("Must exist")
-                            .offset
+                    let extra_pin = w
+                        .extra_pins
+                        .get(pin.to_extra_pins_index().expect("Pin must be extra pin"))
+                        .expect("Extra pin must exist");
+                    match extra_pin.position {
+                        crate::assets::PinPosition::Offset(offset) => {
+                            // Legacy: absolute offset from wire start
+                            w.start + offset
+                        }
+                        crate::assets::PinPosition::Parametric(t) => {
+                            // New: parametric position along wire
+                            w.start + t * (w.end - w.start)
+                        }
+                    }
                 }
             }
             InstanceKind::CustomCircuit(_) => {
@@ -384,12 +446,22 @@ impl DB {
         match self.ty(pin.ins) {
             InstanceKind::Gate(gk) => {
                 let info = gk.graphics().pins[pin.index as usize];
-                info.offset
+                match info.position {
+                    crate::assets::PinPosition::Offset(offset) => offset,
+                    crate::assets::PinPosition::Parametric(_) => {
+                        panic!("Gates should not have parametric pin positions");
+                    }
+                }
             }
             InstanceKind::Power => {
                 let p = self.get_power(pin.ins);
                 let info = p.graphics().pins[pin.index as usize];
-                info.offset
+                match info.position {
+                    crate::assets::PinPosition::Offset(offset) => offset,
+                    crate::assets::PinPosition::Parametric(_) => {
+                        panic!("Power sources should not have parametric pin positions");
+                    }
+                }
             }
             InstanceKind::Wire => {
                 let w = self.get_wire(pin.ins);
@@ -538,10 +610,37 @@ impl eframe::App for App {
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         egui_extras::install_image_loaders(&cc.egui_ctx);
-        if let Some(storage) = cc.storage {
+        let mut app: Self = if let Some(storage) = cc.storage {
             eframe::get_value(storage, eframe::APP_KEY).unwrap_or_default()
         } else {
             Default::default()
+        };
+
+        // Migrate existing wire extra pins from Offset to Parametric
+        app.migrate_wire_pins();
+
+        app
+    }
+
+    /// Migrate wire extra pins from legacy Offset positioning to Parametric positioning
+    fn migrate_wire_pins(&mut self) {
+        for (_, wire) in &mut self.db.wires {
+            let wire_vec = wire.end - wire.start;
+            let wire_len_sq = wire_vec.length_sq();
+
+            // Convert any Offset-based pins to Parametric
+            for extra_pin in &mut wire.extra_pins {
+                if let crate::assets::PinPosition::Offset(offset) = extra_pin.position {
+                    let t = if wire_len_sq > 0.0 {
+                        let t = offset.dot(wire_vec) / wire_len_sq;
+                        t.clamp(0.0, 1.0)
+                    } else {
+                        0.5 // Default to middle for zero-length wires
+                    };
+
+                    extra_pin.position = crate::assets::PinPosition::Parametric(t);
+                }
+            }
         }
     }
 
@@ -624,6 +723,7 @@ impl App {
                     self.db.instances.clear();
                     self.db.connections.clear();
                     self.hovered = None;
+                    self.selected.clear();
                     self.drag = None;
                     self.current.clear();
                     self.current_dirty = false;
@@ -733,7 +833,16 @@ impl App {
         if bs_pressed || d_pressed {
             if let Some(id) = self.hovered.take() {
                 let id = match id {
-                    Hover::Pin(pin) => pin.ins,
+                    Hover::Pin(pin) => {
+                        if pin.is_wire_extra_pin(&self.db) {
+                            self.db
+                                .get_wire_mut(pin.ins)
+                                .extra_pins
+                                .remove(pin.to_extra_pins_index().expect("Pin must be extra pin"));
+                            return;
+                        }
+                        pin.ins
+                    }
                     Hover::Instance(instance_id) => instance_id,
                 };
                 self.delete_instance(id);
@@ -864,11 +973,8 @@ impl App {
         for (id, wire) in &self.db.wires {
             let has_current = self.current.contains(&Pin { ins: id, index: 0 });
             let mut extra_pins = Vec::new();
-            for (i, extra_pin) in wire.extra_pins.iter().enumerate() {
-                let pin_pos = self.db.pin_position(Pin {
-                    ins: id,
-                    index: i as u32 + 2,
-                });
+            for (i, _extra_pin) in wire.extra_pins.iter().enumerate() {
+                let pin_pos = self.db.pin_position(Pin::from_extra_pins_index(id, i));
                 extra_pins.push(pin_pos);
             }
             self.draw_wire(
@@ -934,34 +1040,7 @@ impl App {
             && let Some(hovered) = self.hovered
             && let Some(mouse) = mouse_pos_world
         {
-            let Hover::Instance(instance_id) = hovered else {
-                return;
-            };
-            if !self.selected.contains(&instance_id) {
-                return;
-            }
-            if !matches!(self.db.ty(instance_id), InstanceKind::Wire) {
-                return;
-            }
-            let wire = self.db.get_wire_mut(instance_id);
-
-            if !Rect::from_two_pos(wire.start, wire.end).contains(mouse) {
-                return;
-            }
-            // TODO: highlight a point on the line between start and end of the wire not the
-            // mouse position
-            ui.painter()
-                .circle_filled(mouse, PIN_HOVER_THRESHOLD, COLOR_HOVER_PIN_TO_WIRE);
-            if mouse_clicked {
-                let pin = PinInfo {
-                    kind: PinKind::Output,
-                    offset: mouse - wire.start,
-                };
-                if wire.extra_pins.contains(&pin) {
-                    return;
-                }
-                wire.extra_pins.push(pin);
-            }
+            self.preview_new_wire_pin(ui, mouse, hovered);
         }
     }
 
@@ -1016,7 +1095,13 @@ impl App {
         draw_icon_canvas(ui, graphics.svg.clone(), rect);
 
         for (i, pin) in graphics.pins.iter().enumerate() {
-            let pin_pos = screen_center + pin.offset;
+            let pin_offset = match pin.position {
+                crate::assets::PinPosition::Offset(offset) => offset,
+                crate::assets::PinPosition::Parametric(_) => {
+                    panic!("Gate/Power graphics should not have parametric pins");
+                }
+            };
+            let pin_pos = screen_center + pin_offset;
             let color = match pin.kind {
                 assets::PinKind::Input => self.canvas_config.base_input_pin_color,
                 assets::PinKind::Output => self.canvas_config.base_output_pin_color,
@@ -1213,10 +1298,7 @@ impl App {
                     }
                     let wire = self.db.get_wire(*selected);
                     for (i, _) in wire.extra_pins.iter().enumerate() {
-                        let pin = Pin {
-                            ins: *selected,
-                            index: i as u32 + 2,
-                        };
+                        let pin = Pin::from_extra_pins_index(*selected, i);
                         if self.db.pin_position(pin).distance(mouse_pos) < PIN_HOVER_THRESHOLD {
                             log::info!(
                                 "distance: {}",
@@ -1225,7 +1307,7 @@ impl App {
                             return Some(Hover::Pin(pin));
                         }
                     }
-                    let dist = wire.distance_point_to_segment(mouse_pos);
+                    let dist = wire.dist_to_closest_point_on_line(mouse_pos);
                     if dist < WIRE_HIT_DISTANCE {
                         return Some(Hover::Instance(*selected));
                     }
@@ -1266,7 +1348,7 @@ impl App {
                     return Some(Hover::Pin(pin));
                 }
             }
-            let dist = wire.distance_point_to_segment(mouse_pos);
+            let dist = wire.dist_to_closest_point_on_line(mouse_pos);
             if dist < WIRE_HIT_DISTANCE {
                 return Some(Hover::Instance(k));
             }
@@ -1307,7 +1389,13 @@ impl App {
                                 ins: hovered,
                                 index: i as u32,
                             };
-                            let pin_pos = gate.pos + pin_info.offset - self.viewport_offset;
+                            let pin_offset = match pin_info.position {
+                                crate::assets::PinPosition::Offset(offset) => offset,
+                                crate::assets::PinPosition::Parametric(_) => {
+                                    panic!("Gate graphics should not have parametric pins");
+                                }
+                            };
+                            let pin_pos = gate.pos + pin_offset - self.viewport_offset;
                             if mouse.distance(pin_pos) < SNAP_THRESHOLD
                                 && self.is_pin_connected(pin)
                             {
@@ -1681,7 +1769,7 @@ impl App {
             .ctx()
             .pointer_interact_pos()
             .map(|p| self.screen_to_world(p));
-        writeln!(out, "mouse: {:?}", mouse_pos_world).ok();
+        writeln!(out, "mouse: {mouse_pos_world:?}").ok();
 
         writeln!(out, "\nGates:").ok();
         for (id, g) in &self.db.gates {
@@ -1693,7 +1781,13 @@ impl App {
             .ok();
             // pins
             for (i, pin) in g.kind.graphics().pins.iter().enumerate() {
-                let p = g.pos + pin.offset;
+                let pin_offset = match pin.position {
+                    crate::assets::PinPosition::Offset(offset) => offset,
+                    crate::assets::PinPosition::Parametric(_) => {
+                        panic!("Gate graphics should not have parametric pins");
+                    }
+                };
+                let p = g.pos + pin_offset;
                 writeln!(out, "    pin#{i} {:?} at ({:.1},{:.1})", pin.kind, p.x, p.y).ok();
             }
         }
@@ -1707,7 +1801,13 @@ impl App {
             )
             .ok();
             for (i, pin) in p.graphics().pins.iter().enumerate() {
-                let pp = p.pos + pin.offset;
+                let pin_offset = match pin.position {
+                    crate::assets::PinPosition::Offset(offset) => offset,
+                    crate::assets::PinPosition::Parametric(_) => {
+                        panic!("Power graphics should not have parametric pins");
+                    }
+                };
+                let pp = p.pos + pin_offset;
                 writeln!(
                     out,
                     "    pin#{i} {:?} at ({:.1},{:.1})",
@@ -1725,11 +1825,8 @@ impl App {
                 id, w.start.x, w.start.y, w.end.x, w.end.y
             )
             .ok();
-            for (i, extra_pins) in w.extra_pins.iter().enumerate() {
-                let pin = Pin {
-                    ins: id,
-                    index: i as u32 + 2,
-                };
+            for (i, _extra_pins) in w.extra_pins.iter().enumerate() {
+                let pin = Pin::from_extra_pins_index(id, i);
                 let pin_pos = self.db.pin_position(pin);
                 writeln!(out, " pin_{}=({:.1},{:.1})", i, pin_pos.x, pin_pos.y).ok();
             }
@@ -1926,6 +2023,60 @@ impl App {
                 }
             }
             InstanceKind::Gate(_) | InstanceKind::Power | InstanceKind::CustomCircuit(_) => {}
+        }
+    }
+
+    fn preview_new_wire_pin(&mut self, ui: &Ui, mouse: Pos2, hovered: Hover) {
+        let Hover::Instance(instance_id) = hovered else {
+            return;
+        };
+        if !self.selected.contains(&instance_id) {
+            return;
+        }
+        if !matches!(self.db.ty(instance_id), InstanceKind::Wire) {
+            return;
+        }
+        let wire = self.db.get_wire_mut(instance_id);
+
+        if wire.dist_to_closest_point_on_line(mouse) > NEW_PIN_ON_WIRE_THRESHOLD {
+            return;
+        }
+        // TODO: highlight a point on the line between start and end of the wire not the
+        // mouse position
+        let pin_pos = wire.closest_point_on_line(mouse);
+        ui.painter()
+            .circle_filled(pin_pos, PIN_HOVER_THRESHOLD, COLOR_HOVER_PIN_TO_WIRE);
+        let mouse_clicked = ui.input(|i| i.pointer.primary_down());
+        if mouse_clicked {
+            // Calculate parametric position (t-value) along the wire
+            let wire_vec = wire.end - wire.start;
+            let wire_len_sq = wire_vec.length_sq();
+
+            let t = if wire_len_sq > 0.0 {
+                let click_vec = pin_pos - wire.start;
+                let t = click_vec.dot(wire_vec) / wire_len_sq;
+                t.clamp(0.0, 1.0)
+            } else {
+                0.5 // Default to middle for zero-length wires
+            };
+
+            let pin = PinInfo {
+                kind: PinKind::Output,
+                position: crate::assets::PinPosition::Parametric(t),
+            };
+
+            // Check if a pin already exists at this parametric position
+            let pin_exists = wire.extra_pins.iter().any(|existing_pin| {
+                if let crate::assets::PinPosition::Parametric(existing_t) = existing_pin.position {
+                    (existing_t - t).abs() < 0.01 // Tolerance for floating point comparison
+                } else {
+                    false
+                }
+            });
+
+            if !pin_exists {
+                wire.extra_pins.push(pin);
+            }
         }
     }
 }

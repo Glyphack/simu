@@ -1,14 +1,15 @@
 use std::collections::HashSet;
 
-use egui::{CornerRadius, Pos2, Rect, Stroke, StrokeKind, Ui, Vec2, pos2, vec2};
+use egui::{CornerRadius, Pos2, Rect, Stroke, StrokeKind, Ui, Vec2, pos2};
 
 use crate::{
     app::{
         App, COLOR_SELECTION_BOX, Connection, Gate, Hover, InstanceId, InstanceKind, Pin, Power,
         SNAP_THRESHOLD, Wire,
     },
-    assets::{PinInfo, PinKind},
+    assets::PinPosition,
 };
+const MIN_WIRE_SIZE: f32 = 40.0;
 
 #[derive(serde::Deserialize, serde::Serialize, Debug, Clone, Copy)]
 pub enum CanvasDrag {
@@ -51,17 +52,16 @@ impl App {
 
         self.drag_had_movement = false;
 
-        if !self.selected.is_empty() {
-            if !self.selected.len() == 1
-                && matches!(
-                    self.db
-                        .ty(*self.selected.iter().next().expect("checked size")),
-                    InstanceKind::Wire
-                )
-            {
-                self.drag = Some(Drag::CanvasNew(CanvasDrag::Selected { start: mouse_pos }));
-                return;
-            }
+        if !self.selected.is_empty()
+            && !self.selected.len() == 1
+            && matches!(
+                self.db
+                    .ty(*self.selected.iter().next().expect("checked size")),
+                InstanceKind::Wire
+            )
+        {
+            self.drag = Some(Drag::CanvasNew(CanvasDrag::Selected { start: mouse_pos }));
+            return;
         }
 
         let Some(hovered) = self.hovered else {
@@ -142,7 +142,7 @@ impl App {
                 InstanceKind::Gate(gate_kind) => self.draw_gate_preview(ui, gate_kind, mouse),
                 InstanceKind::Power => self.draw_power_preview(ui, mouse),
                 InstanceKind::Wire => {
-                    self.draw_wire(ui, &default_wire(mouse), false, false, Vec::new())
+                    self.draw_wire(ui, &default_wire(mouse), false, false, Vec::new());
                 }
                 InstanceKind::CustomCircuit(def) => {
                     self.draw_custom_circuit_preview(ui, def, mouse);
@@ -232,14 +232,21 @@ impl App {
             Some(Drag::Resize { id, start }) => {
                 let wire = self.db.get_wire_mut(id);
                 let mut moved = false;
+
                 if start {
-                    if wire.start != mouse {
-                        wire.start = mouse;
+                    let new_start = mouse;
+                    let wire_length = (wire.end - new_start).length();
+                    if wire_length >= MIN_WIRE_SIZE && wire.start != new_start {
+                        wire.start = new_start;
                         moved = true;
                     }
-                } else if wire.end != mouse {
-                    wire.end = mouse;
-                    moved = true;
+                } else {
+                    let new_end = mouse;
+                    let wire_length = (wire.start - new_end).length();
+                    if wire_length >= MIN_WIRE_SIZE && wire.end != new_end {
+                        wire.end = new_end;
+                        moved = true;
+                    }
                 }
 
                 self.potential_connections = self.compute_potential_connections_for_pin(Pin {
@@ -474,24 +481,44 @@ impl App {
         let target = self.db.pin_position(dst);
         match self.db.ty(src.ins) {
             InstanceKind::Wire => {
-                let w = self.db.get_wire_mut(src.ins);
                 if src.index == 0 {
+                    let w = self.db.get_wire_mut(src.ins);
                     w.start = target;
-                } else {
+                } else if src.index == 1 {
+                    let w = self.db.get_wire_mut(src.ins);
                     w.end = target;
+                } else {
+                    // Handle extra pin snapping - move entire wire to preserve parametric position
+                    let current_pos = self.db.pin_position(src);
+                    let delta = target - current_pos;
+                    let w = self.db.get_wire_mut(src.ins);
+                    w.start += delta;
+                    w.end += delta;
                 }
             }
             InstanceKind::Gate(gk) => {
                 let g = self.db.get_gate_mut(src.ins);
                 let info = gk.graphics().pins[src.index as usize];
-                let current = g.pos + info.offset;
+                let pin_offset = match info.position {
+                    PinPosition::Offset(offset) => offset,
+                    PinPosition::Parametric(_) => {
+                        panic!("Gate graphics should not have parametric pins");
+                    }
+                };
+                let current = g.pos + pin_offset;
                 let desired = target - current;
                 g.pos += desired;
             }
             InstanceKind::Power => {
                 let p = self.db.get_power_mut(src.ins);
                 let info = crate::assets::POWER_ON_GRAPHICS.pins[src.index as usize];
-                let current = p.pos + info.offset;
+                let pin_offset = match info.position {
+                    PinPosition::Offset(offset) => offset,
+                    PinPosition::Parametric(_) => {
+                        panic!("Power graphics should not have parametric pins");
+                    }
+                };
+                let current = p.pos + pin_offset;
                 let desired = target - current;
                 p.pos += desired;
             }
