@@ -20,7 +20,7 @@ pub enum CanvasDrag {
     },
 }
 
-#[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone, Copy)]
 pub enum Drag {
     Panel {
         pos: Pos2,

@@ -785,6 +785,7 @@ impl App {
         self.handle_deletion(ui);
 
         if let Some(mouse) = mouse_pos_world {
+            let dragging = self.drag.is_some();
             let hovered_now = self.get_hovered(mouse);
 
             if mouse_clicked {
@@ -792,8 +793,6 @@ impl App {
                 self.clicked_on = hovered_now.map(|h| h.instance());
                 self.handle_drag_start_canvas(mouse);
             }
-
-            let dragging = self.drag.is_some();
 
             if dragging {
                 self.handle_dragging(ui, mouse);
@@ -1144,6 +1143,40 @@ impl App {
     }
 
     pub fn get_hovered(&self, mouse_pos: Pos2) -> Option<Hover> {
+        if let Some(v) = self.drag {
+            match v {
+                Drag::Canvas(canvas_drag) => match canvas_drag {
+                    crate::drag::CanvasDrag::Single { id, offset: _ } => {
+                        return Some(Hover::Instance(id));
+                    }
+                    crate::drag::CanvasDrag::Selected { .. } => {}
+                },
+                Drag::Resize { id, start } => {
+                    return Some(Hover::Pin(Pin {
+                        ins: id,
+                        index: u32::from(!start),
+                    }));
+                }
+                Drag::PinToWire {
+                    source_pin: _,
+                    wire_id,
+                } => {
+                    // End of the new wire is hovered
+                    return Some(Hover::Pin(Pin {
+                        ins: wire_id,
+                        index: 1,
+                    }));
+                }
+                Drag::BranchWire {
+                    original_wire_id,
+                    split_point: _,
+                    start_mouse_pos: _,
+                } => {
+                    return Some(Hover::Instance(original_wire_id));
+                }
+                Drag::Panel { .. } | Drag::Selecting { .. } => {}
+            }
+        }
         for selected in &self.selected {
             match self.db.ty(*selected) {
                 InstanceKind::Wire => {
