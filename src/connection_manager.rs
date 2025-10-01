@@ -1,9 +1,10 @@
+#![allow(clippy::allow_attributes)]
 use crate::app::{Connection, DB, InstanceId, InstanceKind, Pin, SNAP_THRESHOLD};
 use crate::assets;
 use egui::Pos2;
 use std::collections::{HashMap, HashSet};
 
-const GRID_SIZE: f32 = 100.0; // Size of each grid cell for spatial indexing
+const SPATIAL_INDEX_GRID_SIZE: f32 = 100.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct GridCell(i32, i32);
@@ -11,12 +12,11 @@ struct GridCell(i32, i32);
 impl GridCell {
     fn from_pos(pos: Pos2) -> Self {
         Self(
-            (pos.x / GRID_SIZE).floor() as i32,
-            (pos.y / GRID_SIZE).floor() as i32,
+            (pos.x / SPATIAL_INDEX_GRID_SIZE).floor() as i32,
+            (pos.y / SPATIAL_INDEX_GRID_SIZE).floor() as i32,
         )
     }
 
-    /// Get neighboring cells (including this cell) for connection searching
     fn neighbors(&self) -> Vec<Self> {
         let mut neighbors = Vec::new();
         for dx in -1..=1 {
@@ -30,13 +30,9 @@ impl GridCell {
 
 #[derive(Default)]
 pub struct ConnectionManager {
-    /// Instances that have moved, resized, or changed and need connection updates
+    /// Instances that need connection updates
     pub(crate) dirty_instances: HashSet<InstanceId>,
 
-    /// Specific pins that need connection updates
-    pub(crate) dirty_pins: HashSet<Pin>,
-
-    /// Spatial index mapping grid cells to pins in that region
     spatial_index: HashMap<GridCell, Vec<Pin>>,
 
     /// Cache of pin positions to detect when pins move
@@ -53,11 +49,6 @@ impl ConnectionManager {
     /// Mark an instance as needing connection updates
     pub fn mark_instance_dirty(&mut self, instance_id: InstanceId) {
         self.dirty_instances.insert(instance_id);
-    }
-
-    /// Mark a specific pin as needing connection updates
-    pub fn mark_pin_dirty(&mut self, pin: Pin) {
-        self.dirty_pins.insert(pin);
     }
 
     /// Mark multiple instances as dirty (useful for group operations)
@@ -106,8 +97,6 @@ impl ConnectionManager {
             // Add to new cell
             let new_cell = GridCell::from_pos(new_pos);
             self.spatial_index.entry(new_cell).or_default().push(pin);
-
-            self.pin_position_cache.insert(pin, new_pos);
         }
     }
 
@@ -239,7 +228,7 @@ impl ConnectionManager {
 
     /// Process all dirty entities and update connections
     pub fn update_connections(&mut self, db: &mut DB) -> bool {
-        if self.dirty_instances.is_empty() && self.dirty_pins.is_empty() {
+        if self.dirty_instances.is_empty() {
             return false; // No updates needed
         }
 
@@ -252,9 +241,6 @@ impl ConnectionManager {
                 pins_to_update.push(pin);
             }
         }
-
-        // Add explicitly dirty pins
-        pins_to_update.extend(self.dirty_pins.iter().copied());
 
         // Remove duplicates
         pins_to_update.sort_unstable();
@@ -276,9 +262,7 @@ impl ConnectionManager {
         let mut connections_to_keep = HashSet::new();
         for connection in &db.connections {
             let keep_connection = !self.dirty_instances.contains(&connection.a.ins)
-                && !self.dirty_instances.contains(&connection.b.ins)
-                && !self.dirty_pins.contains(&connection.a)
-                && !self.dirty_pins.contains(&connection.b);
+                && !self.dirty_instances.contains(&connection.b.ins);
 
             if keep_connection {
                 let p1 = db.pin_position(connection.a);
@@ -299,7 +283,6 @@ impl ConnectionManager {
             {
                 (connection.b, connection.a)
             } else {
-                // Both dirty or both clean, prefer wires to move
                 match (db.ty(connection.a.ins), db.ty(connection.b.ins)) {
                     (InstanceKind::Wire, _) => (connection.a, connection.b),
                     (_, InstanceKind::Wire) => (connection.b, connection.a),
@@ -314,7 +297,6 @@ impl ConnectionManager {
         db.connections = connections_to_keep;
 
         self.dirty_instances.clear();
-        self.dirty_pins.clear();
 
         true
     }
@@ -322,8 +304,8 @@ impl ConnectionManager {
     /// Get debug information about the connection manager
     pub fn debug_info(&self) -> String {
         format!(
-            "ConnectionManager:\n  dirty_instances: {:?}\n  dirty_pins: {:?}\n  spatial_index: {:#?}",
-            self.dirty_instances, self.dirty_pins, self.spatial_index
+            "ConnectionManager:\n  dirty_instances: {:?}\n  spatial_index: {:#?}",
+            self.dirty_instances, self.spatial_index
         )
     }
 }

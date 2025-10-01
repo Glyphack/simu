@@ -234,6 +234,7 @@ impl Wire {
     }
 }
 
+#[derive(Default, serde::Deserialize, serde::Serialize)]
 pub struct DB {
     // Primary key allocator; ensures unique keys across all instance kinds
     pub instances: SlotMap<InstanceId, ()>,
@@ -250,6 +251,9 @@ pub struct DB {
 }
 
 impl DB {
+    pub fn new() -> Self {
+        Self::default()
+    }
     pub fn new_gate(&mut self, g: Gate) -> InstanceId {
         let k = self.instances.insert(());
         self.gates.insert(k, g);
@@ -460,16 +464,7 @@ pub struct App {
 
 impl Default for App {
     fn default() -> Self {
-        let db = DB {
-            instances: Default::default(),
-            types: Default::default(),
-            gates: Default::default(),
-            powers: Default::default(),
-            wires: Default::default(),
-            custom_circuits: Default::default(),
-            custom_circuit_definitions: Default::default(),
-            connections: Default::default(),
-        };
+        let db = DB::default();
         let c = ConnectionManager::new(&db);
         Self {
             db,
@@ -621,13 +616,7 @@ impl App {
                     .ui(ui)
                     .clicked()
                 {
-                    self.db.gates.clear();
-                    self.db.powers.clear();
-                    self.db.wires.clear();
-                    self.db.custom_circuits.clear();
-                    self.db.types.clear();
-                    self.db.instances.clear();
-                    self.db.connections.clear();
+                    self.db = DB::default();
                     self.hovered = None;
                     self.selected.clear();
                     self.drag = None;
@@ -768,11 +757,8 @@ impl App {
 
         // Remove from connection manager tracking
         self.connection_manager.dirty_instances.remove(&id);
-        self.connection_manager
-            .dirty_pins
-            .retain(|pin| pin.ins != id);
         self.current.retain(|p| p.ins != id);
-        self.current_dirty = true;
+        self.connection_manager.rebuild_spatial_index(&self.db);
     }
 
     fn draw_canvas(&mut self, ui: &mut Ui) {
@@ -795,8 +781,6 @@ impl App {
             .map(|p| self.screen_to_world(p));
         let mouse_is_visible = ui.ctx().input(|i| i.pointer.has_pointer());
 
-        // TODO Fix persisting index
-        self.connection_manager.rebuild_spatial_index(&self.db);
         self.connection_manager.update_connections(&mut self.db);
 
         self.handle_panning(ui, right_down, right_released, mouse_is_visible);
@@ -1646,6 +1630,11 @@ impl App {
             .map(|p| self.screen_to_world(p));
         writeln!(out, "mouse: {mouse_pos_world:?}").ok();
 
+        writeln!(out, "\nInstances:").ok();
+        for (id, _) in &self.db.instances {
+            writeln!(out, "  {id:?}").ok();
+        }
+
         writeln!(out, "\nGates:").ok();
         for (id, g) in &self.db.gates {
             writeln!(
@@ -1812,6 +1801,7 @@ impl App {
             self.connection_manager.mark_instance_dirty(id);
             self.selected.insert(id);
         }
+        self.connection_manager.rebuild_spatial_index(&self.db);
     }
 
     fn draw_right_click_actions_menu(&mut self, ui: &Ui) {

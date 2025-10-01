@@ -248,10 +248,7 @@ impl App {
                 }
 
                 if moved {
-                    self.connection_manager.mark_pin_dirty(Pin {
-                        ins: id,
-                        index: u32::from(!start),
-                    });
+                    self.connection_manager.mark_instance_dirty(id);
                     self.drag_had_movement = true;
                 }
             }
@@ -266,10 +263,7 @@ impl App {
                 }
 
                 if wire.end != mouse {
-                    self.connection_manager.mark_pin_dirty(Pin {
-                        ins: wire_id,
-                        index: 1,
-                    });
+                    self.connection_manager.mark_instance_dirty(wire_id);
                 }
             }
             Some(Drag::BranchWire {
@@ -321,7 +315,7 @@ impl App {
                     return;
                 }
 
-                let _id = match kind {
+                let id = match kind {
                     InstanceKind::Gate(gate_kind) => self.db.new_gate(Gate {
                         kind: gate_kind,
                         pos,
@@ -339,15 +333,19 @@ impl App {
                             })
                     }
                 };
+                self.connection_manager.mark_instance_dirty(id);
+                self.connection_manager.rebuild_spatial_index(&self.db);
                 self.current_dirty = true;
             }
             Drag::Canvas(canvas_drag) => match canvas_drag {
                 CanvasDrag::Single { id, offset: _ } => {
                     self.connection_manager.mark_instance_dirty(id);
+                    self.connection_manager.rebuild_spatial_index(&self.db);
                 }
                 CanvasDrag::Selected { start: _ } => {
                     let selected: Vec<InstanceId> = self.selected.iter().copied().collect();
                     self.connection_manager.mark_instances_dirty(&selected);
+                    self.connection_manager.rebuild_spatial_index(&self.db);
                 }
             },
             Drag::Selecting { start } => {
@@ -374,18 +372,16 @@ impl App {
                 }
                 self.selected = sel;
             }
-            Drag::Resize { id, start } => {
-                let pin = Pin {
-                    ins: id,
-                    index: u32::from(!start),
-                };
-                self.connection_manager.mark_pin_dirty(pin);
+            Drag::Resize { id, start: _ } => {
+                self.connection_manager.mark_instance_dirty(id);
+                self.connection_manager.rebuild_spatial_index(&self.db);
             }
             Drag::PinToWire {
                 source_pin: _,
                 wire_id,
             } => {
                 self.connection_manager.mark_instance_dirty(wire_id);
+                self.connection_manager.rebuild_spatial_index(&self.db);
             }
             Drag::BranchWire {
                 original_wire_id,
@@ -394,6 +390,7 @@ impl App {
             } => {
                 self.connection_manager
                     .mark_instance_dirty(original_wire_id);
+                self.connection_manager.rebuild_spatial_index(&self.db);
                 self.current_dirty = true;
             }
         }
