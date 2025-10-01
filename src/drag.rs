@@ -36,7 +36,7 @@ pub enum Drag {
     },
     PinToWire {
         source_pin: Pin,
-        wire_id: InstanceId,
+        start_pos: Pos2,
     },
     BranchWire {
         original_wire_id: InstanceId,
@@ -86,12 +86,10 @@ impl App {
                     return;
                 }
                 let pin_pos = self.db.pin_position(pin);
-                let wire_id = self.db.new_wire(Wire::new(pin_pos, mouse));
                 self.drag = Some(Drag::PinToWire {
                     source_pin: pin,
-                    wire_id,
+                    start_pos: pin_pos,
                 });
-                self.current_dirty = true;
             }
             Hover::Instance(instance) => match self.db.ty(instance) {
                 InstanceKind::Gate(_) => {
@@ -250,16 +248,30 @@ impl App {
             }
             Some(Drag::PinToWire {
                 source_pin: _,
-                wire_id,
+                start_pos,
             }) => {
-                let wire = self.db.get_wire_mut(wire_id);
-                if wire.end != mouse {
-                    wire.end = mouse;
-                    self.drag_had_movement = true;
-                }
+                let drag_distance = (mouse - start_pos).length();
 
-                if wire.end != mouse {
+                if drag_distance >= MIN_WIRE_SIZE {
+                    let wire = Wire::new(start_pos, mouse);
+                    let wire_id = self.db.new_wire(wire);
+
+                    self.drag = Some(Drag::Resize {
+                        id: wire_id,
+                        start: false,
+                    });
+
+                    self.drag_had_movement = true;
                     self.connection_manager.mark_instance_dirty(wire_id);
+                    self.current_dirty = true;
+                } else if drag_distance > 2.0 {
+                    ui.painter().line_segment(
+                        [
+                            start_pos - self.viewport_offset,
+                            mouse - self.viewport_offset,
+                        ],
+                        Stroke::new(2.0, COLOR_HOVER_PIN_TO_WIRE),
+                    );
                 }
             }
             Some(Drag::BranchWire {
@@ -375,10 +387,10 @@ impl App {
             }
             Drag::PinToWire {
                 source_pin: _,
-                wire_id,
+                start_pos: _,
             } => {
-                self.connection_manager.mark_instance_dirty(wire_id);
-                self.connection_manager.rebuild_spatial_index(&self.db);
+                // Wire was never created if drag distance was too short
+                // Nothing to clean up
             }
             Drag::BranchWire {
                 original_wire_id,

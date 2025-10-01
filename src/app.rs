@@ -1297,14 +1297,11 @@ impl App {
                     }));
                 }
                 Drag::PinToWire {
-                    source_pin: _,
-                    wire_id,
+                    source_pin,
+                    start_pos: _,
                 } => {
-                    // End of the new wire is hovered
-                    return Some(Hover::Pin(Pin {
-                        ins: wire_id,
-                        index: 1,
-                    }));
+                    // Source pin is being dragged
+                    return Some(Hover::Pin(source_pin));
                 }
                 Drag::BranchWire {
                     original_wire_id,
