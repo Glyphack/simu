@@ -6,7 +6,7 @@ use egui::{
     Align, Button, Color32, CornerRadius, Image, Layout, Pos2, Rect, Response, Sense, Stroke,
     StrokeKind, Ui, Vec2, Widget as _, pos2, vec2,
 };
-use slotmap::{Key as _, SecondaryMap, SlotMap};
+use slotmap::{SecondaryMap, SlotMap};
 
 use crate::{
     assets::{self},
@@ -104,11 +104,7 @@ pub struct Connection {
 
 impl Connection {
     pub fn new(p1: Pin, p2: Pin) -> Self {
-        if (p2.ins.data(), p2.index) < (p1.ins.data(), p1.index) {
-            Self { a: p2, b: p1 }
-        } else {
-            Self { a: p1, b: p2 }
-        }
+        Self { a: p2, b: p1 }
     }
 
     pub fn involves_instance(&self, id: InstanceId) -> bool {
@@ -201,6 +197,9 @@ pub struct Wire {
 }
 
 impl Wire {
+    pub fn new_at(pos: Pos2) -> Self {
+        Self::new(pos2(pos.x - 30.0, pos.y), pos2(pos.x + 30.0, pos.y))
+    }
     pub fn new(start: Pos2, end: Pos2) -> Self {
         Self { start, end }
     }
@@ -781,8 +780,6 @@ impl App {
             .map(|p| self.screen_to_world(p));
         let mouse_is_visible = ui.ctx().input(|i| i.pointer.has_pointer());
 
-        self.connection_manager.update_connections(&mut self.db);
-
         self.handle_panning(ui, right_down, right_released, mouse_is_visible);
         self.handle_copy_pasting(ui, mouse_pos_world);
         self.handle_deletion(ui);
@@ -808,6 +805,10 @@ impl App {
                 if dragging {
                     let drag_had_movement = self.drag_had_movement;
                     self.handle_drag_end(mouse);
+
+                    if self.connection_manager.update_connections(&mut self.db) {
+                        self.current_dirty = true;
+                    }
                     if !drag_had_movement {
                         self.selected.clear();
                         if let Some(Hover::Instance(id)) = hovered_now {
@@ -874,45 +875,15 @@ impl App {
             );
         }
 
-        // TODO: Highlight the pin that will be attached to
-        if !self.potential_connections.is_empty() {
-            for c in &self.potential_connections {
-                // Highlight the pin belonging to the currently moving instance if any
-                let pin_to_highlight = match self.drag {
-                    Some(Drag::Canvas { .. }) => c.a,
-                    Some(Drag::Resize { id, start }) => {
-                        // Only highlight the endpoint being resized
-                        let target_pin = Pin {
-                            ins: id,
-                            index: u32::from(!start),
-                        };
-                        if c.a == target_pin {
-                            c.a
-                        } else if c.b == target_pin {
-                            c.b
-                        } else {
-                            continue;
-                        }
-                    }
-                    Some(Drag::PinToWire {
-                        source_pin: _,
-                        wire_id,
-                    }) => {
-                        if c.a.ins == wire_id {
-                            c.a
-                        } else {
-                            c.b
-                        }
-                    }
-                    _ => continue,
-                };
-                let p = self.db.pin_position(pin_to_highlight);
-                ui.painter().circle_filled(
-                    p - self.viewport_offset,
-                    SNAP_THRESHOLD,
-                    COLOR_POTENTIAL_CONN_HIGHLIGHT,
-                );
-            }
+        for c in &self.potential_connections {
+            // Highlight the pin that it's going to attach. The stable pin.
+            let pin_to_highlight = c.b;
+            let p = self.db.pin_position(pin_to_highlight);
+            ui.painter().circle_filled(
+                p - self.viewport_offset,
+                SNAP_THRESHOLD,
+                COLOR_POTENTIAL_CONN_HIGHLIGHT,
+            );
         }
 
         if self.drag.is_none() {

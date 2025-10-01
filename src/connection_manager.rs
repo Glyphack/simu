@@ -33,6 +33,7 @@ pub struct ConnectionManager {
     /// Instances that need connection updates
     pub(crate) dirty_instances: HashSet<InstanceId>,
 
+    // pub(crate) potential_connections: HashSet<Connection>,
     spatial_index: HashMap<GridCell, Vec<Pin>>,
 
     /// Cache of pin positions to detect when pins move
@@ -101,7 +102,7 @@ impl ConnectionManager {
     }
 
     /// Find potential connections for a pin using spatial indexing
-    fn find_potential_connections_for_pin(&self, db: &DB, pin: Pin) -> Vec<Connection> {
+    pub fn find_connections_for_pin(&self, db: &DB, pin: Pin) -> Vec<Connection> {
         let mut connections = Vec::new();
         let pin_pos = db.pin_position(pin);
         let cell = GridCell::from_pos(pin_pos);
@@ -117,9 +118,14 @@ impl ConnectionManager {
                     let other_pos = db.pin_position(other_pin);
                     let distance = (pin_pos - other_pos).length();
 
-                    if distance <= SNAP_THRESHOLD
-                        && let Some(connection) = self.validate_connection(db, pin, other_pin)
-                    {
+                    // First pin will move to attach
+                    let connection = if self.dirty_instances.contains(&pin.ins) {
+                        Connection::new(other_pin, pin)
+                    } else {
+                        Connection::new(pin, other_pin)
+                    };
+
+                    if distance <= SNAP_THRESHOLD && self.validate_connection(db, connection) {
                         connections.push(connection);
                     }
                 }
@@ -130,28 +136,25 @@ impl ConnectionManager {
     }
 
     /// Validate if a connection between two pins is allowed
-    fn validate_connection(&self, db: &DB, pin1: Pin, pin2: Pin) -> Option<Connection> {
-        // Don't connect pin to itself
-        if pin1 == pin2 {
-            return None;
+    fn validate_connection(&self, db: &DB, c: Connection) -> bool {
+        if c.a == c.b {
+            return false;
         }
 
-        // Don't connect instance to itself
-        if pin1.ins == pin2.ins {
-            return None;
+        if c.a.ins == c.b.ins {
+            return false;
         }
 
-        let pin1_kind = self.get_pin_kind(db, pin1);
-        let pin2_kind = self.get_pin_kind(db, pin2);
+        let pin1_kind = self.get_pin_kind(db, c.a);
+        let pin2_kind = self.get_pin_kind(db, c.b);
 
-        // Don't connect output to output
         if matches!(pin1_kind, Some(assets::PinKind::Output))
             && matches!(pin2_kind, Some(assets::PinKind::Output))
         {
-            return None;
+            return false;
         }
 
-        Some(Connection::new(pin1, pin2))
+        true
     }
 
     /// Get the kind (Input/Output) of a pin
@@ -192,12 +195,7 @@ impl ConnectionManager {
                     let w = db.get_wire_mut(src.ins);
                     w.end = target;
                 } else {
-                    // Handle extra pin snapping - move entire wire to preserve parametric position
-                    let current_pos = db.pin_position(src);
-                    let delta = target - current_pos;
-                    let w = db.get_wire_mut(src.ins);
-                    w.start += delta;
-                    w.end += delta;
+                    unreachable!();
                 }
             }
             InstanceKind::Gate(gk) => {
@@ -226,37 +224,31 @@ impl ConnectionManager {
         }
     }
 
-    /// Process all dirty entities and update connections
-    pub fn update_connections(&mut self, db: &mut DB) -> bool {
-        if self.dirty_instances.is_empty() {
-            return false; // No updates needed
-        }
-
-        // Collect all pins that need updates
+    pub fn pins_to_update(&mut self, db: &DB) -> Vec<Pin> {
         let mut pins_to_update = Vec::new();
 
-        // Add pins from dirty instances
         for &instance_id in &self.dirty_instances {
             for pin in db.pins_of(instance_id) {
                 pins_to_update.push(pin);
             }
         }
-
-        // Remove duplicates
         pins_to_update.sort_unstable();
         pins_to_update.dedup();
 
-        // If we have too many pins to update, just rebuild the entire spatial index
         if pins_to_update.len() > db.instances.len() / 4 {
             self.rebuild_spatial_index(db);
         } else {
             self.update_spatial_index_for_pins(db, &pins_to_update);
         }
+        pins_to_update
+    }
 
-        // Find potential connections for all dirty pins
+    /// Process all dirty entities and update connections
+    pub fn update_connections(&mut self, db: &mut DB) -> bool {
+        let pins_to_update = self.pins_to_update(db);
         let mut new_connections = Vec::new();
         for &pin in &pins_to_update {
-            new_connections.extend(self.find_potential_connections_for_pin(db, pin));
+            new_connections.extend(self.find_connections_for_pin(db, pin));
         }
 
         let mut connections_to_keep = HashSet::new();
@@ -274,23 +266,7 @@ impl ConnectionManager {
         }
 
         for connection in &new_connections {
-            let (moving_pin, target_pin) = if self.dirty_instances.contains(&connection.a.ins)
-                && !self.dirty_instances.contains(&connection.b.ins)
-            {
-                (connection.a, connection.b)
-            } else if self.dirty_instances.contains(&connection.b.ins)
-                && !self.dirty_instances.contains(&connection.a.ins)
-            {
-                (connection.b, connection.a)
-            } else {
-                match (db.ty(connection.a.ins), db.ty(connection.b.ins)) {
-                    (InstanceKind::Wire, _) => (connection.a, connection.b),
-                    (_, InstanceKind::Wire) => (connection.b, connection.a),
-                    _ => (connection.a, connection.b), // Default to first
-                }
-            };
-
-            self.snap_pin_to_other(db, moving_pin, target_pin);
+            self.snap_pin_to_other(db, connection.a, connection.b);
             connections_to_keep.insert(*connection);
         }
 
@@ -304,8 +280,8 @@ impl ConnectionManager {
     /// Get debug information about the connection manager
     pub fn debug_info(&self) -> String {
         format!(
-            "ConnectionManager:\n  dirty_instances: {:?}\n  spatial_index: {:#?}",
-            self.dirty_instances, self.spatial_index
+            "ConnectionManager:\n  dirty_instances: {:?}",
+            self.dirty_instances
         )
     }
 }

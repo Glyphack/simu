@@ -145,7 +145,7 @@ impl App {
                 InstanceKind::Gate(gate_kind) => self.draw_gate_preview(ui, gate_kind, mouse),
                 InstanceKind::Power => self.draw_power_preview(ui, mouse),
                 InstanceKind::Wire => {
-                    self.draw_wire(ui, &default_wire(mouse), false, false);
+                    self.draw_wire(ui, &Wire::new_at(mouse), false, false);
                 }
                 InstanceKind::CustomCircuit(def) => {
                     self.draw_custom_circuit_preview(ui, def, mouse);
@@ -301,6 +301,7 @@ impl App {
         if let Some(Drag::Panel { pos, kind: _ }) = self.drag.as_mut() {
             *pos = mouse;
         }
+        self.compute_potential_connections();
     }
 
     pub fn handle_drag_end(&mut self, mouse_pos: Pos2) {
@@ -322,7 +323,7 @@ impl App {
                     }),
                     InstanceKind::Power => self.db.new_power(Power { pos, on: true }),
                     InstanceKind::Wire => {
-                        let w = default_wire(pos);
+                        let w = Wire::new_at(pos);
                         self.db.new_wire(w)
                     }
                     InstanceKind::CustomCircuit(definition_index) => {
@@ -398,43 +399,6 @@ impl App {
         self.drag_had_movement = false;
     }
 
-    // Note: Old connection management methods have been moved to ConnectionManager
-    // The new API uses mark_instance_dirty(), mark_pin_dirty(), and update_connections()
-
-    pub fn detach_pin(&mut self, pin: Pin) {
-        let mut new_set = HashSet::with_capacity(self.db.connections.len());
-        for c in &self.db.connections {
-            if c.a == pin || c.b == pin {
-                // drop it
-            } else {
-                new_set.insert(*c);
-            }
-        }
-        self.db.connections = new_set;
-        self.current_dirty = true;
-    }
-
-    pub fn collect_connected_instances_from_many(
-        &self,
-        roots: &HashSet<InstanceId>,
-    ) -> HashSet<InstanceId> {
-        let mut out: HashSet<InstanceId> = HashSet::new();
-        let mut seen: HashSet<InstanceId> = HashSet::new();
-        let mut stack: Vec<InstanceId> = roots.iter().copied().collect();
-        while let Some(id) = stack.pop() {
-            if !seen.insert(id) {
-                continue;
-            }
-            if !matches!(self.db.ty(id), InstanceKind::Wire) {
-                out.insert(id);
-            }
-            for pin in self.db.connected_pins_of_instance(id) {
-                stack.push(pin.ins);
-            }
-        }
-        out
-    }
-
     pub fn move_nonwires_and_resize_wires(&mut self, ids: &[InstanceId], delta: Vec2) {
         // Move all non-wire instances, then adjust connected wire endpoints
         for id in ids {
@@ -469,8 +433,17 @@ impl App {
             }
         }
     }
-}
 
-pub fn default_wire(pos: Pos2) -> Wire {
-    Wire::new(pos2(pos.x - 30.0, pos.y), pos2(pos.x + 30.0, pos.y))
+    pub fn compute_potential_connections(&mut self) {
+        let pins_to_update = self.connection_manager.pins_to_update(&self.db);
+        let mut new_connections = Vec::new();
+        for &pin in &pins_to_update {
+            new_connections.extend(
+                self.connection_manager
+                    .find_connections_for_pin(&self.db, pin),
+            );
+        }
+
+        self.potential_connections = new_connections.into_iter().collect();
+    }
 }
