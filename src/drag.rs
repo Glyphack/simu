@@ -53,14 +53,19 @@ impl App {
 
         self.drag_had_movement = false;
 
-        if !self.selected.is_empty()
-            && !self.selected.len() == 1
-            && matches!(
-                self.db
-                    .ty(*self.selected.iter().next().expect("checked size")),
-                InstanceKind::Wire
-            )
+        if self.selected.len() == 1
+            && let Some(wire_id) = self.selected.iter().next()
+            && let Some(split_point) = self.wire_branching_action_point(mouse, *wire_id)
         {
+            self.drag = Some(Drag::BranchWire {
+                original_wire_id: *wire_id,
+                split_point,
+                start_mouse_pos: mouse,
+            });
+            return;
+        }
+
+        if !self.selected.is_empty() {
             self.drag = Some(Drag::Canvas(CanvasDrag::Selected { start: mouse }));
             return;
         }
@@ -107,15 +112,6 @@ impl App {
                 }
                 InstanceKind::Wire => {
                     let wire = self.db.get_wire(instance);
-
-                    if let Some(split_point) = self.wire_branching_action_point(mouse, hovered) {
-                        self.drag = Some(Drag::BranchWire {
-                            original_wire_id: instance,
-                            split_point,
-                            start_mouse_pos: mouse,
-                        });
-                        return;
-                    }
 
                     let wire_center = pos2(
                         (wire.start.x + wire.end.x) * 0.5,
@@ -186,7 +182,7 @@ impl App {
                             };
                             let desired = new_pos - current_pos;
                             let ids = [id];
-                            self.move_nonwires_and_resize_wires(&ids, desired);
+                            self.db.move_nonwires_and_resize_wires(&ids, desired);
                             moved = desired.length_sq() > 0.0;
                         }
                         InstanceKind::Wire => {
@@ -220,7 +216,7 @@ impl App {
                     self.drag = Some(Drag::Canvas(CanvasDrag::Selected { start: mouse }));
 
                     let group: Vec<InstanceId> = self.selected.iter().copied().collect();
-                    self.move_nonwires_and_resize_wires(&group, desired);
+                    self.db.move_nonwires_and_resize_wires(&group, desired);
                     if desired.length_sq() > 0.0 {
                         self.connection_manager.mark_instances_dirty(&group);
                         self.drag_had_movement = true;
@@ -397,41 +393,6 @@ impl App {
         }
         self.potential_connections.clear();
         self.drag_had_movement = false;
-    }
-
-    pub fn move_nonwires_and_resize_wires(&mut self, ids: &[InstanceId], delta: Vec2) {
-        // Move all non-wire instances, then adjust connected wire endpoints
-        for id in ids {
-            match self.db.ty(*id) {
-                InstanceKind::Gate(_) => {
-                    let g = self.db.get_gate_mut(*id);
-                    g.pos += delta;
-                }
-                InstanceKind::Power => {
-                    let p = self.db.get_power_mut(*id);
-                    p.pos += delta;
-                }
-                InstanceKind::Wire => {}
-                InstanceKind::CustomCircuit(_) => {
-                    let cc = self.db.get_custom_circuit_mut(*id);
-                    cc.pos += delta;
-                }
-            }
-        }
-
-        // Resize wire endpoints attached to any moved instance
-        for id in ids {
-            for pin in self.db.connected_pins_of_instance(*id) {
-                if matches!(self.db.ty(pin.ins), InstanceKind::Wire) {
-                    let w = self.db.get_wire_mut(pin.ins);
-                    if pin.index == 0 {
-                        w.start += delta;
-                    } else {
-                        w.end += delta;
-                    }
-                }
-            }
-        }
     }
 
     pub fn compute_potential_connections(&mut self) {

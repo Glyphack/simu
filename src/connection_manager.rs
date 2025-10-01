@@ -204,7 +204,7 @@ impl ConnectionManager {
                 let pin_offset = info.offset;
                 let current = g.pos + pin_offset;
                 let desired = target - current;
-                g.pos += desired;
+                db.move_instance_and_propagate(src.ins, desired);
             }
             InstanceKind::Power => {
                 let p = db.get_power_mut(src.ins);
@@ -212,14 +212,14 @@ impl ConnectionManager {
                 let pin_offset = info.offset;
                 let current = p.pos + pin_offset;
                 let desired = target - current;
-                p.pos += desired;
+                db.move_instance_and_propagate(src.ins, desired);
             }
             InstanceKind::CustomCircuit(_) => {
                 let pin_offset = db.pin_offset(src);
                 let cc = db.get_custom_circuit_mut(src.ins);
                 let current = cc.pos + pin_offset;
                 let desired = target - current;
-                cc.pos += desired;
+                db.move_instance_and_propagate(src.ins, desired);
             }
         }
     }

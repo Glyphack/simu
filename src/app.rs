@@ -421,6 +421,132 @@ impl DB {
         }
         out
     }
+
+    pub fn connected_insntances(&self, id: InstanceId) -> Vec<InstanceId> {
+        let mut out = vec![id];
+        for c in &self.connections {
+            if c.a.ins == id {
+                out.push(c.b.ins);
+            } else if c.b.ins == id {
+                out.push(c.a.ins);
+            }
+        }
+        out
+    }
+
+    pub fn move_nonwires_and_resize_wires(&mut self, ids: &[InstanceId], delta: Vec2) {
+        // Move all non-wire instances, then adjust connected wire endpoints
+        for id in ids {
+            match self.ty(*id) {
+                InstanceKind::Gate(_) => {
+                    let g = self.get_gate_mut(*id);
+                    g.pos += delta;
+                }
+                InstanceKind::Power => {
+                    let p = self.get_power_mut(*id);
+                    p.pos += delta;
+                }
+                InstanceKind::Wire => {}
+                InstanceKind::CustomCircuit(_) => {
+                    let cc = self.get_custom_circuit_mut(*id);
+                    cc.pos += delta;
+                }
+            }
+        }
+
+        // Resize wire endpoints attached to any moved instance
+        for id in ids {
+            for pin in self.connected_pins_of_instance(*id) {
+                if matches!(self.ty(pin.ins), InstanceKind::Wire) {
+                    let w = self.get_wire_mut(pin.ins);
+                    if pin.index == 0 {
+                        w.start += delta;
+                    } else {
+                        w.end += delta;
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn move_instance_and_propagate(&mut self, id: InstanceId, delta: Vec2) {
+        let mut visited = HashSet::new();
+        self.move_instance_and_propagate_recursive(id, delta, &mut visited);
+    }
+
+    fn move_instance_and_propagate_recursive(
+        &mut self,
+        id: InstanceId,
+        delta: Vec2,
+        visited: &mut HashSet<InstanceId>,
+    ) {
+        if !visited.insert(id) {
+            return;
+        }
+
+        // Move this instance
+        match self.ty(id) {
+            InstanceKind::Gate(_) => {
+                let g = self.get_gate_mut(id);
+                g.pos += delta;
+            }
+            InstanceKind::Power => {
+                let p = self.get_power_mut(id);
+                p.pos += delta;
+            }
+            InstanceKind::Wire => {
+                let w = self.get_wire_mut(id);
+                w.start += delta;
+                w.end += delta;
+            }
+            InstanceKind::CustomCircuit(_) => {
+                let cc = self.get_custom_circuit_mut(id);
+                cc.pos += delta;
+            }
+        }
+
+        // Get connected instances before we recurse
+        let connected = self.connected_insntances(id);
+
+        // Process each connected instance
+        for connected_id in connected {
+            if connected_id == id || visited.contains(&connected_id) {
+                continue;
+            }
+
+            match self.ty(connected_id) {
+                InstanceKind::Wire => {
+                    // For wires, resize them to stay connected
+                    // Find which pin of the wire is connected to our moved instance
+                    let wire_pins = self.pins_of(connected_id);
+                    for wire_pin in wire_pins {
+                        // Check if this wire pin is connected to any pin of our moved instance
+                        for moved_pin in self.pins_of(id) {
+                            if self
+                                .connections
+                                .contains(&Connection::new(wire_pin, moved_pin))
+                            {
+                                // Update the wire endpoint to match the new pin position
+                                let new_pin_pos = self.pin_position(moved_pin);
+                                let w = self.get_wire_mut(connected_id);
+                                if wire_pin.index == 0 {
+                                    w.start = new_pin_pos;
+                                } else {
+                                    w.end = new_pin_pos;
+                                }
+                            }
+                        }
+                    }
+                    // Mark as visited but don't propagate further (wires are endpoints)
+                    visited.insert(connected_id);
+                }
+                InstanceKind::Gate(_) | InstanceKind::Power | InstanceKind::CustomCircuit(_) => {
+                    // For non-wires, propagate the same delta
+                    self.move_instance_and_propagate_recursive(connected_id, delta, visited);
+                }
+            }
+        }
+    }
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -909,7 +1035,8 @@ impl App {
             && let Some(hovered) = self.hovered
             && let Some(mouse) = mouse_pos_world
             && self.drag.is_none()
-            && let Some(split_point) = self.wire_branching_action_point(mouse, hovered)
+            && let Hover::Instance(instance_id) = hovered
+            && let Some(split_point) = self.wire_branching_action_point(mouse, instance_id)
         {
             ui.painter().circle_filled(
                 split_point - self.viewport_offset,
@@ -1907,10 +2034,11 @@ impl App {
         self.current_dirty = true;
     }
 
-    pub fn wire_branching_action_point(&self, mouse: Pos2, hovered: Hover) -> Option<Pos2> {
-        let Hover::Instance(instance_id) = hovered else {
-            return None;
-        };
+    pub fn wire_branching_action_point(
+        &self,
+        mouse: Pos2,
+        instance_id: InstanceId,
+    ) -> Option<Pos2> {
         if !self.selected.contains(&instance_id) || self.selected.len() != 1 {
             return None;
         }
