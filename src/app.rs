@@ -663,10 +663,22 @@ impl App {
             .pointer_interact_pos()
             .map(|p| self.screen_to_world(p));
 
-        if resp.dragged()
+        if resp.drag_started()
             && let Some(pos) = mouse_pos_world
         {
-            self.drag = Some(Drag::Panel { pos, kind });
+            let id = match kind {
+                InstanceKind::Gate(kind) => self.db.new_gate(Gate { pos, kind }),
+                InstanceKind::Power => self.db.new_power(Power { pos, on: true }),
+                InstanceKind::Wire => self.db.new_wire(Wire::new_at(pos)),
+                InstanceKind::CustomCircuit(c) => self.db.new_custom_circuit(CustomCircuit {
+                    pos,
+                    definition_index: c,
+                }),
+            };
+            self.drag = Some(Drag::Canvas(crate::drag::CanvasDrag::Single {
+                id,
+                offset: Vec2::ZERO,
+            }));
         }
         ui.add_space(8.0);
 
@@ -788,7 +800,7 @@ impl App {
             let dragging = self.drag.is_some();
             let hovered_now = self.get_hovered(mouse);
 
-            if mouse_clicked {
+            if mouse_clicked && self.drag.is_none() {
                 self.hovered = hovered_now;
                 self.clicked_on = hovered_now.map(|h| h.instance());
                 self.handle_drag_start_canvas(mouse);
