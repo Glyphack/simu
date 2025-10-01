@@ -6,11 +6,12 @@ use egui::{
     Align, Button, Color32, CornerRadius, Image, Layout, Pos2, Rect, Response, Sense, Stroke,
     StrokeKind, Ui, Vec2, Widget as _, pos2, vec2,
 };
-use slotmap::{Key as _, SecondaryMap, SlotMap};
+use slotmap::{SecondaryMap, SlotMap};
 
 use crate::{
     assets::{self},
     config::CanvasConfig,
+    connection_manager::ConnectionManager,
     custom_circuit::{self, CustomCircuit, CustomCircuitDefinition},
     drag::Drag,
 };
@@ -84,7 +85,9 @@ pub enum InstanceKind {
 }
 
 // A specific pin on an instance
-#[derive(serde::Deserialize, serde::Serialize, Copy, Debug, Clone, Eq, PartialEq, Hash)]
+#[derive(
+    serde::Deserialize, serde::Serialize, Copy, Debug, Clone, Eq, PartialEq, Hash, Ord, PartialOrd,
+)]
 pub struct Pin {
     pub ins: InstanceId,
     pub index: u32,
@@ -101,11 +104,7 @@ pub struct Connection {
 
 impl Connection {
     pub fn new(p1: Pin, p2: Pin) -> Self {
-        if (p2.ins.data(), p2.index) < (p1.ins.data(), p1.index) {
-            Self { a: p2, b: p1 }
-        } else {
-            Self { a: p1, b: p2 }
-        }
+        Self { a: p2, b: p1 }
     }
 
     pub fn involves_instance(&self, id: InstanceId) -> bool {
@@ -198,6 +197,9 @@ pub struct Wire {
 }
 
 impl Wire {
+    pub fn new_at(pos: Pos2) -> Self {
+        Self::new(pos2(pos.x - 30.0, pos.y), pos2(pos.x + 30.0, pos.y))
+    }
     pub fn new(start: Pos2, end: Pos2) -> Self {
         Self { start, end }
     }
@@ -231,6 +233,7 @@ impl Wire {
     }
 }
 
+#[derive(Default, serde::Deserialize, serde::Serialize)]
 pub struct DB {
     // Primary key allocator; ensures unique keys across all instance kinds
     pub instances: SlotMap<InstanceId, ()>,
@@ -247,6 +250,9 @@ pub struct DB {
 }
 
 impl DB {
+    pub fn new() -> Self {
+        Self::default()
+    }
     pub fn new_gate(&mut self, g: Gate) -> InstanceId {
         let k = self.instances.insert(());
         self.gates.insert(k, g);
@@ -286,7 +292,7 @@ impl DB {
         self.types
             .get(id)
             .copied()
-            .expect("instance type missing for id")
+            .unwrap_or_else(|| panic!("instance type missing for id: {id:?}"))
     }
 
     pub fn get_gate(&self, id: InstanceId) -> &Gate {
@@ -415,6 +421,132 @@ impl DB {
         }
         out
     }
+
+    pub fn connected_insntances(&self, id: InstanceId) -> Vec<InstanceId> {
+        let mut out = vec![id];
+        for c in &self.connections {
+            if c.a.ins == id {
+                out.push(c.b.ins);
+            } else if c.b.ins == id {
+                out.push(c.a.ins);
+            }
+        }
+        out
+    }
+
+    pub fn move_nonwires_and_resize_wires(&mut self, ids: &[InstanceId], delta: Vec2) {
+        // Move all non-wire instances, then adjust connected wire endpoints
+        for id in ids {
+            match self.ty(*id) {
+                InstanceKind::Gate(_) => {
+                    let g = self.get_gate_mut(*id);
+                    g.pos += delta;
+                }
+                InstanceKind::Power => {
+                    let p = self.get_power_mut(*id);
+                    p.pos += delta;
+                }
+                InstanceKind::Wire => {}
+                InstanceKind::CustomCircuit(_) => {
+                    let cc = self.get_custom_circuit_mut(*id);
+                    cc.pos += delta;
+                }
+            }
+        }
+
+        // Resize wire endpoints attached to any moved instance
+        for id in ids {
+            for pin in self.connected_pins_of_instance(*id) {
+                if matches!(self.ty(pin.ins), InstanceKind::Wire) {
+                    let w = self.get_wire_mut(pin.ins);
+                    if pin.index == 0 {
+                        w.start += delta;
+                    } else {
+                        w.end += delta;
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn move_instance_and_propagate(&mut self, id: InstanceId, delta: Vec2) {
+        let mut visited = HashSet::new();
+        self.move_instance_and_propagate_recursive(id, delta, &mut visited);
+    }
+
+    fn move_instance_and_propagate_recursive(
+        &mut self,
+        id: InstanceId,
+        delta: Vec2,
+        visited: &mut HashSet<InstanceId>,
+    ) {
+        if !visited.insert(id) {
+            return;
+        }
+
+        // Move this instance
+        match self.ty(id) {
+            InstanceKind::Gate(_) => {
+                let g = self.get_gate_mut(id);
+                g.pos += delta;
+            }
+            InstanceKind::Power => {
+                let p = self.get_power_mut(id);
+                p.pos += delta;
+            }
+            InstanceKind::Wire => {
+                let w = self.get_wire_mut(id);
+                w.start += delta;
+                w.end += delta;
+            }
+            InstanceKind::CustomCircuit(_) => {
+                let cc = self.get_custom_circuit_mut(id);
+                cc.pos += delta;
+            }
+        }
+
+        // Get connected instances before we recurse
+        let connected = self.connected_insntances(id);
+
+        // Process each connected instance
+        for connected_id in connected {
+            if connected_id == id || visited.contains(&connected_id) {
+                continue;
+            }
+
+            match self.ty(connected_id) {
+                InstanceKind::Wire => {
+                    // For wires, resize them to stay connected
+                    // Find which pin of the wire is connected to our moved instance
+                    let wire_pins = self.pins_of(connected_id);
+                    for wire_pin in wire_pins {
+                        // Check if this wire pin is connected to any pin of our moved instance
+                        for moved_pin in self.pins_of(id) {
+                            if self
+                                .connections
+                                .contains(&Connection::new(wire_pin, moved_pin))
+                            {
+                                // Update the wire endpoint to match the new pin position
+                                let new_pin_pos = self.pin_position(moved_pin);
+                                let w = self.get_wire_mut(connected_id);
+                                if wire_pin.index == 0 {
+                                    w.start = new_pin_pos;
+                                } else {
+                                    w.end = new_pin_pos;
+                                }
+                            }
+                        }
+                    }
+                    // Mark as visited but don't propagate further (wires are endpoints)
+                    visited.insert(connected_id);
+                }
+                InstanceKind::Gate(_) | InstanceKind::Power | InstanceKind::CustomCircuit(_) => {
+                    // For non-wires, propagate the same delta
+                    self.move_instance_and_propagate_recursive(connected_id, delta, visited);
+                }
+            }
+        }
+    }
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -423,6 +555,9 @@ pub struct App {
     pub drag: Option<Drag>,
     pub hovered: Option<Hover>,
     pub db: DB,
+    // connection manager for handling spatial indexing and validation
+    #[serde(skip)]
+    pub connection_manager: ConnectionManager,
     // possible connections while dragging
     pub potential_connections: HashSet<Connection>,
     // energized pins based on current simulation
@@ -454,20 +589,14 @@ pub struct App {
 
 impl Default for App {
     fn default() -> Self {
+        let db = DB::default();
+        let c = ConnectionManager::new(&db);
         Self {
-            db: DB {
-                instances: Default::default(),
-                types: Default::default(),
-                gates: Default::default(),
-                powers: Default::default(),
-                wires: Default::default(),
-                custom_circuits: Default::default(),
-                custom_circuit_definitions: Default::default(),
-                connections: Default::default(),
-            },
+            db,
             canvas_config: Default::default(),
             drag: Default::default(),
             hovered: Default::default(),
+            connection_manager: c,
             potential_connections: Default::default(),
             current: Default::default(),
             current_dirty: true,
@@ -612,18 +741,13 @@ impl App {
                     .ui(ui)
                     .clicked()
                 {
-                    self.db.gates.clear();
-                    self.db.powers.clear();
-                    self.db.wires.clear();
-                    self.db.custom_circuits.clear();
-                    self.db.types.clear();
-                    self.db.instances.clear();
-                    self.db.connections.clear();
+                    self.db = DB::default();
                     self.hovered = None;
                     self.selected.clear();
                     self.drag = None;
                     self.current.clear();
                     self.current_dirty = false;
+                    self.connection_manager = ConnectionManager::new(&self.db);
                 }
             });
     }
@@ -665,10 +789,22 @@ impl App {
             .pointer_interact_pos()
             .map(|p| self.screen_to_world(p));
 
-        if resp.dragged()
+        if resp.drag_started()
             && let Some(pos) = mouse_pos_world
         {
-            self.drag = Some(Drag::Panel { pos, kind });
+            let id = match kind {
+                InstanceKind::Gate(kind) => self.db.new_gate(Gate { pos, kind }),
+                InstanceKind::Power => self.db.new_power(Power { pos, on: true }),
+                InstanceKind::Wire => self.db.new_wire(Wire::new_at(pos)),
+                InstanceKind::CustomCircuit(c) => self.db.new_custom_circuit(CustomCircuit {
+                    pos,
+                    definition_index: c,
+                }),
+            };
+            self.drag = Some(Drag::Canvas(crate::drag::CanvasDrag::Single {
+                id,
+                offset: Vec2::ZERO,
+            }));
         }
         ui.add_space(8.0);
 
@@ -755,8 +891,11 @@ impl App {
         self.hovered.take();
         self.drag.take();
         self.selected.remove(&id);
+
+        // Remove from connection manager tracking
+        self.connection_manager.dirty_instances.remove(&id);
         self.current.retain(|p| p.ins != id);
-        self.current_dirty = true;
+        self.connection_manager.rebuild_spatial_index(&self.db);
     }
 
     fn draw_canvas(&mut self, ui: &mut Ui) {
@@ -784,15 +923,14 @@ impl App {
         self.handle_deletion(ui);
 
         if let Some(mouse) = mouse_pos_world {
+            let dragging = self.drag.is_some();
             let hovered_now = self.get_hovered(mouse);
 
-            if mouse_clicked {
+            if mouse_clicked && self.drag.is_none() {
                 self.hovered = hovered_now;
                 self.clicked_on = hovered_now.map(|h| h.instance());
                 self.handle_drag_start_canvas(mouse);
             }
-
-            let dragging = self.drag.is_some();
 
             if dragging {
                 self.handle_dragging(ui, mouse);
@@ -804,6 +942,10 @@ impl App {
                 if dragging {
                     let drag_had_movement = self.drag_had_movement;
                     self.handle_drag_end(mouse);
+
+                    if self.connection_manager.update_connections(&mut self.db) {
+                        self.current_dirty = true;
+                    }
                     if !drag_had_movement {
                         self.selected.clear();
                         if let Some(Hover::Instance(id)) = hovered_now {
@@ -870,45 +1012,15 @@ impl App {
             );
         }
 
-        // TODO: Highlight the pin that will be attached to
-        if !self.potential_connections.is_empty() {
-            for c in &self.potential_connections {
-                // Highlight the pin belonging to the currently moving instance if any
-                let pin_to_highlight = match self.drag {
-                    Some(Drag::Canvas { .. }) => c.a,
-                    Some(Drag::Resize { id, start }) => {
-                        // Only highlight the endpoint being resized
-                        let target_pin = Pin {
-                            ins: id,
-                            index: u32::from(!start),
-                        };
-                        if c.a == target_pin {
-                            c.a
-                        } else if c.b == target_pin {
-                            c.b
-                        } else {
-                            continue;
-                        }
-                    }
-                    Some(Drag::PinToWire {
-                        source_pin: _,
-                        wire_id,
-                    }) => {
-                        if c.a.ins == wire_id {
-                            c.a
-                        } else {
-                            c.b
-                        }
-                    }
-                    _ => continue,
-                };
-                let p = self.db.pin_position(pin_to_highlight);
-                ui.painter().circle_filled(
-                    p - self.viewport_offset,
-                    SNAP_THRESHOLD,
-                    COLOR_POTENTIAL_CONN_HIGHLIGHT,
-                );
-            }
+        for c in &self.potential_connections {
+            // Highlight the pin that it's going to attach. The stable pin.
+            let pin_to_highlight = c.b;
+            let p = self.db.pin_position(pin_to_highlight);
+            ui.painter().circle_filled(
+                p - self.viewport_offset,
+                SNAP_THRESHOLD,
+                COLOR_POTENTIAL_CONN_HIGHLIGHT,
+            );
         }
 
         if self.drag.is_none() {
@@ -923,7 +1035,8 @@ impl App {
             && let Some(hovered) = self.hovered
             && let Some(mouse) = mouse_pos_world
             && self.drag.is_none()
-            && let Some(split_point) = self.wire_branching_action_point(mouse, hovered)
+            && let Hover::Instance(instance_id) = hovered
+            && let Some(split_point) = self.wire_branching_action_point(mouse, instance_id)
         {
             ui.painter().circle_filled(
                 split_point - self.viewport_offset,
@@ -1169,6 +1282,37 @@ impl App {
     }
 
     pub fn get_hovered(&self, mouse_pos: Pos2) -> Option<Hover> {
+        if let Some(v) = self.drag {
+            match v {
+                Drag::Canvas(canvas_drag) => match canvas_drag {
+                    crate::drag::CanvasDrag::Single { id, offset: _ } => {
+                        return Some(Hover::Instance(id));
+                    }
+                    crate::drag::CanvasDrag::Selected { .. } => {}
+                },
+                Drag::Resize { id, start } => {
+                    return Some(Hover::Pin(Pin {
+                        ins: id,
+                        index: u32::from(!start),
+                    }));
+                }
+                Drag::PinToWire {
+                    source_pin,
+                    start_pos: _,
+                } => {
+                    // Source pin is being dragged
+                    return Some(Hover::Pin(source_pin));
+                }
+                Drag::BranchWire {
+                    original_wire_id,
+                    split_point: _,
+                    start_mouse_pos: _,
+                } => {
+                    return Some(Hover::Instance(original_wire_id));
+                }
+                Drag::Panel { .. } | Drag::Selecting { .. } => {}
+            }
+        }
         for selected in &self.selected {
             match self.db.ty(*selected) {
                 InstanceKind::Wire => {
@@ -1241,7 +1385,7 @@ impl App {
                     .circle_filled(pin_pos, PIN_HOVER_THRESHOLD, color);
             }
             Hover::Instance(hovered) => match self.db.ty(hovered) {
-                InstanceKind::Gate(gate_kind) => {
+                InstanceKind::Gate(_) => {
                     let gate = self.db.get_gate(hovered);
                     let outer = Rect::from_center_size(
                         gate.pos - self.viewport_offset,
@@ -1253,26 +1397,6 @@ impl App {
                         Stroke::new(2.0, COLOR_HOVER_INSTANCE_OUTLINE),
                         StrokeKind::Middle,
                     );
-
-                    if let Some(mouse) = ui.ctx().pointer_interact_pos() {
-                        for (i, pin_info) in gate_kind.graphics().pins.iter().enumerate() {
-                            let pin = Pin {
-                                ins: hovered,
-                                index: i as u32,
-                            };
-                            let pin_offset = pin_info.offset;
-                            let pin_pos = gate.pos + pin_offset - self.viewport_offset;
-                            if mouse.distance(pin_pos) < SNAP_THRESHOLD
-                                && self.is_pin_connected(pin)
-                            {
-                                ui.painter().circle_filled(
-                                    pin_pos,
-                                    SNAP_THRESHOLD,
-                                    COLOR_PIN_DETACH_HINT,
-                                );
-                            }
-                        }
-                    }
                 }
                 InstanceKind::Power => {
                     let power = self.db.get_power(hovered);
@@ -1646,6 +1770,11 @@ impl App {
             .map(|p| self.screen_to_world(p));
         writeln!(out, "mouse: {mouse_pos_world:?}").ok();
 
+        writeln!(out, "\nInstances:").ok();
+        for (id, _) in &self.db.instances {
+            writeln!(out, "  {id:?}").ok();
+        }
+
         writeln!(out, "\nGates:").ok();
         for (id, g) in &self.db.gates {
             writeln!(
@@ -1719,6 +1848,8 @@ impl App {
                 .ok();
             }
         }
+
+        writeln!(out, "\n{}", self.connection_manager.debug_info()).ok();
 
         out
     }
@@ -1807,10 +1938,10 @@ impl App {
                     })
                 }
             };
-            self.potential_connections = self.compute_potential_connections_for_instance(id);
-            self.finalize_connections_for_instance(id);
-            self.selected.insert(id); // Add newly pasted instance to selection
+            self.connection_manager.mark_instance_dirty(id);
+            self.selected.insert(id);
         }
+        self.connection_manager.rebuild_spatial_index(&self.db);
     }
 
     fn draw_right_click_actions_menu(&mut self, ui: &Ui) {
@@ -1895,44 +2026,16 @@ impl App {
         let original_wire_mut = self.db.get_wire_mut(wire_id);
         original_wire_mut.end = split_point;
 
-        let original_end_pin = Pin {
-            ins: wire_id,
-            index: 1,
-        };
-        let new_start_pin = Pin {
-            ins: new_wire_id,
-            index: 0,
-        };
-
-        // Find all connections involving the original wire's end pin
-        let connections_to_update: Vec<Connection> = self
-            .db
-            .connections
-            .iter()
-            .filter(|conn| conn.a == original_end_pin || conn.b == original_end_pin)
-            .copied()
-            .collect();
-
-        // Remove old connections and add new ones
-        for old_connection in connections_to_update {
-            self.db.connections.remove(&old_connection);
-
-            let new_connection = if old_connection.a == original_end_pin {
-                Connection::new(new_start_pin, old_connection.b)
-            } else {
-                Connection::new(old_connection.a, new_start_pin)
-            };
-            self.db.connections.insert(new_connection);
-        }
-
-        // Mark simulation as dirty since we've changed the circuit
+        self.connection_manager
+            .mark_instances_dirty(&[wire_id, new_wire_id]);
         self.current_dirty = true;
     }
 
-    pub fn wire_branching_action_point(&self, mouse: Pos2, hovered: Hover) -> Option<Pos2> {
-        let Hover::Instance(instance_id) = hovered else {
-            return None;
-        };
+    pub fn wire_branching_action_point(
+        &self,
+        mouse: Pos2,
+        instance_id: InstanceId,
+    ) -> Option<Pos2> {
         if !self.selected.contains(&instance_id) || self.selected.len() != 1 {
             return None;
         }
