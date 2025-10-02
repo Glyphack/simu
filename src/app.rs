@@ -334,6 +334,69 @@ impl DB {
             .expect("custom circuit not found (mut)")
     }
 
+    // Pin helper methods with type checking
+
+    // Gates - generic versions
+    pub fn gate_inp_n(&self, id: InstanceId, n: u32) -> Pin {
+        self.get_gate(id); // Type check
+        assert!(n < 2, "Gates only have 2 inputs (0 and 1)");
+        Pin {
+            ins: id,
+            index: if n == 0 { 0 } else { 2 },
+        }
+    }
+
+    pub fn gate_output_n(&self, id: InstanceId, n: u32) -> Pin {
+        self.get_gate(id); // Type check
+        assert!(n == 0, "Gates only have 1 output");
+        Pin { ins: id, index: 1 }
+    }
+
+    // Gates - convenience methods
+    pub fn gate_inp1(&self, id: InstanceId) -> Pin {
+        self.gate_inp_n(id, 0)
+    }
+
+    pub fn gate_inp2(&self, id: InstanceId) -> Pin {
+        self.gate_inp_n(id, 1)
+    }
+
+    pub fn gate_output(&self, id: InstanceId) -> Pin {
+        self.gate_output_n(id, 0)
+    }
+
+    // Wires
+    pub fn wire_pin_n(&self, id: InstanceId, n: u32) -> Pin {
+        self.get_wire(id); // Type check
+        assert!(n < 2, "Wires only have 2 pins (0 and 1)");
+        Pin { ins: id, index: n }
+    }
+
+    pub fn wire_start(&self, id: InstanceId) -> Pin {
+        self.wire_pin_n(id, 0)
+    }
+
+    pub fn wire_end(&self, id: InstanceId) -> Pin {
+        self.wire_pin_n(id, 1)
+    }
+
+    // Power
+    pub fn power_output(&self, id: InstanceId) -> Pin {
+        self.get_power(id); // Type check
+        Pin { ins: id, index: 0 }
+    }
+
+    // Custom circuits (variable pins)
+    pub fn custom_circuit_pin(&self, id: InstanceId, n: u32) -> Pin {
+        let cc = self.get_custom_circuit(id);
+        let def = &self.custom_circuit_definitions[cc.definition_index];
+        assert!(
+            (n as usize) < def.external_pins.len(),
+            "Pin index out of bounds for custom circuit"
+        );
+        Pin { ins: id, index: n }
+    }
+
     pub fn pins_of(&self, id: InstanceId) -> Vec<Pin> {
         match self.ty(id) {
             InstanceKind::Gate(gk) => {
@@ -1001,7 +1064,7 @@ impl App {
             self.draw_custom_circuit(ui, id, custom_circuit);
         }
         for (id, wire) in &self.db.wires {
-            let has_current = self.current.contains(&Pin { ins: id, index: 0 });
+            let has_current = self.current.contains(&self.db.wire_start(id));
             self.draw_wire(
                 ui,
                 wire,
@@ -1291,10 +1354,12 @@ impl App {
                     crate::drag::CanvasDrag::Selected { .. } => {}
                 },
                 Drag::Resize { id, start } => {
-                    return Some(Hover::Pin(Pin {
-                        ins: id,
-                        index: u32::from(!start),
-                    }));
+                    let pin = if start {
+                        self.db.wire_start(id)
+                    } else {
+                        self.db.wire_end(id)
+                    };
+                    return Some(Hover::Pin(pin));
                 }
                 Drag::PinToWire {
                     source_pin,
@@ -1331,30 +1396,24 @@ impl App {
             }
         }
 
-        for (k, power) in &self.db.powers {
-            let rect = Rect::from_center_size(power.pos, self.canvas_config.base_gate_size);
+        // First pins
+        for (k, _) in &self.db.powers {
             for pin in self.db.pins_of(k) {
                 if self.db.pin_position(pin).distance(mouse_pos) < PIN_HOVER_THRESHOLD {
                     return Some(Hover::Pin(pin));
                 }
-            }
-            if rect.contains(mouse_pos) {
-                return Some(Hover::Instance(k));
             }
         }
 
-        for (k, gate) in &self.db.gates {
-            let rect = Rect::from_center_size(gate.pos, self.canvas_config.base_gate_size);
+        for (k, _) in &self.db.gates {
             for pin in self.db.pins_of(k) {
                 if self.db.pin_position(pin).distance(mouse_pos) < PIN_HOVER_THRESHOLD {
                     return Some(Hover::Pin(pin));
                 }
             }
-            if rect.contains(mouse_pos) {
-                return Some(Hover::Instance(k));
-            }
         }
-        for (k, wire) in &self.db.wires {
+
+        for (k, _) in &self.db.wires {
             for pin in self.db.pins_of(k) {
                 if self.is_pin_connected(pin) {
                     continue;
@@ -1363,6 +1422,22 @@ impl App {
                     return Some(Hover::Pin(pin));
                 }
             }
+        }
+
+        // Then instances
+        for (k, power) in &self.db.powers {
+            let rect = Rect::from_center_size(power.pos, self.canvas_config.base_gate_size);
+            if rect.contains(mouse_pos) {
+                return Some(Hover::Instance(k));
+            }
+        }
+        for (k, gate) in &self.db.gates {
+            let rect = Rect::from_center_size(gate.pos, self.canvas_config.base_gate_size);
+            if rect.contains(mouse_pos) {
+                return Some(Hover::Instance(k));
+            }
+        }
+        for (k, wire) in &self.db.wires {
             let dist = wire.dist_to_closest_point_on_line(mouse_pos);
             if dist < WIRE_HIT_DISTANCE {
                 return Some(Hover::Instance(k));
@@ -1507,12 +1582,12 @@ impl App {
             InstanceKind::Power => {
                 let p = self.db.get_power(id);
                 if p.on {
-                    current.insert(Pin { ins: id, index: 0 });
+                    current.insert(self.db.power_output(id));
                 }
             }
             InstanceKind::Wire => {
-                let a = Pin { ins: id, index: 0 };
-                let b = Pin { ins: id, index: 1 };
+                let a = self.db.wire_start(id);
+                let b = self.db.wire_end(id);
                 let mut visiting = HashSet::new();
                 let a_on = self.eval_pin(a, current, &mut visiting);
                 visiting.clear();
@@ -1523,10 +1598,9 @@ impl App {
                 }
             }
             InstanceKind::Gate(kind) => {
-                // pins: 0=input A, 2=input B, 1=output
-                let a = Pin { ins: id, index: 0 };
-                let b = Pin { ins: id, index: 2 };
-                let out = Pin { ins: id, index: 1 };
+                let a = self.db.gate_inp1(id);
+                let b = self.db.gate_inp2(id);
+                let out = self.db.gate_output(id);
                 let mut visiting = HashSet::new();
                 let a_on = self.eval_pin(a, current, &mut visiting);
                 visiting.clear();
@@ -1721,10 +1795,7 @@ impl App {
                     }
                 }
                 InstanceKind::Gate(_) => {
-                    let out_pin = Pin {
-                        ins: other.ins,
-                        index: 1,
-                    };
+                    let out_pin = self.db.gate_output(other.ins);
                     if other == out_pin {
                         self.eval_instance(other.ins, current);
                         if current.contains(&out_pin) {
