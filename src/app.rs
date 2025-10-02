@@ -498,7 +498,6 @@ impl DB {
     }
 
     pub fn move_nonwires_and_resize_wires(&mut self, ids: &[InstanceId], delta: Vec2) {
-        // Move all non-wire instances, then adjust connected wire endpoints
         for id in ids {
             match self.ty(*id) {
                 InstanceKind::Gate(_) => {
@@ -509,7 +508,11 @@ impl DB {
                     let p = self.get_power_mut(*id);
                     p.pos += delta;
                 }
-                InstanceKind::Wire => {}
+                InstanceKind::Wire => {
+                    let w = self.get_wire_mut(*id);
+                    w.start += delta;
+                    w.end += delta;
+                }
                 InstanceKind::CustomCircuit(_) => {
                     let cc = self.get_custom_circuit_mut(*id);
                     cc.pos += delta;
@@ -517,7 +520,6 @@ impl DB {
             }
         }
 
-        // Resize wire endpoints attached to any moved instance
         for id in ids {
             for pin in self.connected_pins_of_instance(*id) {
                 if matches!(self.ty(pin.ins), InstanceKind::Wire) {

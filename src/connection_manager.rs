@@ -33,7 +33,6 @@ pub struct ConnectionManager {
     /// Instances that need connection updates
     pub(crate) dirty_instances: HashSet<InstanceId>,
 
-    // pub(crate) potential_connections: HashSet<Connection>,
     spatial_index: HashMap<GridCell, Vec<Pin>>,
 
     /// Cache of pin positions to detect when pins move
