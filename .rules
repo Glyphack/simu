@@ -1,0 +1,58 @@
+## Project Overview
+
+This project, named "simu," is a digital logic circuit simulator. It provides a graphical user interface (GUI) where users can build and simulate logic circuits. The application is built with Rust and uses the `egui` and `eframe` libraries for its GUI. It is designed to be cross-platform and can be compiled for both native and web environments.
+
+The simulator allows users to:
+
+*   Drag and drop logic gates (AND, NAND, OR, NOR, XOR, XNOR) and power sources onto a canvas.
+*   Connect these components using wires.
+*   Toggle power sources to observe the flow of electricity through the circuit.
+*   A debug panel is available to inspect the internal state of the simulation.
+
+
+Main code is in ./src/app.rs
+
+## Building and Running
+
+### Native
+
+To build and run the native application, use the following command:
+
+```bash
+cargo run
+```
+
+### Web
+
+The web application is built using [Trunk](https://trunkrs.dev/). To build and serve the web application locally, use the following command:
+
+```bash
+trunk serve
+```
+
+This will build the application and start a local server. You can then access the application in your web browser at the address provided by Trunk (usually `http://127.0.0.1:8080`).
+
+### Checking the Code
+
+The project includes a `check.sh` script that runs a series of checks to ensure code quality. To run these checks, execute the following command:
+
+```bash
+./check.sh
+```
+
+This script will:
+
+*   Check for compilation errors (`cargo check`).
+*   Check for formatting issues (`cargo fmt`).
+*   Lint the code with Clippy (`cargo clippy`).
+*   Run tests (`cargo test`).
+*   Build the web application (`trunk build`).
+
+## Development Conventions
+
+*   **GUI:** The application uses the `egui` and `eframe` libraries for its GUI. All UI components and interactions are implemented using these libraries.
+*   **State Management:** The application state is managed in the `App` struct in `src/app.rs`. This includes the state of all circuit components, user interactions, and the simulation itself.
+*   **Simulation:** The core simulation logic is implemented in the `recompute_current` and `eval_instance` methods in `src/app.rs`. The simulation is re-run whenever the circuit is modified.
+*   **Cross-Platform:** The application is designed to be cross-platform. The `src/main.rs` file contains separate entry points for the native and web builds.
+*  run `./check.sh` after your changes and ensure there are no warnings or errors.
+    ```
