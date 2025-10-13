@@ -77,13 +77,6 @@ impl App {
 
         match hovered {
             Hover::Pin(pin) => {
-                if matches!(self.db.ty(pin.ins), InstanceKind::Wire) && pin.index <= 1 {
-                    self.drag = Some(Drag::Resize {
-                        id: pin.ins,
-                        start: pin.index == 0,
-                    });
-                    return;
-                }
                 let pin_pos = self.db.pin_position(pin);
                 self.drag = Some(Drag::PinToWire {
                     source_pin: pin,

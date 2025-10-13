@@ -8,3 +8,4 @@ pub mod custom_circuit;
 pub mod drag;
 pub mod save_load;
 pub use app::App;
+pub mod simulator;

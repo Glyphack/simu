@@ -8,6 +8,7 @@ use egui::{
 };
 use slotmap::{SecondaryMap, SlotMap};
 
+use crate::simulator::Simulator;
 use crate::{
     assets::{self},
     config::CanvasConfig,
@@ -56,7 +57,7 @@ slotmap::new_key_type! {
     pub struct LabelId;
 }
 
-#[derive(serde::Deserialize, serde::Serialize, Copy, Debug, Clone)]
+#[derive(serde::Deserialize, serde::Serialize, Eq, PartialEq, Hash, Copy, Debug, Clone)]
 pub enum Hover {
     Pin(Pin),
     Instance(InstanceId),
@@ -277,7 +278,7 @@ impl Wire {
     }
 }
 
-#[derive(Default, serde::Deserialize, serde::Serialize)]
+#[derive(Default, serde::Deserialize, serde::Serialize, Clone)]
 pub struct DB {
     // Primary key allocator; ensures unique keys across all instance kinds
     pub instances: SlotMap<InstanceId, ()>,
@@ -414,7 +415,6 @@ impl DB {
         Pin { ins: id, index: 1 }
     }
 
-    // Gates - convenience methods
     pub fn gate_inp1(&self, id: InstanceId) -> Pin {
         self.gate_inp_n(id, 0)
     }
@@ -427,7 +427,6 @@ impl DB {
         self.gate_output_n(id, 0)
     }
 
-    // Wires
     pub fn wire_pin_n(&self, id: InstanceId, n: u32) -> Pin {
         self.get_wire(id); // Type check
         assert!(n < 2, "Wires only have 2 pins (0 and 1)");
@@ -442,9 +441,8 @@ impl DB {
         self.wire_pin_n(id, 1)
     }
 
-    // Power
     pub fn power_output(&self, id: InstanceId) -> Pin {
-        self.get_power(id); // Type check
+        self.get_power(id);
         Pin { ins: id, index: 0 }
     }
 
@@ -579,6 +577,16 @@ impl DB {
         out
     }
 
+    pub fn connected_pins(&self, pin: Pin) -> Vec<Pin> {
+        let mut res = Vec::new();
+        for c in &self.connections {
+            if let Some((_, other)) = c.get_pin_first(pin) {
+                res.push(other);
+            }
+        }
+        res
+    }
+
     pub fn connected_insntances(&self, id: InstanceId) -> Vec<InstanceId> {
         let mut out = vec![id];
         for c in &self.connections {
@@ -592,6 +600,8 @@ impl DB {
     }
 
     pub fn move_nonwires_and_resize_wires(&mut self, ids: &[InstanceId], delta: Vec2) {
+        let ids_set: HashSet<InstanceId> = ids.iter().copied().collect();
+
         for id in ids {
             match self.ty(*id) {
                 InstanceKind::Gate(_) => {
@@ -620,12 +630,27 @@ impl DB {
 
         for id in ids {
             for pin in self.connected_pins_of_instance(*id) {
-                if matches!(self.ty(pin.ins), InstanceKind::Wire) {
-                    let w = self.get_wire_mut(pin.ins);
-                    if pin.index == 0 {
+                if matches!(self.ty(pin.ins), InstanceKind::Wire) && !ids_set.contains(&pin.ins) {
+                    // Check if the wire is connected to another wire
+                    let wire_connected_to_wire = self
+                        .connected_pins_of_instance(pin.ins)
+                        .iter()
+                        .any(|p| matches!(self.ty(p.ins), InstanceKind::Wire));
+
+                    #[expect(clippy::overly_complex_bool_expr)]
+                    if wire_connected_to_wire && false {
+                        // If connected to another wire, just move the whole wire
+                        let w = self.get_wire_mut(pin.ins);
                         w.start += delta;
-                    } else {
                         w.end += delta;
+                    } else {
+                        // Otherwise resize the wire
+                        let w = self.get_wire_mut(pin.ins);
+                        if pin.index == 0 {
+                            w.start += delta;
+                        } else {
+                            w.end += delta;
+                        }
                     }
                 }
             }
@@ -1059,7 +1084,7 @@ impl App {
             }
         });
 
-        if copy_event_detected && !self.selected.is_empty() {
+        if copy_event_detected {
             self.copy_to_clipboard();
         }
 
@@ -1068,6 +1093,7 @@ impl App {
             && let Some(mouse) = mouse_pos_world
         {
             self.paste_from_clipboard(mouse);
+            self.current_dirty = true;
         }
     }
 
@@ -1087,6 +1113,7 @@ impl App {
                     self.delete_instance(id);
                 }
             }
+            self.current_dirty = true;
         }
     }
 
@@ -1226,7 +1253,9 @@ impl App {
         // }
 
         if self.current_dirty {
-            self.recompute_current();
+            let mut sim = Simulator::new(self.db.clone());
+            self.current = sim.compute();
+            self.current_dirty = false;
         }
 
         // Draw world
@@ -1728,6 +1757,12 @@ impl App {
         }
 
         // Then instances
+        for (k, wire) in &self.db.wires {
+            let dist = wire.dist_to_closest_point_on_line(mouse_pos);
+            if dist < WIRE_HIT_DISTANCE {
+                return Some(Hover::Instance(k));
+            }
+        }
         for (k, power) in &self.db.powers {
             let rect = Rect::from_center_size(power.pos, self.canvas_config.base_gate_size);
             if rect.contains(mouse_pos) {
@@ -1898,264 +1933,6 @@ impl App {
                 }
             }
         }
-    }
-
-    // ---------- Simulation ----------
-
-    fn recompute_current(&mut self) {
-        let mut current: HashSet<Pin> = HashSet::new();
-        let ids: Vec<InstanceId> = self.db.types.keys().collect();
-        for id in ids {
-            self.eval_instance(id, &mut current);
-        }
-        self.current = current;
-        self.current_dirty = false;
-    }
-
-    fn eval_instance(&self, id: InstanceId, current: &mut HashSet<Pin>) {
-        match self.db.ty(id) {
-            InstanceKind::Power => {
-                let p = self.db.get_power(id);
-                if p.on {
-                    current.insert(self.db.power_output(id));
-                }
-            }
-            InstanceKind::Lamp => {
-                let inp = self.db.lamp_input(id);
-                let mut visiting = HashSet::new();
-                let inp_on = self.eval_pin(inp, current, &mut visiting);
-                if inp_on {
-                    current.insert(inp);
-                }
-            }
-            InstanceKind::Wire => {
-                let a = self.db.wire_start(id);
-                let b = self.db.wire_end(id);
-                let mut visiting = HashSet::new();
-                let a_on = self.eval_pin(a, current, &mut visiting);
-                visiting.clear();
-                let b_on = self.eval_pin(b, current, &mut visiting);
-                if a_on || b_on {
-                    current.insert(a);
-                    current.insert(b);
-                }
-            }
-            InstanceKind::Gate(kind) => {
-                let a = self.db.gate_inp1(id);
-                let b = self.db.gate_inp2(id);
-                let out = self.db.gate_output(id);
-                let mut visiting = HashSet::new();
-                let a_on = self.eval_pin(a, current, &mut visiting);
-                visiting.clear();
-                let b_on = self.eval_pin(b, current, &mut visiting);
-                let out_on = match kind {
-                    GateKind::And => a_on && b_on,
-                    GateKind::Nand => !(a_on && b_on),
-                    GateKind::Or => a_on || b_on,
-                    GateKind::Nor => !(a_on || b_on),
-                    GateKind::Xor => (a_on && !b_on) || (!a_on && b_on),
-                    GateKind::Xnor => a_on == b_on,
-                };
-                if out_on {
-                    current.insert(out);
-                }
-            }
-            InstanceKind::CustomCircuit(_) => {
-                let cc = self.db.get_custom_circuit(id);
-                if let Some(definition) =
-                    self.db.custom_circuit_definitions.get(cc.definition_index)
-                {
-                    self.eval_custom_circuit(id, definition, current);
-                }
-            }
-        }
-    }
-
-    fn eval_custom_circuit(
-        &self,
-        custom_circuit_id: InstanceId,
-        definition: &CustomCircuitDefinition,
-        current: &mut HashSet<Pin>,
-    ) {
-        // Create a mapping from external pins to their current state
-        let mut internal_current = HashSet::new();
-
-        // For each external input pin, check if it has current and activate the corresponding internal pin
-        for (external_pin_index, external_pin) in definition.external_pins.iter().enumerate() {
-            if external_pin.kind == crate::assets::PinKind::Input {
-                let external_pin_obj = Pin {
-                    ins: custom_circuit_id,
-                    index: external_pin_index as u32,
-                };
-
-                // Check if this external input pin has current flowing into it
-                let mut visiting = HashSet::new();
-                if self.eval_pin(external_pin_obj, current, &mut visiting) {
-                    // Activate the corresponding internal pin
-                    internal_current.insert(external_pin.internal_pin);
-                }
-            }
-        }
-
-        // Simulate the internal circuit components
-        // This is a simplified simulation that processes components in order
-        // A full implementation might need topological sorting or iterative convergence
-        let mut changed = true;
-        let mut iterations = 0;
-        const MAX_ITERATIONS: u32 = 100; // Prevent infinite loops
-
-        while changed && iterations < MAX_ITERATIONS {
-            changed = false;
-            let old_size = internal_current.len();
-
-            // Evaluate each internal component
-            for component in &definition.internal_components {
-                match component {
-                    crate::app::ClipBoardItem::Gate(gate_kind, _offset) => {
-                        // For simplicity, we'll implement a basic gate evaluation
-                        // This assumes the standard gate pin layout: input A (0), output (1), input B (2)
-                        // Note: This is a simplified approach - a full implementation would need
-                        // to create a temporary DB and simulate properly
-                        Self::eval_internal_gate(
-                            *gate_kind,
-                            &definition.internal_connections,
-                            &mut internal_current,
-                        );
-                    }
-                    crate::app::ClipBoardItem::Power(_offset) => {
-                        // Powers in the internal circuit should activate their output pins
-                        // For now, we'll assume they're always on when included in a custom circuit
-                        // A full implementation would track their state
-                    }
-                    crate::app::ClipBoardItem::Wire(..)
-                    | crate::app::ClipBoardItem::CustomCircuit(..)
-                    | crate::app::ClipBoardItem::Lamp(..)
-                    | crate::app::ClipBoardItem::Label(..) => {
-                        // Wires propagate current from one end to the other
-                        // Nested custom circuits would need recursive evaluation
-                        // Labels are not evaluated (visual only)
-                        // For now, these cases are handled by connection processing
-                    }
-                }
-            }
-
-            // Propagate current through internal connections
-            let mut new_current = internal_current.clone();
-            for connection in &definition.internal_connections {
-                if internal_current.contains(&connection.a) {
-                    new_current.insert(connection.b);
-                }
-                if internal_current.contains(&connection.b) {
-                    new_current.insert(connection.a);
-                }
-            }
-
-            if new_current.len() != old_size {
-                changed = true;
-            }
-            internal_current = new_current;
-            iterations += 1;
-        }
-
-        // Map internal outputs back to external outputs
-        for (external_pin_index, external_pin) in definition.external_pins.iter().enumerate() {
-            if external_pin.kind == crate::assets::PinKind::Output
-                && internal_current.contains(&external_pin.internal_pin)
-            {
-                current.insert(Pin {
-                    ins: custom_circuit_id,
-                    index: external_pin_index as u32,
-                });
-            }
-        }
-    }
-
-    fn eval_internal_gate(
-        _gate_kind: GateKind,
-        connections: &[Connection],
-        internal_current: &mut HashSet<Pin>,
-    ) {
-        // This is a simplified gate evaluation for internal components
-        // In a full implementation, we would need to properly identify which pins
-        // belong to which internal component instances
-
-        // For now, we'll implement a basic version that looks for gate patterns in connections
-        // This is not a complete implementation but provides a foundation
-
-        // Note: This is a placeholder implementation
-        // A proper implementation would require:
-        // 1. Mapping internal components to their pins
-        // 2. Proper gate logic evaluation
-        // 3. Handling of component positioning and identification
-
-        // For the current implementation, we'll use a simplified approach
-        // that just propagates current through connections
-        for connection in connections {
-            if internal_current.contains(&connection.a) && !internal_current.contains(&connection.b)
-            {
-                internal_current.insert(connection.b);
-            }
-            if internal_current.contains(&connection.b) && !internal_current.contains(&connection.a)
-            {
-                internal_current.insert(connection.a);
-            }
-        }
-    }
-
-    fn connected_pins(&self, pin: Pin) -> Vec<Pin> {
-        let mut res = Vec::new();
-        for c in &self.db.connections {
-            if let Some((_, other)) = c.get_pin_first(pin) {
-                res.push(other);
-            }
-        }
-        res
-    }
-
-    fn eval_pin(&self, pin: Pin, current: &mut HashSet<Pin>, visiting: &mut HashSet<Pin>) -> bool {
-        if current.contains(&pin) {
-            return true;
-        }
-        if !visiting.insert(pin) {
-            return false;
-        }
-
-        for other in self.connected_pins(pin) {
-            match self.db.ty(other.ins) {
-                InstanceKind::Power => {
-                    if self.db.get_power(other.ins).on {
-                        current.insert(pin);
-                        visiting.remove(&pin);
-                        return true;
-                    }
-                }
-                InstanceKind::Lamp | InstanceKind::CustomCircuit(_) => {}
-                InstanceKind::Wire => {
-                    let other_end = Pin {
-                        ins: other.ins,
-                        index: 1 - other.index,
-                    };
-                    if self.eval_pin(other_end, current, visiting) {
-                        current.insert(pin);
-                        visiting.remove(&pin);
-                        return true;
-                    }
-                }
-                InstanceKind::Gate(_) => {
-                    let out_pin = self.db.gate_output(other.ins);
-                    if other == out_pin {
-                        self.eval_instance(other.ins, current);
-                        if current.contains(&out_pin) {
-                            current.insert(pin);
-                            visiting.remove(&pin);
-                            return true;
-                        }
-                    }
-                }
-            }
-        }
-        visiting.remove(&pin);
-        false
     }
 
     fn debug_string(&self, ui: &Ui) -> String {
@@ -2338,7 +2115,19 @@ impl App {
     }
 
     fn copy_to_clipboard(&mut self) {
-        let (_, object_pos) = self.extract_instances_with_offsets(&self.selected);
+        let instances = if self.selected.is_empty() {
+            if let Some(hovered) = self.hovered {
+                &HashSet::from_iter(vec![hovered.instance()])
+            } else {
+                &HashSet::new()
+            }
+        } else {
+            &self.selected
+        };
+        if instances.is_empty() {
+            return;
+        }
+        let (_, object_pos) = self.extract_instances_with_offsets(instances);
         self.clipboard = object_pos;
     }
 
