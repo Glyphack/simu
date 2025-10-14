@@ -171,6 +171,10 @@ impl ConnectionManager {
                 // Wires can connect to anything
                 Some(assets::PinKind::Input) // Treat as input for validation purposes
             }
+            InstanceKind::Lamp => {
+                let graphics = &assets::LAMP_GRAPHICS;
+                graphics.pins.get(pin.index as usize).map(|p| p.kind)
+            }
             InstanceKind::CustomCircuit(_) => {
                 let cc = db.get_custom_circuit(pin.ins);
                 if let Some(def) = db.custom_circuit_definitions.get(cc.definition_index) {
@@ -210,6 +214,14 @@ impl ConnectionManager {
                 let info = assets::POWER_ON_GRAPHICS.pins[src.index as usize];
                 let pin_offset = info.offset;
                 let current = p.pos + pin_offset;
+                let desired = target - current;
+                db.move_instance_and_propagate(src.ins, desired);
+            }
+            InstanceKind::Lamp => {
+                let l = db.get_lamp_mut(src.ins);
+                let info = assets::LAMP_GRAPHICS.pins[src.index as usize];
+                let pin_offset = info.offset;
+                let current = l.pos + pin_offset;
                 let desired = target - current;
                 db.move_instance_and_propagate(src.ins, desired);
             }
