@@ -141,3 +141,11 @@ pub static POWER_OFF_GRAPHICS: InstanceGraphics = InstanceGraphics {
         offset: Vec2::new(40.0, 0.0),
     }],
 };
+
+pub static LAMP_GRAPHICS: InstanceGraphics = InstanceGraphics {
+    svg: include_image!("../assets/led-lamp.svg"),
+    pins: &[PinInfo {
+        kind: PinKind::Input,
+        offset: Vec2::new(-40.0, 0.0),
+    }],
+};

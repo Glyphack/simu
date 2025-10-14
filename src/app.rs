@@ -72,6 +72,7 @@ pub enum InstancePosOffset {
     Gate(GateKind, Vec2),
     Power(Vec2),
     Wire(Vec2, Vec2),
+    Lamp(Vec2),
     // Index to definition
     CustomCircuit(usize, Vec2),
 }
@@ -81,6 +82,7 @@ pub enum InstanceKind {
     Gate(GateKind),
     Power,
     Wire,
+    Lamp,
     CustomCircuit(usize),
 }
 
@@ -190,6 +192,21 @@ impl Power {
 
 // Power end
 
+// Lamp
+
+#[derive(serde::Deserialize, serde::Serialize, Copy, Debug, Clone)]
+pub struct Lamp {
+    pub pos: Pos2,
+}
+
+impl Lamp {
+    fn graphics(&self) -> &assets::InstanceGraphics {
+        &assets::LAMP_GRAPHICS
+    }
+}
+
+// Lamp end
+
 #[derive(serde::Deserialize, serde::Serialize, Copy, Debug, Clone)]
 pub struct Wire {
     pub start: Pos2,
@@ -243,6 +260,7 @@ pub struct DB {
     pub gates: SecondaryMap<InstanceId, Gate>,
     pub powers: SecondaryMap<InstanceId, Power>,
     pub wires: SecondaryMap<InstanceId, Wire>,
+    pub lamps: SecondaryMap<InstanceId, Lamp>,
     pub custom_circuits: SecondaryMap<InstanceId, CustomCircuit>,
     // Definition of custom circuits created by the user
     pub custom_circuit_definitions: Vec<CustomCircuitDefinition>,
@@ -276,6 +294,13 @@ impl DB {
         let k = self.instances.insert(());
         self.wires.insert(k, w);
         self.types.insert(k, InstanceKind::Wire);
+        k
+    }
+
+    pub fn new_lamp(&mut self, l: Lamp) -> InstanceId {
+        let k = self.instances.insert(());
+        self.lamps.insert(k, l);
+        self.types.insert(k, InstanceKind::Lamp);
         k
     }
 
@@ -317,6 +342,14 @@ impl DB {
 
     pub fn get_wire_mut(&mut self, id: InstanceId) -> &mut Wire {
         self.wires.get_mut(id).expect("wire not found (mut)")
+    }
+
+    pub fn get_lamp(&self, id: InstanceId) -> &Lamp {
+        self.lamps.get(id).expect("lamp not found")
+    }
+
+    pub fn get_lamp_mut(&mut self, id: InstanceId) -> &mut Lamp {
+        self.lamps.get_mut(id).expect("lamp not found (mut)")
     }
 
     pub fn get_custom_circuit(&self, id: InstanceId) -> &crate::custom_circuit::CustomCircuit {
@@ -386,6 +419,12 @@ impl DB {
         Pin { ins: id, index: 0 }
     }
 
+    // Lamp
+    pub fn lamp_input(&self, id: InstanceId) -> Pin {
+        self.get_lamp(id); // Type check
+        Pin { ins: id, index: 0 }
+    }
+
     // Custom circuits (variable pins)
     pub fn custom_circuit_pin(&self, id: InstanceId, n: u32) -> Pin {
         let cc = self.get_custom_circuit(id);
@@ -408,6 +447,10 @@ impl DB {
                 (0..n as u32).map(|i| Pin { ins: id, index: i }).collect()
             }
             InstanceKind::Wire => vec![Pin { ins: id, index: 0 }, Pin { ins: id, index: 1 }],
+            InstanceKind::Lamp => {
+                let n = assets::LAMP_GRAPHICS.pins.len();
+                (0..n as u32).map(|i| Pin { ins: id, index: i }).collect()
+            }
             InstanceKind::CustomCircuit(_) => {
                 let cc = self.get_custom_circuit(id);
                 if cc.definition_index < self.custom_circuit_definitions.len() {
@@ -438,6 +481,11 @@ impl DB {
                 let w = self.get_wire(pin.ins);
                 if pin.index == 0 { w.start } else { w.end }
             }
+            InstanceKind::Lamp => {
+                let l = self.get_lamp(pin.ins);
+                let info = l.graphics().pins[pin.index as usize];
+                l.pos + info.offset
+            }
             InstanceKind::CustomCircuit(_) => {
                 let cc = self.get_custom_circuit(pin.ins);
                 cc.pos + self.pin_offset(pin)
@@ -464,6 +512,11 @@ impl DB {
                 } else {
                     center - w.end
                 }
+            }
+            InstanceKind::Lamp => {
+                let l = self.get_lamp(pin.ins);
+                let info = l.graphics().pins[pin.index as usize];
+                info.offset
             }
             InstanceKind::CustomCircuit(_) => {
                 let cc = self.get_custom_circuit(pin.ins);
@@ -512,6 +565,10 @@ impl DB {
                     let w = self.get_wire_mut(*id);
                     w.start += delta;
                     w.end += delta;
+                }
+                InstanceKind::Lamp => {
+                    let l = self.get_lamp_mut(*id);
+                    l.pos += delta;
                 }
                 InstanceKind::CustomCircuit(_) => {
                     let cc = self.get_custom_circuit_mut(*id);
@@ -564,6 +621,10 @@ impl DB {
                 w.start += delta;
                 w.end += delta;
             }
+            InstanceKind::Lamp => {
+                let l = self.get_lamp_mut(id);
+                l.pos += delta;
+            }
             InstanceKind::CustomCircuit(_) => {
                 let cc = self.get_custom_circuit_mut(id);
                 cc.pos += delta;
@@ -605,7 +666,10 @@ impl DB {
                     // Mark as visited but don't propagate further (wires are endpoints)
                     visited.insert(connected_id);
                 }
-                InstanceKind::Gate(_) | InstanceKind::Power | InstanceKind::CustomCircuit(_) => {
+                InstanceKind::Gate(_)
+                | InstanceKind::Power
+                | InstanceKind::Lamp
+                | InstanceKind::CustomCircuit(_) => {
                     // For non-wires, propagate the same delta
                     self.move_instance_and_propagate_recursive(connected_id, delta, visited);
                 }
@@ -787,6 +851,7 @@ impl App {
                 self.draw_panel_button(ui, InstanceKind::Gate(GateKind::Xor));
                 self.draw_panel_button(ui, InstanceKind::Gate(GateKind::Xnor));
                 self.draw_panel_button(ui, InstanceKind::Power);
+                self.draw_panel_button(ui, InstanceKind::Lamp);
                 self.draw_panel_button(ui, InstanceKind::Wire);
 
                 if !self.db.custom_circuit_definitions.is_empty() {
@@ -838,6 +903,11 @@ impl App {
                 .max_height(PANEL_BUTTON_MAX_HEIGHT);
                 ui.add(egui::ImageButton::new(s).sense(Sense::click_and_drag()))
             }
+            InstanceKind::Lamp => {
+                let s = get_icon(ui, Lamp { pos: Pos2::ZERO }.graphics().svg.clone())
+                    .max_height(PANEL_BUTTON_MAX_HEIGHT);
+                ui.add(egui::ImageButton::new(s).sense(Sense::click_and_drag()))
+            }
             InstanceKind::Wire => ui.add(
                 Button::new("Wire")
                     .sense(Sense::click_and_drag())
@@ -861,6 +931,7 @@ impl App {
                 InstanceKind::Gate(kind) => self.db.new_gate(Gate { pos, kind }),
                 InstanceKind::Power => self.db.new_power(Power { pos, on: true }),
                 InstanceKind::Wire => self.db.new_wire(Wire::new_at(pos)),
+                InstanceKind::Lamp => self.db.new_lamp(Lamp { pos }),
                 InstanceKind::CustomCircuit(c) => self.db.new_custom_circuit(CustomCircuit {
                     pos,
                     definition_index: c,
@@ -951,6 +1022,7 @@ impl App {
         self.db.gates.remove(id);
         self.db.powers.remove(id);
         self.db.wires.remove(id);
+        self.db.lamps.remove(id);
         self.db.custom_circuits.remove(id);
         self.db.connections.retain(|c| !c.involves_instance(id));
         self.hovered.take();
@@ -1061,6 +1133,9 @@ impl App {
         }
         for (id, power) in &self.db.powers {
             self.draw_power(ui, id, power);
+        }
+        for (id, lamp) in &self.db.lamps {
+            self.draw_lamp(ui, id, lamp);
         }
         for (id, custom_circuit) in &self.db.custom_circuits {
             self.draw_custom_circuit(ui, id, custom_circuit);
@@ -1210,6 +1285,48 @@ impl App {
         let power = Power { pos, on: true };
         let screen_center = pos - self.viewport_offset;
         self.draw_instance_graphics(ui, power.graphics(), screen_center, |_| false);
+    }
+
+    fn draw_lamp(&self, ui: &mut Ui, id: InstanceId, lamp: &Lamp) {
+        let has_current = self.current.contains(&self.db.lamp_input(id));
+        let screen_center = lamp.pos - self.viewport_offset;
+
+        if has_current {
+            let glow_radius = 60.0;
+            let gradient_steps = 30;
+            for i in 0..gradient_steps {
+                let t = i as f32 / gradient_steps as f32;
+                let radius = glow_radius * (1.0 - t);
+                let alpha = (255.0 * (1.0 - t) * 0.4) as u8;
+                ui.painter().circle_filled(
+                    screen_center,
+                    radius,
+                    Color32::from_rgba_unmultiplied(255, 255, 0, alpha),
+                );
+            }
+        }
+
+        self.draw_instance_graphics(ui, lamp.graphics(), screen_center, |pin_index| {
+            self.current.contains(&Pin {
+                ins: id,
+                index: pin_index as u32,
+            })
+        });
+
+        if has_current {
+            let rect = Rect::from_center_size(screen_center, self.canvas_config.base_gate_size);
+            ui.painter().rect_filled(
+                rect,
+                CornerRadius::default(),
+                Color32::from_rgba_unmultiplied(255, 255, 0, 80),
+            );
+        }
+    }
+
+    pub fn draw_lamp_preview(&self, ui: &mut Ui, pos: Pos2) {
+        let lamp = Lamp { pos };
+        let screen_center = pos - self.viewport_offset;
+        self.draw_instance_graphics(ui, lamp.graphics(), screen_center, |_| false);
     }
 
     fn draw_custom_circuit(
@@ -1394,7 +1511,10 @@ impl App {
                         return Some(Hover::Instance(*selected));
                     }
                 }
-                InstanceKind::Gate(_) | InstanceKind::Power | InstanceKind::CustomCircuit(_) => {}
+                InstanceKind::Gate(_)
+                | InstanceKind::Power
+                | InstanceKind::Lamp
+                | InstanceKind::CustomCircuit(_) => {}
             }
         }
 
@@ -1408,6 +1528,14 @@ impl App {
         }
 
         for (k, _) in &self.db.gates {
+            for pin in self.db.pins_of(k) {
+                if self.db.pin_position(pin).distance(mouse_pos) < PIN_HOVER_THRESHOLD {
+                    return Some(Hover::Pin(pin));
+                }
+            }
+        }
+
+        for (k, _) in &self.db.lamps {
             for pin in self.db.pins_of(k) {
                 if self.db.pin_position(pin).distance(mouse_pos) < PIN_HOVER_THRESHOLD {
                     return Some(Hover::Pin(pin));
@@ -1435,6 +1563,12 @@ impl App {
         }
         for (k, gate) in &self.db.gates {
             let rect = Rect::from_center_size(gate.pos, self.canvas_config.base_gate_size);
+            if rect.contains(mouse_pos) {
+                return Some(Hover::Instance(k));
+            }
+        }
+        for (k, lamp) in &self.db.lamps {
+            let rect = Rect::from_center_size(lamp.pos, self.canvas_config.base_gate_size);
             if rect.contains(mouse_pos) {
                 return Some(Hover::Instance(k));
             }
@@ -1479,6 +1613,19 @@ impl App {
                     let power = self.db.get_power(hovered);
                     let outer = Rect::from_center_size(
                         power.pos - self.viewport_offset,
+                        self.canvas_config.base_gate_size + vec2(3.0, 3.0),
+                    );
+                    ui.painter().rect_stroke(
+                        outer,
+                        CornerRadius::default(),
+                        Stroke::new(2.0, COLOR_HOVER_INSTANCE_OUTLINE),
+                        StrokeKind::Middle,
+                    );
+                }
+                InstanceKind::Lamp => {
+                    let lamp = self.db.get_lamp(hovered);
+                    let outer = Rect::from_center_size(
+                        lamp.pos - self.viewport_offset,
                         self.canvas_config.base_gate_size + vec2(3.0, 3.0),
                     );
                     ui.painter().rect_stroke(
@@ -1540,6 +1687,19 @@ impl App {
                         StrokeKind::Outside,
                     );
                 }
+                InstanceKind::Lamp => {
+                    let l = self.db.get_lamp(id);
+                    let r = Rect::from_center_size(
+                        l.pos - self.viewport_offset,
+                        self.canvas_config.base_gate_size + vec2(6.0, 6.0),
+                    );
+                    ui.painter().rect_stroke(
+                        r,
+                        CornerRadius::default(),
+                        Stroke::new(2.0, COLOR_SELECTION_HIGHLIGHT),
+                        StrokeKind::Outside,
+                    );
+                }
                 InstanceKind::Wire => {
                     for pin in self.db.pins_of(id) {
                         let pos = self.db.pin_position(pin);
@@ -1585,6 +1745,14 @@ impl App {
                 let p = self.db.get_power(id);
                 if p.on {
                     current.insert(self.db.power_output(id));
+                }
+            }
+            InstanceKind::Lamp => {
+                let inp = self.db.lamp_input(id);
+                let mut visiting = HashSet::new();
+                let inp_on = self.eval_pin(inp, current, &mut visiting);
+                if inp_on {
+                    current.insert(inp);
                 }
             }
             InstanceKind::Wire => {
@@ -1687,6 +1855,7 @@ impl App {
                         // A full implementation would track their state
                     }
                     crate::app::InstancePosOffset::Wire(..)
+                    | crate::app::InstancePosOffset::Lamp(..)
                     | crate::app::InstancePosOffset::CustomCircuit(..) => {
                         // Wires propagate current from one end to the other
                         // Nested custom circuits would need recursive evaluation
@@ -1785,6 +1954,7 @@ impl App {
                         return true;
                     }
                 }
+                InstanceKind::Lamp | InstanceKind::CustomCircuit(_) => {}
                 InstanceKind::Wire => {
                     let other_end = Pin {
                         ins: other.ins,
@@ -1806,10 +1976,6 @@ impl App {
                             return true;
                         }
                     }
-                }
-                InstanceKind::CustomCircuit(_) => {
-                    // Custom circuits need special handling in simulation
-                    // For now, we don't propagate through them
                 }
             }
         }
@@ -1947,6 +2113,10 @@ impl App {
                     points.push(w.start);
                     points.push(w.end);
                 }
+                InstanceKind::Lamp => {
+                    let l = self.db.get_lamp(id);
+                    points.push(l.pos);
+                }
                 InstanceKind::CustomCircuit(_) => {
                     let cc = self.db.get_custom_circuit(id);
                     points.push(cc.pos);
@@ -1972,6 +2142,10 @@ impl App {
                 InstanceKind::Wire => {
                     let w = self.db.get_wire(id);
                     object_pos.push(InstancePosOffset::Wire(center - w.start, center - w.end));
+                }
+                InstanceKind::Lamp => {
+                    let l = self.db.get_lamp(id);
+                    object_pos.push(InstancePosOffset::Lamp(center - l.pos));
                 }
                 InstanceKind::CustomCircuit(_) => {
                     let cc = self.db.get_custom_circuit(id);
@@ -2004,6 +2178,9 @@ impl App {
                     on: false,
                 }),
                 InstancePosOffset::Wire(s, e) => self.db.new_wire(Wire::new(mouse - s, mouse - e)),
+                InstancePosOffset::Lamp(offset) => self.db.new_lamp(Lamp {
+                    pos: mouse - offset,
+                }),
                 InstancePosOffset::CustomCircuit(def_index, offset) => {
                     self.db.new_custom_circuit(custom_circuit::CustomCircuit {
                         pos: mouse - offset,
@@ -2086,7 +2263,10 @@ impl App {
                     }
                 }
             }
-            InstanceKind::Gate(_) | InstanceKind::Power | InstanceKind::CustomCircuit(_) => {}
+            InstanceKind::Gate(_)
+            | InstanceKind::Power
+            | InstanceKind::Lamp
+            | InstanceKind::CustomCircuit(_) => {}
         }
     }
 

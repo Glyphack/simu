@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use egui::{CornerRadius, Pos2, Rect, Stroke, StrokeKind, Ui, Vec2, pos2};
 
 use crate::app::{
-    App, COLOR_HOVER_PIN_TO_WIRE, COLOR_SELECTION_BOX, Gate, Hover, InstanceId, InstanceKind,
+    App, COLOR_HOVER_PIN_TO_WIRE, COLOR_SELECTION_BOX, Gate, Hover, InstanceId, InstanceKind, Lamp,
     MIN_WIRE_SIZE, Pin, Power, Wire,
 };
 
@@ -121,6 +121,14 @@ impl App {
                         offset,
                     }));
                 }
+                InstanceKind::Lamp => {
+                    let lamp = self.db.get_lamp(instance);
+                    let offset = lamp.pos - mouse;
+                    self.drag = Some(Drag::Canvas(CanvasDrag::Single {
+                        id: instance,
+                        offset,
+                    }));
+                }
                 InstanceKind::CustomCircuit(_) => {
                     let cc = self.db.get_custom_circuit(instance);
                     let offset = cc.pos - mouse;
@@ -141,6 +149,7 @@ impl App {
                 InstanceKind::Wire => {
                     self.draw_wire(ui, &Wire::new_at(mouse), false, false);
                 }
+                InstanceKind::Lamp => self.draw_lamp_preview(ui, mouse),
                 InstanceKind::CustomCircuit(def) => {
                     self.draw_custom_circuit_preview(ui, def, mouse);
                 }
@@ -172,11 +181,12 @@ impl App {
                     let new_pos = mouse + offset;
                     let mut moved = false;
                     match self.db.ty(id) {
-                        InstanceKind::Gate(_) | InstanceKind::Power => {
-                            let current_pos = if let InstanceKind::Gate(_) = self.db.ty(id) {
-                                self.db.get_gate(id).pos
-                            } else {
-                                self.db.get_power(id).pos
+                        InstanceKind::Gate(_) | InstanceKind::Power | InstanceKind::Lamp => {
+                            let current_pos = match self.db.ty(id) {
+                                InstanceKind::Gate(_) => self.db.get_gate(id).pos,
+                                InstanceKind::Power => self.db.get_power(id).pos,
+                                InstanceKind::Lamp => self.db.get_lamp(id).pos,
+                                _ => unreachable!(),
                             };
                             let desired = new_pos - current_pos;
                             let ids = [id];
@@ -334,6 +344,7 @@ impl App {
                         let w = Wire::new_at(pos);
                         self.db.new_wire(w)
                     }
+                    InstanceKind::Lamp => self.db.new_lamp(Lamp { pos }),
                     InstanceKind::CustomCircuit(definition_index) => {
                         self.db
                             .new_custom_circuit(crate::custom_circuit::CustomCircuit {
@@ -370,6 +381,12 @@ impl App {
                 }
                 for (id, p) in &self.db.powers {
                     let r = Rect::from_center_size(p.pos, self.canvas_config.base_gate_size);
+                    if rect.contains_rect(r) {
+                        sel.insert(id);
+                    }
+                }
+                for (id, l) in &self.db.lamps {
+                    let r = Rect::from_center_size(l.pos, self.canvas_config.base_gate_size);
                     if rect.contains_rect(r) {
                         sel.insert(id);
                     }
