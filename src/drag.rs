@@ -3,8 +3,8 @@ use std::collections::HashSet;
 use egui::{CornerRadius, Pos2, Rect, Stroke, StrokeKind, Ui, Vec2, pos2};
 
 use crate::app::{
-    App, COLOR_HOVER_PIN_TO_WIRE, COLOR_SELECTION_BOX, Gate, Hover, InstanceId, InstanceKind, Lamp,
-    MIN_WIRE_SIZE, Pin, Power, Wire,
+    App, COLOR_HOVER_PIN_TO_WIRE, COLOR_SELECTION_BOX, Gate, Hover, InstanceId, InstanceKind,
+    LabelId, Lamp, MIN_WIRE_SIZE, Pin, Power, Wire,
 };
 
 #[derive(serde::Deserialize, serde::Serialize, Debug, Clone, Copy)]
@@ -27,6 +27,10 @@ pub enum Drag {
         kind: InstanceKind,
     },
     Canvas(CanvasDrag),
+    Label {
+        id: LabelId,
+        offset: Vec2,
+    },
     Resize {
         id: InstanceId,
         start: bool,
@@ -62,11 +66,6 @@ impl App {
                 split_point,
                 start_mouse_pos: mouse,
             });
-            return;
-        }
-
-        if !self.selected.is_empty() {
-            self.drag = Some(Drag::Canvas(CanvasDrag::Selected { start: mouse }));
             return;
         }
 
@@ -313,6 +312,14 @@ impl App {
                     );
                 }
             }
+            Some(Drag::Label { id, offset }) => {
+                let new_pos = mouse + offset;
+                let label = self.db.get_label_mut(id);
+                if label.pos != new_pos {
+                    label.pos = new_pos;
+                    self.drag_had_movement = true;
+                }
+            }
             None => {}
         }
 
@@ -405,8 +412,10 @@ impl App {
             Drag::PinToWire {
                 source_pin: _,
                 start_pos: _,
-            } => {
+            }
+            | Drag::Label { id: _, offset: _ } => {
                 // Wire was never created if drag distance was too short
+                // Label position already updated during dragging
                 // Nothing to clean up
             }
             Drag::BranchWire {

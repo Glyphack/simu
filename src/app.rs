@@ -52,6 +52,10 @@ slotmap::new_key_type! {
     pub struct InstanceId;
 }
 
+slotmap::new_key_type! {
+    pub struct LabelId;
+}
+
 #[derive(serde::Deserialize, serde::Serialize, Copy, Debug, Clone)]
 pub enum Hover {
     Pin(Pin),
@@ -67,14 +71,15 @@ impl Hover {
     }
 }
 
-#[derive(serde::Deserialize, serde::Serialize, Copy, Debug, Clone)]
-pub enum InstancePosOffset {
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
+pub enum ClipBoardItem {
     Gate(GateKind, Vec2),
     Power(Vec2),
     Wire(Vec2, Vec2),
     Lamp(Vec2),
     // Index to definition
     CustomCircuit(usize, Vec2),
+    Label(String, Vec2),
 }
 
 #[derive(serde::Deserialize, serde::Serialize, Copy, Debug, Clone)]
@@ -207,6 +212,28 @@ impl Lamp {
 
 // Lamp end
 
+// Label
+
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
+pub struct Label {
+    pub pos: Pos2,
+    pub text: String,
+}
+
+/// Label is a visual annotation that user can place anywhere in the canvas.
+/// Therefore it is not an instance like Gate because it does nothing.
+/// It is handled separately in the code.
+impl Label {
+    pub fn new(pos: Pos2) -> Self {
+        Self {
+            pos,
+            text: String::from("Label"),
+        }
+    }
+}
+
+// Label end
+
 #[derive(serde::Deserialize, serde::Serialize, Copy, Debug, Clone)]
 pub struct Wire {
     pub start: Pos2,
@@ -265,6 +292,8 @@ pub struct DB {
     // Definition of custom circuits created by the user
     pub custom_circuit_definitions: Vec<CustomCircuitDefinition>,
     pub connections: HashSet<Connection>,
+    // Labels
+    pub labels: SlotMap<LabelId, Label>,
 }
 
 impl DB {
@@ -434,6 +463,18 @@ impl DB {
             "Pin index out of bounds for custom circuit"
         );
         Pin { ins: id, index: n }
+    }
+
+    pub fn new_label(&mut self, label: Label) -> LabelId {
+        self.labels.insert(label)
+    }
+
+    pub fn get_label(&self, id: LabelId) -> &Label {
+        self.labels.get(id).expect("label not found")
+    }
+
+    pub fn get_label_mut(&mut self, id: LabelId) -> &mut Label {
+        self.labels.get_mut(id).expect("label not found (mut)")
     }
 
     pub fn pins_of(&self, id: InstanceId) -> Vec<Pin> {
@@ -695,11 +736,11 @@ pub struct App {
     pub current_dirty: bool,
     pub show_debug: bool,
     // selection set and move preview
+    // TODO: Selection is not handling labels.
     pub selected: HashSet<InstanceId>,
-    pub clicked_on: Option<InstanceId>,
     pub drag_had_movement: bool,
     //Copied. Items with their offset compared to a middle point in the rectangle
-    pub clipboard: Vec<InstancePosOffset>,
+    pub clipboard: Vec<ClipBoardItem>,
     // Where are we in the world
     pub viewport_offset: Vec2,
     // For web load functionality - stores pending JSON to load
@@ -714,6 +755,11 @@ pub struct App {
     pub show_right_click_actions_menu: bool,
     #[serde(skip)]
     pub context_menu_pos: Pos2,
+    // Label editing state
+    #[serde(skip)]
+    pub editing_label: Option<LabelId>,
+    #[serde(skip)]
+    pub label_edit_buffer: String,
 }
 
 impl Default for App {
@@ -731,7 +777,6 @@ impl Default for App {
             current_dirty: true,
             show_debug: true,
             selected: Default::default(),
-            clicked_on: Default::default(),
             drag_had_movement: false,
             clipboard: Default::default(),
             pending_load_json: None,
@@ -740,6 +785,8 @@ impl Default for App {
             panel_width: 0.0,
             show_right_click_actions_menu: false,
             context_menu_pos: Pos2::ZERO,
+            editing_label: None,
+            label_edit_buffer: String::new(),
         }
     }
 }
@@ -854,6 +901,9 @@ impl App {
                 self.draw_panel_button(ui, InstanceKind::Lamp);
                 self.draw_panel_button(ui, InstanceKind::Wire);
 
+                ui.add_space(8.0);
+                self.draw_label_button(ui);
+
                 if !self.db.custom_circuit_definitions.is_empty() {
                     ui.add_space(8.0);
                     ui.label("Custom Circuits:");
@@ -947,6 +997,32 @@ impl App {
         resp
     }
 
+    fn draw_label_button(&mut self, ui: &mut Ui) -> Response {
+        let resp = ui.add(
+            Button::new("Label")
+                .sense(Sense::click_and_drag())
+                .min_size(vec2(78.0, 30.0)),
+        );
+
+        let mouse_pos_world = ui
+            .ctx()
+            .pointer_interact_pos()
+            .map(|p| self.screen_to_world(p));
+
+        if resp.drag_started()
+            && let Some(pos) = mouse_pos_world
+        {
+            let id = self.db.new_label(Label::new(pos));
+            self.drag = Some(Drag::Label {
+                id,
+                offset: Vec2::ZERO,
+            });
+        }
+        ui.add_space(8.0);
+
+        resp
+    }
+
     fn handle_panning(
         &mut self,
         ui: &Ui,
@@ -1001,13 +1077,11 @@ impl App {
 
         if bs_pressed || d_pressed {
             if let Some(id) = self.hovered.take() {
-                let id = match id {
-                    Hover::Pin(pin) => pin.ins,
-                    Hover::Instance(instance_id) => instance_id,
-                };
-                self.delete_instance(id);
+                match id {
+                    Hover::Pin(pin) => self.delete_instance(pin.ins),
+                    Hover::Instance(instance_id) => self.delete_instance(instance_id),
+                }
             } else if self.hovered.is_none() && !self.selected.is_empty() {
-                // Collect Iavoid mutable borrow conflict
                 let ids_to_delete: Vec<InstanceId> = self.selected.drain().collect();
                 for id in ids_to_delete {
                     self.delete_instance(id);
@@ -1035,8 +1109,17 @@ impl App {
         self.connection_manager.rebuild_spatial_index(&self.db);
     }
 
+    pub fn delete_label(&mut self, id: LabelId) {
+        self.db.labels.remove(id);
+        if self.editing_label == Some(id) {
+            self.editing_label = None;
+        }
+        self.hovered.take();
+        self.drag.take();
+    }
+
     fn draw_canvas(&mut self, ui: &mut Ui) {
-        let (resp, _painter) = ui.allocate_painter(ui.available_size(), Sense::hover());
+        let (resp, _painter) = ui.allocate_painter(ui.available_size(), Sense::click());
         let canvas_rect = resp.rect;
 
         // Set clip rectangle to prevent canvas objects from drawing outside canvas bounds
@@ -1049,23 +1132,44 @@ impl App {
         let right_released = ui.input(|i| i.pointer.secondary_released());
         let right_down = ui.input(|i| i.pointer.secondary_down());
         let right_clicked = ui.input(|i| i.pointer.secondary_clicked());
+        let enter_pressed = ui.input(|i| i.key_pressed(egui::Key::Enter));
         let mouse_pos_world = ui
             .ctx()
             .pointer_interact_pos()
             .map(|p| self.screen_to_world(p));
         let mouse_is_visible = ui.ctx().input(|i| i.pointer.has_pointer());
+        let esc_pressed = ui.input(|i| i.key_released(egui::Key::Escape));
 
         self.handle_panning(ui, right_down, right_released, mouse_is_visible);
         self.handle_copy_pasting(ui, mouse_pos_world);
         self.handle_deletion(ui);
 
+        if let Some(editing_id) = self.editing_label {
+            let label = self.db.get_label_mut(editing_id);
+            label.text = self.label_edit_buffer.clone();
+            if mouse_up || enter_pressed || esc_pressed {
+                self.editing_label = None;
+                self.label_edit_buffer.clear();
+            }
+        }
+
+        // Handle double-click on empty canvas to create new label
+        if resp.double_clicked()
+            && self.hovered.is_none()
+            && !self.drag_had_movement
+            && let Some(mouse) = mouse_pos_world
+        {
+            let id = self.db.new_label(Label::new(mouse));
+            self.editing_label = Some(id);
+            self.label_edit_buffer = String::from("Label");
+        }
+
         if let Some(mouse) = mouse_pos_world {
             let dragging = self.drag.is_some();
             let hovered_now = self.get_hovered(mouse);
 
-            if mouse_clicked && self.drag.is_none() {
+            if mouse_clicked {
                 self.hovered = hovered_now;
-                self.clicked_on = hovered_now.map(|h| h.instance());
                 self.handle_drag_start_canvas(mouse);
             }
 
@@ -1095,7 +1199,6 @@ impl App {
                         self.selected.insert(id);
                     }
                 }
-                self.clicked_on = None;
                 self.hovered = hovered_now;
             }
         }
@@ -1103,7 +1206,6 @@ impl App {
             self.highlight_selected_actions(ui, mouse_pos_world, mouse_clicked);
         }
 
-        // Toggle power
         if right_clicked
             && let Some(id) = self.hovered.as_ref().map(|i| i.instance())
             && matches!(self.db.ty(id), InstanceKind::Power)
@@ -1150,6 +1252,16 @@ impl App {
                     .is_some_and(|f| matches!(f, Hover::Instance(_)) && f.instance() == id),
                 has_current,
             );
+        }
+        // Collect labels to avoid borrowing issues
+        let labels: Vec<(LabelId, Label)> = self
+            .db
+            .labels
+            .iter()
+            .map(|(id, label)| (id, label.clone()))
+            .collect();
+        for (id, label) in labels {
+            self.draw_label(ui, id, &label);
         }
 
         for c in &self.potential_connections {
@@ -1463,6 +1575,67 @@ impl App {
         );
     }
 
+    fn draw_label(&mut self, ui: &mut Ui, id: LabelId, label: &Label) {
+        let screen_pos = label.pos - self.viewport_offset;
+
+        let is_editing = matches!(self.editing_label, Some(editing_id) if editing_id == id);
+
+        let text_color = if ui.visuals().dark_mode {
+            Color32::WHITE
+        } else {
+            Color32::BLACK
+        };
+
+        if is_editing {
+            let text_size = ui
+                .painter()
+                .layout_no_wrap(
+                    self.label_edit_buffer.clone(),
+                    egui::FontId::proportional(16.0),
+                    text_color,
+                )
+                .size();
+
+            let text_edit_size = vec2(text_size.x.max(100.0), text_size.y);
+            let rect = Rect::from_center_size(screen_pos, text_edit_size + vec2(8.0, 4.0));
+
+            let text_edit = egui::TextEdit::singleline(&mut self.label_edit_buffer)
+                .desired_width(text_edit_size.x)
+                .font(egui::FontId::proportional(16.0));
+
+            ui.put(rect, text_edit).request_focus();
+        } else {
+            let text_size = ui
+                .painter()
+                .layout_no_wrap(
+                    label.text.clone(),
+                    egui::FontId::proportional(16.0),
+                    text_color,
+                )
+                .size();
+
+            let rect = Rect::from_center_size(screen_pos, text_size + vec2(8.0, 4.0));
+
+            let response = ui.allocate_rect(rect, Sense::click());
+
+            ui.painter().text(
+                screen_pos,
+                egui::Align2::CENTER_CENTER,
+                &label.text,
+                egui::FontId::proportional(16.0),
+                text_color,
+            );
+
+            if response.double_clicked() {
+                self.editing_label = Some(id);
+                self.label_edit_buffer = label.text.clone();
+            }
+            if response.hovered() && ui.input(|i| i.key_pressed(egui::Key::D)) {
+                self.delete_label(id);
+            }
+        }
+    }
+
     pub fn get_hovered(&self, mouse_pos: Pos2) -> Option<Hover> {
         if let Some(v) = self.drag {
             match v {
@@ -1494,7 +1667,7 @@ impl App {
                 } => {
                     return Some(Hover::Instance(original_wire_id));
                 }
-                Drag::Panel { .. } | Drag::Selecting { .. } => {}
+                Drag::Panel { .. } | Drag::Selecting { .. } | Drag::Label { .. } => {}
             }
         }
         for selected in &self.selected {
@@ -1838,7 +2011,7 @@ impl App {
             // Evaluate each internal component
             for component in &definition.internal_components {
                 match component {
-                    crate::app::InstancePosOffset::Gate(gate_kind, _offset) => {
+                    crate::app::ClipBoardItem::Gate(gate_kind, _offset) => {
                         // For simplicity, we'll implement a basic gate evaluation
                         // This assumes the standard gate pin layout: input A (0), output (1), input B (2)
                         // Note: This is a simplified approach - a full implementation would need
@@ -1849,16 +2022,18 @@ impl App {
                             &mut internal_current,
                         );
                     }
-                    crate::app::InstancePosOffset::Power(_offset) => {
+                    crate::app::ClipBoardItem::Power(_offset) => {
                         // Powers in the internal circuit should activate their output pins
                         // For now, we'll assume they're always on when included in a custom circuit
                         // A full implementation would track their state
                     }
-                    crate::app::InstancePosOffset::Wire(..)
-                    | crate::app::InstancePosOffset::Lamp(..)
-                    | crate::app::InstancePosOffset::CustomCircuit(..) => {
+                    crate::app::ClipBoardItem::Wire(..)
+                    | crate::app::ClipBoardItem::CustomCircuit(..)
+                    | crate::app::ClipBoardItem::Lamp(..)
+                    | crate::app::ClipBoardItem::Label(..) => {
                         // Wires propagate current from one end to the other
                         // Nested custom circuits would need recursive evaluation
+                        // Labels are not evaluated (visual only)
                         // For now, these cases are handled by connection processing
                     }
                 }
@@ -2002,6 +2177,8 @@ impl App {
         writeln!(out, "potential_conns: {}", self.potential_connections.len()).ok();
         writeln!(out, "clipboard: {:?}", self.clipboard).ok();
         writeln!(out, "selected: {:?}", self.selected).ok();
+        writeln!(out, "editing_label: {:?}", self.editing_label).ok();
+        writeln!(out, "label_edit_buffer: {}", self.label_edit_buffer).ok();
 
         let mouse_pos_world = ui
             .ctx()
@@ -2096,7 +2273,7 @@ impl App {
     pub fn extract_instances_with_offsets(
         &self,
         instances: &HashSet<InstanceId>,
-    ) -> (Rect, Vec<InstancePosOffset>) {
+    ) -> (Rect, Vec<ClipBoardItem>) {
         let mut points = vec![];
         for &id in instances {
             match self.db.ty(id) {
@@ -2133,23 +2310,23 @@ impl App {
             match ty {
                 InstanceKind::Gate(kind) => {
                     let g = self.db.get_gate(id);
-                    object_pos.push(InstancePosOffset::Gate(kind, center - g.pos));
+                    object_pos.push(ClipBoardItem::Gate(kind, center - g.pos));
                 }
                 InstanceKind::Power => {
                     let p = self.db.get_power(id);
-                    object_pos.push(InstancePosOffset::Power(center - p.pos));
+                    object_pos.push(ClipBoardItem::Power(center - p.pos));
                 }
                 InstanceKind::Wire => {
                     let w = self.db.get_wire(id);
-                    object_pos.push(InstancePosOffset::Wire(center - w.start, center - w.end));
+                    object_pos.push(ClipBoardItem::Wire(center - w.start, center - w.end));
                 }
                 InstanceKind::Lamp => {
                     let l = self.db.get_lamp(id);
-                    object_pos.push(InstancePosOffset::Lamp(center - l.pos));
+                    object_pos.push(ClipBoardItem::Lamp(center - l.pos));
                 }
                 InstanceKind::CustomCircuit(_) => {
                     let cc = self.db.get_custom_circuit(id);
-                    object_pos.push(InstancePosOffset::CustomCircuit(
+                    object_pos.push(ClipBoardItem::CustomCircuit(
                         cc.definition_index,
                         center - cc.pos,
                     ));
@@ -2168,28 +2345,49 @@ impl App {
     fn paste_from_clipboard(&mut self, mouse: Pos2) {
         self.selected.clear(); // Clear existing selection before pasting new items
         for to_paste in self.clipboard.clone() {
-            let id = match to_paste {
-                InstancePosOffset::Gate(gate_kind, offset) => self.db.new_gate(Gate {
-                    kind: gate_kind,
-                    pos: mouse - offset,
-                }),
-                InstancePosOffset::Power(offset) => self.db.new_power(Power {
-                    pos: mouse - offset,
-                    on: false,
-                }),
-                InstancePosOffset::Wire(s, e) => self.db.new_wire(Wire::new(mouse - s, mouse - e)),
-                InstancePosOffset::Lamp(offset) => self.db.new_lamp(Lamp {
-                    pos: mouse - offset,
-                }),
-                InstancePosOffset::CustomCircuit(def_index, offset) => {
-                    self.db.new_custom_circuit(custom_circuit::CustomCircuit {
+            match to_paste {
+                ClipBoardItem::Gate(gate_kind, offset) => {
+                    let id = self.db.new_gate(Gate {
+                        kind: gate_kind,
+                        pos: mouse - offset,
+                    });
+                    self.connection_manager.mark_instance_dirty(id);
+                    self.selected.insert(id);
+                }
+                ClipBoardItem::Power(offset) => {
+                    let id = self.db.new_power(Power {
+                        pos: mouse - offset,
+                        on: false,
+                    });
+                    self.connection_manager.mark_instance_dirty(id);
+                    self.selected.insert(id);
+                }
+                ClipBoardItem::Wire(s, e) => {
+                    let id = self.db.new_wire(Wire::new(mouse - s, mouse - e));
+                    self.connection_manager.mark_instance_dirty(id);
+                    self.selected.insert(id);
+                }
+                ClipBoardItem::CustomCircuit(def_index, offset) => {
+                    let id = self.db.new_custom_circuit(custom_circuit::CustomCircuit {
                         pos: mouse - offset,
                         definition_index: def_index,
-                    })
+                    });
+                    self.connection_manager.mark_instance_dirty(id);
+                    self.selected.insert(id);
                 }
-            };
-            self.connection_manager.mark_instance_dirty(id);
-            self.selected.insert(id);
+                ClipBoardItem::Lamp(offset) => {
+                    let id = self.db.new_lamp(Lamp {
+                        pos: mouse - offset,
+                    });
+                    self.selected.insert(id);
+                }
+                ClipBoardItem::Label(text, offset) => {
+                    let _id = self.db.new_label(Label {
+                        pos: mouse - offset,
+                        text,
+                    });
+                }
+            }
         }
         self.connection_manager.rebuild_spatial_index(&self.db);
     }

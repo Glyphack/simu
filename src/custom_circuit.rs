@@ -3,14 +3,14 @@ use std::collections::HashSet;
 use egui::{Pos2, Rect, Vec2};
 
 use crate::{
-    app::{App, Connection, InstanceId, InstancePosOffset, Pin},
+    app::{App, ClipBoardItem, Connection, InstanceId, Pin},
     assets,
 };
 
 #[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
 pub struct CustomCircuitDefinition {
     pub name: String,
-    pub internal_components: Vec<InstancePosOffset>,
+    pub internal_components: Vec<ClipBoardItem>,
     pub internal_connections: Vec<Connection>,
     pub external_pins: Vec<CustomCircuitPin>,
 }
