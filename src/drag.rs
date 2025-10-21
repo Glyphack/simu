@@ -83,53 +83,59 @@ impl App {
                     start_pos: pin_pos,
                 });
             }
-            Hover::Instance(instance) => match self.db.ty(instance) {
-                InstanceKind::Gate(_) => {
-                    let gate = self.db.get_gate(instance);
-                    let offset = gate.pos - mouse;
-                    self.drag = Some(Drag::Canvas(CanvasDrag::Single {
-                        id: instance,
-                        offset,
-                    }));
+            Hover::Instance(instance) => {
+                if self.selected.contains(&instance) {
+                    self.drag = Some(Drag::Canvas(CanvasDrag::Selected { start: mouse }));
+                    return;
                 }
-                InstanceKind::Power => {
-                    let power = self.db.get_power(instance);
-                    let offset = power.pos - mouse;
-                    self.drag = Some(Drag::Canvas(CanvasDrag::Single {
-                        id: instance,
-                        offset,
-                    }));
-                }
-                InstanceKind::Wire => {
-                    let wire = self.db.get_wire(instance);
+                match self.db.ty(instance) {
+                    InstanceKind::Gate(_) => {
+                        let gate = self.db.get_gate(instance);
+                        let offset = gate.pos - mouse;
+                        self.drag = Some(Drag::Canvas(CanvasDrag::Single {
+                            id: instance,
+                            offset,
+                        }));
+                    }
+                    InstanceKind::Power => {
+                        let power = self.db.get_power(instance);
+                        let offset = power.pos - mouse;
+                        self.drag = Some(Drag::Canvas(CanvasDrag::Single {
+                            id: instance,
+                            offset,
+                        }));
+                    }
+                    InstanceKind::Wire => {
+                        let wire = self.db.get_wire(instance);
 
-                    let wire_center = pos2(
-                        (wire.start.x + wire.end.x) * 0.5,
-                        (wire.start.y + wire.end.y) * 0.5,
-                    );
-                    let offset = wire_center - mouse;
-                    self.drag = Some(Drag::Canvas(CanvasDrag::Single {
-                        id: instance,
-                        offset,
-                    }));
+                        let wire_center = pos2(
+                            (wire.start.x + wire.end.x) * 0.5,
+                            (wire.start.y + wire.end.y) * 0.5,
+                        );
+                        let offset = wire_center - mouse;
+                        self.drag = Some(Drag::Canvas(CanvasDrag::Single {
+                            id: instance,
+                            offset,
+                        }));
+                    }
+                    InstanceKind::Lamp => {
+                        let lamp = self.db.get_lamp(instance);
+                        let offset = lamp.pos - mouse;
+                        self.drag = Some(Drag::Canvas(CanvasDrag::Single {
+                            id: instance,
+                            offset,
+                        }));
+                    }
+                    InstanceKind::CustomCircuit(_) => {
+                        let cc = self.db.get_custom_circuit(instance);
+                        let offset = cc.pos - mouse;
+                        self.drag = Some(Drag::Canvas(CanvasDrag::Single {
+                            id: instance,
+                            offset,
+                        }));
+                    }
                 }
-                InstanceKind::Lamp => {
-                    let lamp = self.db.get_lamp(instance);
-                    let offset = lamp.pos - mouse;
-                    self.drag = Some(Drag::Canvas(CanvasDrag::Single {
-                        id: instance,
-                        offset,
-                    }));
-                }
-                InstanceKind::CustomCircuit(_) => {
-                    let cc = self.db.get_custom_circuit(instance);
-                    let offset = cc.pos - mouse;
-                    self.drag = Some(Drag::Canvas(CanvasDrag::Single {
-                        id: instance,
-                        offset,
-                    }));
-                }
-            },
+            }
         }
     }
 
@@ -265,7 +271,6 @@ impl App {
 
                     self.drag_had_movement = true;
                     self.connection_manager.mark_instance_dirty(wire_id);
-                    self.current_dirty = true;
                 } else if drag_distance > 2.0 {
                     ui.painter().line_segment(
                         [
@@ -354,18 +359,14 @@ impl App {
                     }
                 };
                 self.connection_manager.mark_instance_dirty(id);
-                self.connection_manager.rebuild_spatial_index(&self.db);
-                self.current_dirty = true;
             }
             Drag::Canvas(canvas_drag) => match canvas_drag {
                 CanvasDrag::Single { id, offset: _ } => {
                     self.connection_manager.mark_instance_dirty(id);
-                    self.connection_manager.rebuild_spatial_index(&self.db);
                 }
                 CanvasDrag::Selected { start: _ } => {
                     let selected: Vec<InstanceId> = self.selected.iter().copied().collect();
                     self.connection_manager.mark_instances_dirty(&selected);
-                    self.connection_manager.rebuild_spatial_index(&self.db);
                 }
             },
             Drag::Selecting { start } => {
@@ -400,7 +401,6 @@ impl App {
             }
             Drag::Resize { id, start: _ } => {
                 self.connection_manager.mark_instance_dirty(id);
-                self.connection_manager.rebuild_spatial_index(&self.db);
             }
             Drag::PinToWire {
                 source_pin: _,
@@ -418,9 +418,10 @@ impl App {
             } => {
                 self.connection_manager
                     .mark_instance_dirty(original_wire_id);
-                self.connection_manager.rebuild_spatial_index(&self.db);
             }
         }
+        self.current_dirty = true;
+        self.connection_manager.rebuild_spatial_index(&self.db);
         self.potential_connections.clear();
         self.drag_had_movement = false;
     }

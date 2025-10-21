@@ -8,7 +8,7 @@ use egui::{
 };
 use slotmap::{SecondaryMap, SlotMap};
 
-use crate::simulator::Simulator;
+use crate::simulator::{SimulationStatus, Simulator, Value};
 use crate::{
     assets::{self},
     config::CanvasConfig,
@@ -156,6 +156,10 @@ impl Connection {
 
     pub fn involves_instance(&self, id: InstanceId) -> bool {
         self.a.ins == id || self.b.ins == id
+    }
+
+    pub fn display(&self, db: &DB) -> String {
+        format!("{} <-> {}", self.a.display(db), self.b.display(db))
     }
 
     fn get_pin_first(&self, pin: Pin) -> Option<(Pin, Pin)> {
@@ -814,8 +818,7 @@ impl DB {
                         .iter()
                         .any(|p| matches!(self.ty(p.ins), InstanceKind::Wire));
 
-                    #[expect(clippy::overly_complex_bool_expr)]
-                    if wire_connected_to_wire && false {
+                    if wire_connected_to_wire {
                         // If connected to another wire, just move the whole wire
                         let w = self.get_wire_mut(pin.ins);
                         w.start += delta;
@@ -932,8 +935,6 @@ pub struct App {
     pub connection_manager: ConnectionManager,
     // possible connections while dragging
     pub potential_connections: HashSet<Connection>,
-    // energized pins based on current simulation
-    pub current: HashSet<Pin>,
     // mark when current needs recomputation
     #[serde(skip)]
     pub current_dirty: bool,
@@ -963,6 +964,9 @@ pub struct App {
     pub editing_label: Option<LabelId>,
     #[serde(skip)]
     pub label_edit_buffer: String,
+    // Simulation service - holds simulation state and results
+    #[serde(skip)]
+    pub simulator: Option<Simulator>,
 }
 
 impl Default for App {
@@ -976,7 +980,6 @@ impl Default for App {
             hovered: Default::default(),
             connection_manager: c,
             potential_connections: Default::default(),
-            current: Default::default(),
             current_dirty: true,
             show_debug: true,
             selected: Default::default(),
@@ -990,6 +993,7 @@ impl Default for App {
             context_menu_pos: Pos2::ZERO,
             editing_label: None,
             label_edit_buffer: String::new(),
+            simulator: None,
         }
     }
 }
@@ -1029,7 +1033,11 @@ impl eframe::App for App {
                 });
                 ui.add_space(16.0);
 
-                egui::widgets::global_theme_preference_buttons(ui);
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    egui::widgets::global_theme_preference_buttons(ui);
+
+                    ui.add_space(16.0);
+                });
             });
         });
 
@@ -1050,7 +1058,14 @@ impl App {
     }
 
     fn is_on(&self, pin: Pin) -> bool {
-        self.current.contains(&pin)
+        let Some(sim) = &self.simulator else {
+            return false;
+        };
+        let Some(v) = sim.current.get(&pin) else {
+            return false;
+        };
+
+        *v == Value::One
     }
 
     pub fn screen_to_world(&self, pos: Pos2) -> Pos2 {
@@ -1132,9 +1147,8 @@ impl App {
                     self.hovered = None;
                     self.selected.clear();
                     self.drag = None;
-                    self.current.clear();
-                    self.current_dirty = false;
                     self.connection_manager = ConnectionManager::new(&self.db);
+                    self.simulator = None;
                 }
             });
     }
@@ -1294,10 +1308,7 @@ impl App {
                 for id in ids_to_delete {
                     self.delete_instance(id);
                 }
-            } else {
-                return;
             }
-            self.current_dirty = true;
         }
     }
 
@@ -1314,10 +1325,9 @@ impl App {
         self.drag.take();
         self.selected.remove(&id);
 
-        // Remove from connection manager tracking
         self.connection_manager.dirty_instances.remove(&id);
-        self.current.retain(|p| p.ins != id);
         self.connection_manager.rebuild_spatial_index(&self.db);
+        self.current_dirty = true;
     }
 
     pub fn delete_label(&mut self, id: LabelId) {
@@ -1346,7 +1356,7 @@ impl App {
         let enter_pressed = ui.input(|i| i.key_pressed(egui::Key::Enter));
         let mouse_pos_world = ui
             .ctx()
-            .pointer_interact_pos()
+            .pointer_hover_pos()
             .map(|p| self.screen_to_world(p));
         let mouse_is_visible = ui.ctx().input(|i| i.pointer.has_pointer());
         let esc_pressed = ui.input(|i| i.key_released(egui::Key::Escape));
@@ -1436,9 +1446,10 @@ impl App {
         //     self.context_menu_pos = mouse_world - self.viewport_offset; // Convert to screen coordinates
         // }
 
-        if self.current_dirty {
+        if self.current_dirty || self.simulator.is_none() {
             let mut sim = Simulator::new(self.db.clone());
-            self.current = sim.compute();
+            sim.compute();
+            self.simulator = Some(sim);
             self.current_dirty = false;
         }
 
@@ -2132,6 +2143,12 @@ impl App {
             self.db.connections.len()
         )
         .ok();
+        let mouse_pos_world = ui
+            .ctx()
+            .pointer_interact_pos()
+            .map(|p| self.screen_to_world(p));
+        writeln!(out, "mouse: {mouse_pos_world:?}").ok();
+
         writeln!(out, "hovered: {:?}", self.hovered).ok();
         writeln!(out, "drag: {:?}", self.drag).ok();
         writeln!(out, "viewport_offset: {:?}", self.viewport_offset).ok();
@@ -2141,73 +2158,92 @@ impl App {
         writeln!(out, "editing_label: {:?}", self.editing_label).ok();
         writeln!(out, "label_edit_buffer: {}", self.label_edit_buffer).ok();
 
-        let mouse_pos_world = ui
-            .ctx()
-            .pointer_interact_pos()
-            .map(|p| self.screen_to_world(p));
-        writeln!(out, "mouse: {mouse_pos_world:?}").ok();
-
-        writeln!(out, "\nInstances:").ok();
-        for (id, _) in &self.db.instances {
-            writeln!(out, "  {id:?}").ok();
+        // Simulation status
+        writeln!(out, "\n=== Simulation Status ===").ok();
+        if let Some(sim) = &self.simulator {
+            match sim.status {
+                SimulationStatus::Stable { iterations } => {
+                    writeln!(out, "Status: STABLE (after {iterations} iterations)").ok();
+                }
+                SimulationStatus::Unstable { max_reached } => {
+                    if max_reached {
+                        let iters = sim.last_iterations;
+                        writeln!(out, "Status: UNSTABLE (max iterations: {iters})").ok();
+                    } else {
+                        writeln!(out, "Status: UNSTABLE").ok();
+                    }
+                }
+                SimulationStatus::Running => {
+                    writeln!(out, "Status: ⏳ RUNNING...").ok();
+                }
+            }
+            let iters = sim.last_iterations;
+            writeln!(out, "Iterations: {iters}").ok();
+            let powered = if let Some(simulator) = &self.simulator {
+                simulator
+                    .current
+                    .iter()
+                    .filter(|v| *v.1 == Value::One)
+                    .count()
+            } else {
+                0
+            };
+            writeln!(out, "Powered pins: {powered}").ok();
+        } else {
+            writeln!(out, "Status: No simulation yet").ok();
         }
 
         writeln!(out, "\nGates:").ok();
         for (id, g) in &self.db.gates {
-            writeln!(
-                out,
-                "  {:?}: kind={:?} pos=({:.1},{:.1})",
-                id, g.kind, g.pos.x, g.pos.y
-            )
-            .ok();
+            writeln!(out, "  {}", g.display(&self.db)).ok();
             // pins
             for (i, pin) in g.kind.graphics().pins.iter().enumerate() {
                 let pin_offset = pin.offset;
                 let p = g.pos + pin_offset;
-                writeln!(out, "    pin#{i} {:?} at ({:.1},{:.1})", pin.kind, p.x, p.y).ok();
+                let pin_instance = Pin {
+                    ins: id,
+                    index: i as u32,
+                };
+                writeln!(
+                    out,
+                    "    {} at ({:.1},{:.1})",
+                    pin_instance.display(&self.db),
+                    p.x,
+                    p.y
+                )
+                .ok();
             }
         }
 
         writeln!(out, "\nPowers:").ok();
         for (id, p) in &self.db.powers {
-            writeln!(
-                out,
-                "  {:?}: on={} pos=({:.1},{:.1})",
-                id, p.on, p.pos.x, p.pos.y
-            )
-            .ok();
+            writeln!(out, "  {}", p.display(&self.db)).ok();
             for (i, pin) in p.graphics().pins.iter().enumerate() {
                 let pin_offset = pin.offset;
                 let pp = p.pos + pin_offset;
+                let pin_instance = Pin {
+                    ins: id,
+                    index: i as u32,
+                };
                 writeln!(
                     out,
-                    "    pin#{i} {:?} at ({:.1},{:.1})",
-                    pin.kind, pp.x, pp.y
+                    "    {} at ({:.1},{:.1})",
+                    pin_instance.display(&self.db),
+                    pp.x,
+                    pp.y
                 )
                 .ok();
             }
         }
 
         writeln!(out, "\nWires:").ok();
-        for (id, w) in &self.db.wires {
-            writeln!(
-                out,
-                "  {:?}: start=({:.1},{:.1}) end=({:.1},{:.1})",
-                id, w.start.x, w.start.y, w.end.x, w.end.y
-            )
-            .ok();
+        for (_id, w) in &self.db.wires {
+            writeln!(out, "  {}", w.display(&self.db)).ok();
         }
 
         writeln!(out, "\nConnections:").ok();
         for c in &self.db.connections {
-            let p1 = self.db.pin_position(c.a);
-            let p2 = self.db.pin_position(c.b);
-            writeln!(
-                out,
-                "  ({:?}:{}) <-> ({:?}:{}) | ({:.1},{:.1})<->({:.1},{:.1})",
-                c.a.ins, c.a.index, c.b.ins, c.b.index, p1.x, p1.y, p2.x, p2.y
-            )
-            .ok();
+            writeln!(out, "  {}", c.display(&self.db)).ok();
         }
 
         if self.potential_connections.is_empty() {
@@ -2215,14 +2251,7 @@ impl App {
         } else {
             writeln!(out, "\nPotential Connections:").ok();
             for c in &self.potential_connections {
-                let p1 = self.db.pin_position(c.a);
-                let p2 = self.db.pin_position(c.b);
-                writeln!(
-                    out,
-                    "  ({:?}:{}) <-> ({:?}:{}) | ({:.1},{:.1})<->({:.1},{:.1})",
-                    c.a.ins, c.a.index, c.b.ins, c.b.index, p1.x, p1.y, p2.x, p2.y
-                )
-                .ok();
+                writeln!(out, "  {}", c.display(&self.db)).ok();
             }
         }
 
@@ -2363,6 +2392,7 @@ impl App {
             }
         }
         self.connection_manager.rebuild_spatial_index(&self.db);
+        self.current_dirty = true;
     }
 
     fn draw_right_click_actions_menu(&mut self, ui: &Ui) {
@@ -2452,7 +2482,6 @@ impl App {
 
         self.connection_manager
             .mark_instances_dirty(&[wire_id, new_wire_id]);
-        self.current_dirty = true;
     }
 
     pub fn wire_branching_action_point(

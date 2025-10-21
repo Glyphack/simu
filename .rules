@@ -23,3 +23,14 @@
 - Naming: snake_case functions/variables, PascalCase types, SCREAMING_SNAKE_CASE constants
 - Error handling: Result/Option types preferred over panics
 - Run `./check.sh` after changes to ensure no warnings/errors
+
+
+Implement your code in TDD style
+
+**TDD Principles**
+
+ - Write tests FIRST, watch them fail
+ - Implement minimal code to pass
+ - Refactor only after tests pass
+ - Each test validates one specific behavior
+ - Tests serve as documentation and specification

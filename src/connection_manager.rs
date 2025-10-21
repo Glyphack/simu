@@ -135,19 +135,12 @@ impl ConnectionManager {
     }
 
     /// Validate if a connection between two pins is allowed
-    fn validate_connection(&self, db: &DB, c: Connection) -> bool {
+    fn validate_connection(&self, _db: &DB, c: Connection) -> bool {
         if c.a == c.b {
             return false;
         }
 
         if c.a.ins == c.b.ins {
-            return false;
-        }
-
-        let pin1_kind = db.pin_info(c.a).kind;
-        let pin2_kind = db.pin_info(c.b).kind;
-
-        if pin1_kind == assets::PinKind::Output && pin2_kind == assets::PinKind::Output {
             return false;
         }
 
