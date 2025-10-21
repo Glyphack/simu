@@ -419,7 +419,6 @@ impl App {
                 self.connection_manager
                     .mark_instance_dirty(original_wire_id);
                 self.connection_manager.rebuild_spatial_index(&self.db);
-                self.current_dirty = true;
             }
         }
         self.potential_connections.clear();

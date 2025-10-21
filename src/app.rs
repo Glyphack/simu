@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::fmt::Write as _;
+use std::fmt::{Display, Write as _};
 use std::hash::Hash;
 
 use egui::{
@@ -53,6 +53,12 @@ slotmap::new_key_type! {
     pub struct InstanceId;
 }
 
+impl Display for InstanceId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&format!("{:?}", self.0))
+    }
+}
+
 slotmap::new_key_type! {
     pub struct LabelId;
 }
@@ -101,7 +107,40 @@ pub struct Pin {
     pub index: u32,
 }
 
-impl Pin {}
+impl Pin {
+    pub fn display(&self, db: &DB) -> String {
+        let instance_display = match db.ty(self.ins) {
+            InstanceKind::Gate(_) => {
+                let gate = db.get_gate(self.ins);
+                gate.display(db)
+            }
+            InstanceKind::Power => {
+                let power = db.get_power(self.ins);
+                power.display(db)
+            }
+            InstanceKind::Wire => {
+                let wire = db.get_wire(self.ins);
+                wire.display(db)
+            }
+            InstanceKind::Lamp => {
+                let lamp = db.get_lamp(self.ins);
+                lamp.display(db)
+            }
+            InstanceKind::CustomCircuit(_) => format!("CustomCircuit {{ id: {:?} }}", self.ins),
+        };
+        let pin_info = db.pin_info(*self);
+        format!(
+            "{:?} pin#{} in {} ",
+            pin_info.kind, self.index, instance_display,
+        )
+    }
+}
+
+/// Information about a pin's direction
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PinInfo {
+    pub kind: crate::assets::PinKind,
+}
 
 // A normalized, order-independent connection between two pins
 #[derive(serde::Deserialize, serde::Serialize, Copy, Debug, Clone, Eq)]
@@ -152,7 +191,7 @@ pub struct Gate {
     pub kind: GateKind,
 }
 
-#[derive(serde::Deserialize, serde::Serialize, Copy, Debug, Clone)]
+#[derive(serde::Deserialize, serde::Serialize, PartialEq, Eq, Copy, Debug, Clone)]
 pub enum GateKind {
     And,
     Nand,
@@ -175,6 +214,21 @@ impl GateKind {
     }
 }
 
+impl Gate {
+    pub fn display(&self, db: &DB) -> String {
+        // Find the InstanceId for this gate in the database
+        for (id, gate) in &db.gates {
+            if gate.pos == self.pos && gate.kind == self.kind {
+                return format!("({:?} ({}))", self.kind, id);
+            }
+        }
+        format!(
+            "Gate {{ kind: {:?}, pos: ({:.1}, {:.1}) }} - not found in DB",
+            self.kind, self.pos.x, self.pos.y
+        )
+    }
+}
+
 // Gate end
 
 // Power
@@ -187,6 +241,19 @@ pub struct Power {
 }
 
 impl Power {
+    pub fn display(&self, db: &DB) -> String {
+        // Find the InstanceId for this power in the database
+        for (id, power) in &db.powers {
+            if power.pos == self.pos && power.on == self.on {
+                return format!("Power {{ id: {}, on: {}}}", id, self.on);
+            }
+        }
+        format!(
+            "Power {{ on: {}, pos: ({:.1}, {:.1}) }} - not found in DB",
+            self.on, self.pos.x, self.pos.y
+        )
+    }
+
     fn graphics(&self) -> &assets::InstanceGraphics {
         if self.on {
             &assets::POWER_ON_GRAPHICS
@@ -206,6 +273,19 @@ pub struct Lamp {
 }
 
 impl Lamp {
+    pub fn display(&self, db: &DB) -> String {
+        // Find the InstanceId for this lamp in the database
+        for (id, lamp) in &db.lamps {
+            if lamp.pos == self.pos {
+                return format!("Lamp {{ id: {id}}}");
+            }
+        }
+        format!(
+            "Lamp {{ pos: ({:.1}, {:.1}) }} - not found in DB",
+            self.pos.x, self.pos.y
+        )
+    }
+
     fn graphics(&self) -> &assets::InstanceGraphics {
         &assets::LAMP_GRAPHICS
     }
@@ -242,6 +322,19 @@ pub struct Wire {
 }
 
 impl Wire {
+    pub fn display(&self, db: &DB) -> String {
+        // Find the InstanceId for this wire in the database
+        for (id, wire) in &db.wires {
+            if wire.start == self.start && wire.end == self.end {
+                return format!("Wire {id}");
+            }
+        }
+        format!(
+            "Wire {{ start: ({:.1}, {:.1}), end: ({:.1}, {:.1}) }} - not found in DB",
+            self.start.x, self.start.y, self.end.x, self.end.y
+        )
+    }
+
     pub fn new_at(pos: Pos2) -> Self {
         Self::new(pos2(pos.x - 30.0, pos.y), pos2(pos.x + 30.0, pos.y))
     }
@@ -463,6 +556,89 @@ impl DB {
         Pin { ins: id, index: n }
     }
 
+    /// Get the base pin kind without considering wire connections (avoids recursion)
+    fn pin_kind_base(&self, pin: Pin) -> assets::PinKind {
+        match self.ty(pin.ins) {
+            InstanceKind::Gate(gk) => {
+                let graphics = gk.graphics();
+                graphics.pins[pin.index as usize].kind
+            }
+            InstanceKind::Power => {
+                let graphics = &assets::POWER_ON_GRAPHICS;
+                graphics.pins[pin.index as usize].kind
+            }
+            InstanceKind::Wire => {
+                // For wires, return Input by default to avoid recursion
+                assets::PinKind::Input
+            }
+            InstanceKind::Lamp => {
+                let graphics = &assets::LAMP_GRAPHICS;
+                graphics.pins[pin.index as usize].kind
+            }
+            InstanceKind::CustomCircuit(_) => {
+                let cc = self.get_custom_circuit(pin.ins);
+                let def = &self.custom_circuit_definitions[cc.definition_index];
+                def.external_pins[pin.index as usize].kind
+            }
+        }
+    }
+
+    /// Get information about a pin's direction (input or output)
+    pub fn pin_info(&self, pin: Pin) -> PinInfo {
+        let kind = match self.ty(pin.ins) {
+            InstanceKind::Wire => {
+                // Determine if this wire pin is input or output based on connections
+                // The head of wire that is connected to another output is the input pin of the wire.
+                // When both heads are not connected start is the input.
+                let start = self.wire_start(pin.ins);
+                let end = self.wire_end(pin.ins);
+
+                let start_conns = self.connected_pins(start);
+                let mut start_connected_to_output = false;
+                for conn in start_conns {
+                    if self.pin_kind_base(conn) == assets::PinKind::Output {
+                        start_connected_to_output = true;
+                        break;
+                    }
+                }
+
+                let end_conns = self.connected_pins(end);
+                let mut end_connected_to_output = false;
+                for conn in end_conns {
+                    if self.pin_kind_base(conn) == assets::PinKind::Output {
+                        end_connected_to_output = true;
+                        break;
+                    }
+                }
+
+                // Determine kind based on which pin this is
+                if pin.index == 0 {
+                    // This is the start pin
+                    if start_connected_to_output {
+                        assets::PinKind::Input
+                    } else if end_connected_to_output {
+                        assets::PinKind::Output
+                    } else {
+                        // Default: start is input
+                        assets::PinKind::Input
+                    }
+                } else {
+                    // This is the end pin
+                    if end_connected_to_output {
+                        assets::PinKind::Input
+                    } else if start_connected_to_output {
+                        assets::PinKind::Output
+                    } else {
+                        // Default: end is output (since start is input)
+                        assets::PinKind::Output
+                    }
+                }
+            }
+            _ => self.pin_kind_base(pin),
+        };
+        PinInfo { kind }
+    }
+
     pub fn new_label(&mut self, label: Label) -> LabelId {
         self.labels.insert(label)
     }
@@ -577,6 +753,7 @@ impl DB {
         out
     }
 
+    // Connected pins to this pin
     pub fn connected_pins(&self, pin: Pin) -> Vec<Pin> {
         let mut res = Vec::new();
         for c in &self.connections {
@@ -758,6 +935,7 @@ pub struct App {
     // energized pins based on current simulation
     pub current: HashSet<Pin>,
     // mark when current needs recomputation
+    #[serde(skip)]
     pub current_dirty: bool,
     pub show_debug: bool,
     // selection set and move preview
@@ -869,6 +1047,10 @@ impl App {
         } else {
             Default::default()
         }
+    }
+
+    fn is_on(&self, pin: Pin) -> bool {
+        self.current.contains(&pin)
     }
 
     pub fn screen_to_world(&self, pos: Pos2) -> Pos2 {
@@ -1112,6 +1294,8 @@ impl App {
                 for id in ids_to_delete {
                     self.delete_instance(id);
                 }
+            } else {
+                return;
             }
             self.current_dirty = true;
         }
@@ -1272,7 +1456,7 @@ impl App {
             self.draw_custom_circuit(ui, id, custom_circuit);
         }
         for (id, wire) in &self.db.wires {
-            let has_current = self.current.contains(&self.db.wire_start(id));
+            let has_current = self.is_on(self.db.wire_start(id));
             self.draw_wire(
                 ui,
                 wire,
@@ -1400,7 +1584,7 @@ impl App {
     fn draw_gate(&self, ui: &mut Ui, id: InstanceId, gate: &Gate) {
         let screen_center = gate.pos - self.viewport_offset;
         self.draw_instance_graphics(ui, gate.kind.graphics(), screen_center, |pin_index| {
-            self.current.contains(&Pin {
+            self.is_on(Pin {
                 ins: id,
                 index: pin_index as u32,
             })
@@ -1415,7 +1599,7 @@ impl App {
     fn draw_power(&self, ui: &mut Ui, id: InstanceId, power: &Power) {
         let screen_center = power.pos - self.viewport_offset;
         self.draw_instance_graphics(ui, power.graphics(), screen_center, |pin_index| {
-            self.current.contains(&Pin {
+            self.is_on(Pin {
                 ins: id,
                 index: pin_index as u32,
             })
@@ -1429,7 +1613,7 @@ impl App {
     }
 
     fn draw_lamp(&self, ui: &mut Ui, id: InstanceId, lamp: &Lamp) {
-        let has_current = self.current.contains(&self.db.lamp_input(id));
+        let has_current = self.is_on(self.db.lamp_input(id));
         let screen_center = lamp.pos - self.viewport_offset;
 
         if has_current {
@@ -1448,7 +1632,7 @@ impl App {
         }
 
         self.draw_instance_graphics(ui, lamp.graphics(), screen_center, |pin_index| {
-            self.current.contains(&Pin {
+            self.is_on(Pin {
                 ins: id,
                 index: pin_index as u32,
             })
@@ -1504,7 +1688,7 @@ impl App {
                 let pin_screen_pos = pin_world_pos - self.viewport_offset;
 
                 // Determine pin color based on whether it has current
-                let has_current = self.current.contains(&Pin {
+                let has_current = self.is_on(Pin {
                     ins: id,
                     index: pin_index as u32,
                 });
