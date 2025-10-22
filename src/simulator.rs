@@ -297,6 +297,7 @@ mod tests {
         })
     }
 
+    #[expect(dead_code)]
     fn new_clock(db: &mut DB) -> InstanceId {
         db.new_clock(crate::app::Clock {
             pos: Pos2::ZERO,

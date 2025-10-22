@@ -853,25 +853,12 @@ impl DB {
         for id in ids {
             for pin in self.connected_pins_of_instance(*id) {
                 if matches!(self.ty(pin.ins), InstanceKind::Wire) && !ids_set.contains(&pin.ins) {
-                    // Check if the wire is connected to another wire
-                    let wire_connected_to_wire = self
-                        .connected_pins_of_instance(pin.ins)
-                        .iter()
-                        .any(|p| matches!(self.ty(p.ins), InstanceKind::Wire));
-
-                    if wire_connected_to_wire {
-                        // If connected to another wire, just move the whole wire
-                        let w = self.get_wire_mut(pin.ins);
+                    // Otherwise resize the wire
+                    let w = self.get_wire_mut(pin.ins);
+                    if pin.index == 0 {
                         w.start += delta;
-                        w.end += delta;
                     } else {
-                        // Otherwise resize the wire
-                        let w = self.get_wire_mut(pin.ins);
-                        if pin.index == 0 {
-                            w.start += delta;
-                        } else {
-                            w.end += delta;
-                        }
+                        w.end += delta;
                     }
                 }
             }
@@ -974,7 +961,7 @@ pub fn current_dirty() -> bool {
     true
 }
 
-#[derive(serde::Deserialize, serde::Serialize, Debug, Clone, Copy, PartialEq)]
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClockState {
     Stopped,
     Running,
@@ -992,7 +979,7 @@ impl Default for ClockController {
     fn default() -> Self {
         Self {
             voltage: false,
-            state: ClockState::Stopped,
+            state: ClockState::Running,
             tick_accumulator: 0.0,
             tick_interval: 0.5, // 0.5 seconds = 2 Hz
         }
@@ -1043,7 +1030,7 @@ pub struct App {
     #[serde(skip)]
     pub simulator: Simulator,
     // Clock controller for managing clock ticking
-    #[serde(skip)]
+    #[serde(skip, default = "ClockController::default")]
     pub clock_controller: ClockController,
 }
 
@@ -1124,6 +1111,17 @@ impl eframe::App for App {
                 if ui.button("▶ Start").clicked() {
                     self.clock_controller.state = ClockState::Running;
                     self.clock_controller.tick_accumulator = 0.0;
+                }
+                ui.add_space(8.0);
+
+                // Clock speed slider
+                ui.label("Speed:");
+                let mut speed_hz = 1.0 / self.clock_controller.tick_interval;
+                if ui
+                    .add(egui::Slider::new(&mut speed_hz, 0.5..=5.0).text("Hz"))
+                    .changed()
+                {
+                    self.clock_controller.tick_interval = 1.0 / speed_hz;
                 }
                 ui.add_space(16.0);
 
@@ -1467,7 +1465,7 @@ impl App {
 
         let right_released = ui.input(|i| i.pointer.secondary_released());
         let right_down = ui.input(|i| i.pointer.secondary_down());
-        let right_clicked = resp.secondary_clicked();
+        let right_clicked = ui.input(|i| i.pointer.secondary_clicked());
 
         let mouse_is_visible = resp.contains_pointer();
         let mouse_pos_world = ui
@@ -1517,7 +1515,7 @@ impl App {
 
             if mouse_dragging {
                 self.hovered = hovered_now;
-                self.handle_drag_start_canvas(mouse);
+                self.handle_drag_start(mouse);
             }
 
             if dragging {
@@ -1693,7 +1691,8 @@ impl App {
         graphics: &assets::InstanceGraphics,
         screen_center: Pos2,
         highlight_pin: F,
-    ) where
+    ) -> Rect
+    where
         F: Fn(usize) -> bool,
     {
         let rect = Rect::from_center_size(screen_center, self.canvas_config.base_gate_size);
@@ -1717,6 +1716,7 @@ impl App {
                 );
             }
         }
+        rect
     }
 
     fn draw_gate(&self, ui: &mut Ui, id: InstanceId, gate: &Gate) {
@@ -2588,7 +2588,7 @@ impl App {
     }
 
     fn paste_from_clipboard(&mut self, mouse: Pos2) {
-        self.selected.clear(); // Clear existing selection before pasting new items
+        self.selected.clear();
         for to_paste in self.clipboard.clone() {
             match to_paste {
                 ClipBoardItem::Gate(gate_kind, offset) => {

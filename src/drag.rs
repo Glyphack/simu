@@ -46,7 +46,7 @@ pub enum Drag {
 }
 
 impl App {
-    pub fn handle_drag_start_canvas(&mut self, mouse: Pos2) {
+    pub fn handle_drag_start(&mut self, mouse: Pos2) {
         if self.drag.is_some() {
             return;
         }
@@ -73,6 +73,15 @@ impl App {
 
         match hovered {
             Hover::Pin(pin) => {
+                if self.selected.contains(&pin.ins)
+                    && matches!(self.db.ty(pin.ins), InstanceKind::Wire)
+                {
+                    self.drag = Some(Drag::Resize {
+                        id: pin.ins,
+                        start: pin.index != 1,
+                    });
+                    return;
+                }
                 let pin_pos = self.db.pin_position(pin);
                 self.drag = Some(Drag::PinToWire {
                     source_pin: pin,
