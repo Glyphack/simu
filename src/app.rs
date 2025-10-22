@@ -1460,6 +1460,10 @@ impl App {
         Self::draw_grid(ui, canvas_rect, self.viewport_offset);
 
         let mouse_clicked = resp.clicked();
+        let double_clicked = ui.input(|i| {
+            i.pointer
+                .button_double_clicked(egui::PointerButton::Primary)
+        });
         let mouse_dragging = resp.dragged_by(egui::PointerButton::Primary);
         let mouse_up = ui.input(|i| i.pointer.any_released());
 
@@ -1499,7 +1503,7 @@ impl App {
         }
 
         // Handle double-click on empty canvas to create new label
-        if resp.double_clicked()
+        if double_clicked
             && self.hovered.is_none()
             && !self.drag_had_movement
             && let Some(mouse) = mouse_pos_world
