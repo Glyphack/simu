@@ -1,4 +1,1 @@
-- [ ] Push and pop instances being evaluated
-- [ ] Use the current map as a cache and return the value of the pin if it has been calculated
-- [ ] Think about when simulation calculation should happen and refactor the code
 - [ ] Test for <https://www.geeksforgeeks.org/digital-logic/what-is-jk-flip-flop/>

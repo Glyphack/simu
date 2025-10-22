@@ -93,6 +93,7 @@ pub enum ClipBoardItem {
     Power(Vec2),
     Wire(Vec2, Vec2),
     Lamp(Vec2),
+    Clock(Vec2),
     // Index to definition
     CustomCircuit(usize, Vec2),
     Label(String, Vec2),
@@ -104,6 +105,7 @@ pub enum InstanceKind {
     Power,
     Wire,
     Lamp,
+    Clock,
     CustomCircuit(usize),
 }
 
@@ -134,6 +136,10 @@ impl Pin {
             InstanceKind::Lamp => {
                 let lamp = db.get_lamp(self.ins);
                 lamp.display(db)
+            }
+            InstanceKind::Clock => {
+                let clock = db.get_clock(self.ins);
+                clock.display(db)
             }
             InstanceKind::CustomCircuit(_) => format!("CustomCircuit {{ id: {:?} }}", self.ins),
         };
@@ -262,6 +268,34 @@ impl Lamp {
 
 // Lamp end
 
+// Clock
+
+#[derive(serde::Deserialize, serde::Serialize, Copy, Debug, Clone)]
+pub struct Clock {
+    pub pos: Pos2,
+    pub period: u32, // Placeholder for future use
+}
+
+impl Clock {
+    pub fn display(&self, db: &DB) -> String {
+        for (id, clock) in &db.clocks {
+            if clock.pos == self.pos {
+                return format!("Clock {{ id: {id}}}");
+            }
+        }
+        format!(
+            "Clock {{ pos: ({:.1}, {:.1}) }} - not found in DB",
+            self.pos.x, self.pos.y
+        )
+    }
+
+    fn graphics(&self) -> &assets::InstanceGraphics {
+        &assets::CLOCK_GRAPHICS
+    }
+}
+
+// Clock end
+
 // Label
 
 #[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
@@ -351,6 +385,7 @@ pub struct DB {
     pub powers: SecondaryMap<InstanceId, Power>,
     pub wires: SecondaryMap<InstanceId, Wire>,
     pub lamps: SecondaryMap<InstanceId, Lamp>,
+    pub clocks: SecondaryMap<InstanceId, Clock>,
     pub custom_circuits: SecondaryMap<InstanceId, CustomCircuit>,
     // Definition of custom circuits created by the user
     pub custom_circuit_definitions: Vec<CustomCircuitDefinition>,
@@ -393,6 +428,13 @@ impl DB {
         let k = self.instances.insert(());
         self.lamps.insert(k, l);
         self.types.insert(k, InstanceKind::Lamp);
+        k
+    }
+
+    pub fn new_clock(&mut self, c: Clock) -> InstanceId {
+        let k = self.instances.insert(());
+        self.clocks.insert(k, c);
+        self.types.insert(k, InstanceKind::Clock);
         k
     }
 
@@ -442,6 +484,14 @@ impl DB {
 
     pub fn get_lamp_mut(&mut self, id: InstanceId) -> &mut Lamp {
         self.lamps.get_mut(id).expect("lamp not found (mut)")
+    }
+
+    pub fn get_clock(&self, id: InstanceId) -> &Clock {
+        self.clocks.get(id).expect("clock not found")
+    }
+
+    pub fn get_clock_mut(&mut self, id: InstanceId) -> &mut Clock {
+        self.clocks.get_mut(id).expect("clock not found (mut)")
     }
 
     pub fn get_custom_circuit(&self, id: InstanceId) -> &crate::custom_circuit::CustomCircuit {
@@ -508,9 +558,13 @@ impl DB {
         Pin { ins: id, index: 0 }
     }
 
-    // Lamp
     pub fn lamp_input(&self, id: InstanceId) -> Pin {
-        self.get_lamp(id); // Type check
+        self.get_lamp(id);
+        Pin { ins: id, index: 0 }
+    }
+
+    pub fn clock_output(&self, id: InstanceId) -> Pin {
+        self.get_clock(id);
         Pin { ins: id, index: 0 }
     }
 
@@ -542,6 +596,10 @@ impl DB {
             }
             InstanceKind::Lamp => {
                 let graphics = &assets::LAMP_GRAPHICS;
+                graphics.pins[pin.index as usize].kind
+            }
+            InstanceKind::Clock => {
+                let graphics = &assets::CLOCK_GRAPHICS;
                 graphics.pins[pin.index as usize].kind
             }
             InstanceKind::CustomCircuit(_) => {
@@ -635,6 +693,10 @@ impl DB {
                 let n = assets::LAMP_GRAPHICS.pins.len();
                 (0..n as u32).map(|i| Pin { ins: id, index: i }).collect()
             }
+            InstanceKind::Clock => {
+                let n = assets::CLOCK_GRAPHICS.pins.len();
+                (0..n as u32).map(|i| Pin { ins: id, index: i }).collect()
+            }
             InstanceKind::CustomCircuit(_) => {
                 let cc = self.get_custom_circuit(id);
                 if cc.definition_index < self.custom_circuit_definitions.len() {
@@ -670,6 +732,11 @@ impl DB {
                 let info = l.graphics().pins[pin.index as usize];
                 l.pos + info.offset
             }
+            InstanceKind::Clock => {
+                let c = self.get_clock(pin.ins);
+                let info = c.graphics().pins[pin.index as usize];
+                c.pos + info.offset
+            }
             InstanceKind::CustomCircuit(_) => {
                 let cc = self.get_custom_circuit(pin.ins);
                 cc.pos + self.pin_offset(pin)
@@ -700,6 +767,11 @@ impl DB {
             InstanceKind::Lamp => {
                 let l = self.get_lamp(pin.ins);
                 let info = l.graphics().pins[pin.index as usize];
+                info.offset
+            }
+            InstanceKind::Clock => {
+                let c = self.get_clock(pin.ins);
+                let info = c.graphics().pins[pin.index as usize];
                 info.offset
             }
             InstanceKind::CustomCircuit(_) => {
@@ -766,6 +838,10 @@ impl DB {
                 InstanceKind::Lamp => {
                     let l = self.get_lamp_mut(*id);
                     l.pos += delta;
+                }
+                InstanceKind::Clock => {
+                    let c = self.get_clock_mut(*id);
+                    c.pos += delta;
                 }
                 InstanceKind::CustomCircuit(_) => {
                     let cc = self.get_custom_circuit_mut(*id);
@@ -836,6 +912,10 @@ impl DB {
                 let l = self.get_lamp_mut(id);
                 l.pos += delta;
             }
+            InstanceKind::Clock => {
+                let c = self.get_clock_mut(id);
+                c.pos += delta;
+            }
             InstanceKind::CustomCircuit(_) => {
                 let cc = self.get_custom_circuit_mut(id);
                 cc.pos += delta;
@@ -880,6 +960,7 @@ impl DB {
                 InstanceKind::Gate(_)
                 | InstanceKind::Power
                 | InstanceKind::Lamp
+                | InstanceKind::Clock
                 | InstanceKind::CustomCircuit(_) => {
                     // For non-wires, propagate the same delta
                     self.move_instance_and_propagate_recursive(connected_id, delta, visited);
@@ -891,6 +972,31 @@ impl DB {
 
 pub fn current_dirty() -> bool {
     true
+}
+
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone, Copy, PartialEq)]
+pub enum ClockState {
+    Stopped,
+    Running,
+}
+
+#[derive(Debug, Clone)]
+pub struct ClockController {
+    pub voltage: bool,
+    pub state: ClockState,
+    pub tick_accumulator: f32,
+    pub tick_interval: f32, // seconds between ticks
+}
+
+impl Default for ClockController {
+    fn default() -> Self {
+        Self {
+            voltage: false,
+            state: ClockState::Stopped,
+            tick_accumulator: 0.0,
+            tick_interval: 0.5, // 0.5 seconds = 2 Hz
+        }
+    }
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -936,6 +1042,9 @@ pub struct App {
     // Simulation service - holds simulation state and results
     #[serde(skip)]
     pub simulator: Simulator,
+    // Clock controller for managing clock ticking
+    #[serde(skip)]
+    pub clock_controller: ClockController,
 }
 
 impl Default for App {
@@ -962,7 +1071,8 @@ impl Default for App {
             context_menu_pos: Pos2::ZERO,
             editing_label: None,
             label_edit_buffer: String::new(),
-            simulator: Simulator::new(),
+            simulator: Simulator::default(),
+            clock_controller: ClockController::default(),
         }
     }
 }
@@ -1002,6 +1112,21 @@ impl eframe::App for App {
                 });
                 ui.add_space(16.0);
 
+                // Clock controls
+                ui.label("Clock:");
+                if ui.button("⏹ Stop").clicked() {
+                    self.clock_controller.state = ClockState::Stopped;
+                }
+                if ui.button("⏭ Step").clicked() {
+                    self.clock_controller.voltage = !self.clock_controller.voltage;
+                    self.current_dirty = true;
+                }
+                if ui.button("▶ Start").clicked() {
+                    self.clock_controller.state = ClockState::Running;
+                    self.clock_controller.tick_accumulator = 0.0;
+                }
+                ui.add_space(16.0);
+
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     egui::widgets::global_theme_preference_buttons(ui);
 
@@ -1009,6 +1134,31 @@ impl eframe::App for App {
                 });
             });
         });
+
+        let dt = ctx.input(|i| i.stable_dt);
+        let should_tick = match self.clock_controller.state {
+            ClockState::Running => {
+                self.clock_controller.tick_accumulator += dt;
+                if self.clock_controller.tick_accumulator >= self.clock_controller.tick_interval {
+                    self.clock_controller.tick_accumulator -= self.clock_controller.tick_interval;
+                    true
+                } else {
+                    false
+                }
+            }
+            ClockState::Stopped => false,
+        };
+
+        if should_tick {
+            self.clock_controller.voltage = !self.clock_controller.voltage;
+            self.simulator.clocks_on = self.clock_controller.voltage;
+            self.current_dirty = true;
+        }
+
+        // Request continuous repaint if clock is running
+        if self.clock_controller.state == ClockState::Running {
+            ctx.request_repaint();
+        }
 
         egui::CentralPanel::default().show(ctx, |ui| {
             self.draw_main(ui);
@@ -1087,6 +1237,7 @@ impl App {
                 self.draw_panel_button(ui, InstanceKind::Gate(GateKind::Xnor));
                 self.draw_panel_button(ui, InstanceKind::Power);
                 self.draw_panel_button(ui, InstanceKind::Lamp);
+                self.draw_panel_button(ui, InstanceKind::Clock);
                 self.draw_panel_button(ui, InstanceKind::Wire);
 
                 ui.add_space(8.0);
@@ -1145,6 +1296,20 @@ impl App {
                     .max_height(PANEL_BUTTON_MAX_HEIGHT);
                 ui.add(egui::ImageButton::new(s).sense(Sense::click_and_drag()))
             }
+            InstanceKind::Clock => {
+                let s = get_icon(
+                    ui,
+                    Clock {
+                        pos: Pos2::ZERO,
+                        period: 1,
+                    }
+                    .graphics()
+                    .svg
+                    .clone(),
+                )
+                .max_height(PANEL_BUTTON_MAX_HEIGHT);
+                ui.add(egui::ImageButton::new(s).sense(Sense::click_and_drag()))
+            }
             InstanceKind::Wire => ui.add(
                 Button::new("Wire")
                     .sense(Sense::click_and_drag())
@@ -1169,6 +1334,7 @@ impl App {
                 InstanceKind::Power => self.db.new_power(Power { pos, on: true }),
                 InstanceKind::Wire => self.db.new_wire(Wire::new_at(pos)),
                 InstanceKind::Lamp => self.db.new_lamp(Lamp { pos }),
+                InstanceKind::Clock => self.db.new_clock(Clock { pos, period: 1 }),
                 InstanceKind::CustomCircuit(c) => self.db.new_custom_circuit(CustomCircuit {
                     pos,
                     definition_index: c,
@@ -1208,26 +1374,6 @@ impl App {
         ui.add_space(8.0);
 
         resp
-    }
-
-    fn handle_panning(
-        &mut self,
-        ui: &Ui,
-        right_down: bool,
-        right_released: bool,
-        mouse_is_visible: bool,
-    ) {
-        if right_down && self.hovered.is_none() {
-            self.panning = true;
-        }
-
-        if right_released || !mouse_is_visible {
-            self.panning = false;
-        }
-
-        if self.panning {
-            self.viewport_offset += ui.input(|i| i.pointer.delta());
-        }
     }
 
     fn handle_copy_pasting(&mut self, ui: &Ui, mouse_pos_world: Option<Pos2>) {
@@ -1285,6 +1431,7 @@ impl App {
         self.db.powers.remove(id);
         self.db.wires.remove(id);
         self.db.lamps.remove(id);
+        self.db.clocks.remove(id);
         self.db.custom_circuits.remove(id);
         self.db.connections.retain(|c| !c.involves_instance(id));
         self.hovered.take();
@@ -1306,7 +1453,7 @@ impl App {
     }
 
     fn draw_canvas(&mut self, ui: &mut Ui) {
-        let (resp, _painter) = ui.allocate_painter(ui.available_size(), Sense::click());
+        let (resp, _painter) = ui.allocate_painter(ui.available_size(), Sense::drag());
         let canvas_rect = resp.rect;
 
         // Set clip rectangle to prevent canvas objects from drawing outside canvas bounds
@@ -1314,20 +1461,33 @@ impl App {
 
         Self::draw_grid(ui, canvas_rect, self.viewport_offset);
 
+        let mouse_clicked = resp.clicked();
+        let mouse_dragging = resp.dragged_by(egui::PointerButton::Primary);
         let mouse_up = ui.input(|i| i.pointer.any_released());
-        let mouse_clicked = ui.input(|i| i.pointer.primary_down());
+
         let right_released = ui.input(|i| i.pointer.secondary_released());
         let right_down = ui.input(|i| i.pointer.secondary_down());
-        let right_clicked = ui.input(|i| i.pointer.secondary_clicked());
-        let enter_pressed = ui.input(|i| i.key_pressed(egui::Key::Enter));
+        let right_clicked = resp.secondary_clicked();
+
+        let mouse_is_visible = resp.contains_pointer();
         let mouse_pos_world = ui
             .ctx()
             .pointer_hover_pos()
             .map(|p| self.screen_to_world(p));
-        let mouse_is_visible = ui.ctx().input(|i| i.pointer.has_pointer());
+
+        let enter_pressed = ui.input(|i| i.key_pressed(egui::Key::Enter));
         let esc_pressed = ui.input(|i| i.key_released(egui::Key::Escape));
 
-        self.handle_panning(ui, right_down, right_released, mouse_is_visible);
+        if right_down && mouse_is_visible && self.hovered.is_none() {
+            self.panning = true;
+        }
+        if right_released || !mouse_is_visible {
+            self.panning = false;
+        }
+        if self.panning {
+            self.viewport_offset += ui.input(|i| i.pointer.delta());
+        }
+
         self.handle_copy_pasting(ui, mouse_pos_world);
         self.handle_deletion(ui);
 
@@ -1355,7 +1515,7 @@ impl App {
             let dragging = self.drag.is_some();
             let hovered_now = self.get_hovered(mouse);
 
-            if mouse_clicked {
+            if mouse_dragging {
                 self.hovered = hovered_now;
                 self.handle_drag_start_canvas(mouse);
             }
@@ -1426,6 +1586,9 @@ impl App {
         }
         for (id, lamp) in &self.db.lamps {
             self.draw_lamp(ui, id, lamp);
+        }
+        for (id, clock) in &self.db.clocks {
+            self.draw_clock(ui, id, clock);
         }
         for (id, custom_circuit) in &self.db.custom_circuits {
             self.draw_custom_circuit(ui, id, custom_circuit);
@@ -1627,6 +1790,23 @@ impl App {
         let lamp = Lamp { pos };
         let screen_center = pos - self.viewport_offset;
         self.draw_instance_graphics(ui, lamp.graphics(), screen_center, |_| false);
+    }
+
+    fn draw_clock(&self, ui: &mut Ui, id: InstanceId, clock: &Clock) {
+        let screen_center = clock.pos - self.viewport_offset;
+
+        self.draw_instance_graphics(ui, clock.graphics(), screen_center, |pin_index| {
+            self.is_on(Pin {
+                ins: id,
+                index: pin_index as u32,
+            })
+        });
+    }
+
+    pub fn draw_clock_preview(&self, ui: &mut Ui, pos: Pos2) {
+        let clock = Clock { pos, period: 1 };
+        let screen_center = pos - self.viewport_offset;
+        self.draw_instance_graphics(ui, clock.graphics(), screen_center, |_| false);
     }
 
     fn draw_custom_circuit(
@@ -1875,6 +2055,7 @@ impl App {
                 InstanceKind::Gate(_)
                 | InstanceKind::Power
                 | InstanceKind::Lamp
+                | InstanceKind::Clock
                 | InstanceKind::CustomCircuit(_) => {}
             }
         }
@@ -1897,6 +2078,14 @@ impl App {
         }
 
         for (k, _) in &self.db.lamps {
+            for pin in self.db.pins_of(k) {
+                if self.db.pin_position(pin).distance(mouse_pos) < PIN_HOVER_THRESHOLD {
+                    return Some(Hover::Pin(pin));
+                }
+            }
+        }
+
+        for (k, _) in &self.db.clocks {
             for pin in self.db.pins_of(k) {
                 if self.db.pin_position(pin).distance(mouse_pos) < PIN_HOVER_THRESHOLD {
                     return Some(Hover::Pin(pin));
@@ -1936,6 +2125,12 @@ impl App {
         }
         for (k, lamp) in &self.db.lamps {
             let rect = Rect::from_center_size(lamp.pos, self.canvas_config.base_gate_size);
+            if rect.contains(mouse_pos) {
+                return Some(Hover::Instance(k));
+            }
+        }
+        for (k, clock) in &self.db.clocks {
+            let rect = Rect::from_center_size(clock.pos, self.canvas_config.base_gate_size);
             if rect.contains(mouse_pos) {
                 return Some(Hover::Instance(k));
             }
@@ -1993,6 +2188,19 @@ impl App {
                     let lamp = self.db.get_lamp(hovered);
                     let outer = Rect::from_center_size(
                         lamp.pos - self.viewport_offset,
+                        self.canvas_config.base_gate_size + vec2(3.0, 3.0),
+                    );
+                    ui.painter().rect_stroke(
+                        outer,
+                        CornerRadius::default(),
+                        Stroke::new(2.0, COLOR_HOVER_INSTANCE_OUTLINE),
+                        StrokeKind::Middle,
+                    );
+                }
+                InstanceKind::Clock => {
+                    let clock = self.db.get_clock(hovered);
+                    let outer = Rect::from_center_size(
+                        clock.pos - self.viewport_offset,
                         self.canvas_config.base_gate_size + vec2(3.0, 3.0),
                     );
                     ui.painter().rect_stroke(
@@ -2067,6 +2275,19 @@ impl App {
                         StrokeKind::Outside,
                     );
                 }
+                InstanceKind::Clock => {
+                    let c = self.db.get_clock(id);
+                    let r = Rect::from_center_size(
+                        c.pos - self.viewport_offset,
+                        self.canvas_config.base_gate_size + vec2(6.0, 6.0),
+                    );
+                    ui.painter().rect_stroke(
+                        r,
+                        CornerRadius::default(),
+                        Stroke::new(2.0, COLOR_SELECTION_HIGHLIGHT),
+                        StrokeKind::Outside,
+                    );
+                }
                 InstanceKind::Wire => {
                     for pin in self.db.pins_of(id) {
                         let pos = self.db.pin_position(pin);
@@ -2098,9 +2319,11 @@ impl App {
         let mut out = String::new();
         writeln!(
             out,
-            "counts: gates={}, powers={}, wires={}, custom_circuits={}, custom_defs={}, conns={}",
+            "counts: gates={}, powers={}, lamps={}, clocks={}, wires={}, custom_circuits={}, custom_defs={}, conns={}",
             self.db.gates.len(),
             self.db.powers.len(),
+            self.db.lamps.len(),
+            self.db.clocks.len(),
             self.db.wires.len(),
             self.db.custom_circuits.len(),
             self.db.custom_circuit_definitions.len(),
@@ -2138,11 +2361,29 @@ impl App {
                 }
             }
             SimulationStatus::Running => {
-                writeln!(out, "Status: ⏳ RUNNING...").ok();
+                writeln!(out, "Status: RUNNING...").ok();
             }
         }
         let iters = self.simulator.last_iterations;
         writeln!(out, "Iterations: {iters}").ok();
+
+        // Clock controller state
+        writeln!(out, "\n--- Clock Controller ---").ok();
+        writeln!(out, "State: {:?}", self.clock_controller.state).ok();
+        writeln!(
+            out,
+            "Tick interval: {:.2}s",
+            self.clock_controller.tick_interval
+        )
+        .ok();
+        writeln!(
+            out,
+            "Tick accumulator: {:.3}s",
+            self.clock_controller.tick_accumulator
+        )
+        .ok();
+        writeln!(out, "Voltage: {}", self.clock_controller.voltage).ok();
+
         writeln!(out, "\nGates:").ok();
         for (id, g) in &self.db.gates {
             writeln!(out, "  {}", g.display(&self.db)).ok();
@@ -2181,6 +2422,50 @@ impl App {
                     pin_instance.display(&self.db),
                     pp.x,
                     pp.y
+                )
+                .ok();
+            }
+        }
+
+        writeln!(out, "\nLamps:").ok();
+        for (id, lamp) in &self.db.lamps {
+            writeln!(out, "  {}", lamp.display(&self.db)).ok();
+            // Show pins
+            for (i, pin) in lamp.graphics().pins.iter().enumerate() {
+                let pin_offset = pin.offset;
+                let p = lamp.pos + pin_offset;
+                let pin_instance = Pin {
+                    ins: id,
+                    index: i as u32,
+                };
+                writeln!(
+                    out,
+                    "    {} at ({:.1},{:.1})",
+                    pin_instance.display(&self.db),
+                    p.x,
+                    p.y
+                )
+                .ok();
+            }
+        }
+
+        writeln!(out, "\nClocks:").ok();
+        for (id, clock) in &self.db.clocks {
+            writeln!(out, "  {}", clock.display(&self.db)).ok();
+            // Show pins
+            for (i, pin) in clock.graphics().pins.iter().enumerate() {
+                let pin_offset = pin.offset;
+                let p = clock.pos + pin_offset;
+                let pin_instance = Pin {
+                    ins: id,
+                    index: i as u32,
+                };
+                writeln!(
+                    out,
+                    "    {} at ({:.1},{:.1})",
+                    pin_instance.display(&self.db),
+                    p.x,
+                    p.y
                 )
                 .ok();
             }
@@ -2234,6 +2519,10 @@ impl App {
                     let l = self.db.get_lamp(id);
                     points.push(l.pos);
                 }
+                InstanceKind::Clock => {
+                    let c = self.db.get_clock(id);
+                    points.push(c.pos);
+                }
                 InstanceKind::CustomCircuit(_) => {
                     let cc = self.db.get_custom_circuit(id);
                     points.push(cc.pos);
@@ -2263,6 +2552,10 @@ impl App {
                 InstanceKind::Lamp => {
                     let l = self.db.get_lamp(id);
                     object_pos.push(ClipBoardItem::Lamp(center - l.pos));
+                }
+                InstanceKind::Clock => {
+                    let c = self.db.get_clock(id);
+                    object_pos.push(ClipBoardItem::Clock(center - c.pos));
                 }
                 InstanceKind::CustomCircuit(_) => {
                     let cc = self.db.get_custom_circuit(id);
@@ -2330,6 +2623,13 @@ impl App {
                 ClipBoardItem::Lamp(offset) => {
                     let id = self.db.new_lamp(Lamp {
                         pos: mouse - offset,
+                    });
+                    self.selected.insert(id);
+                }
+                ClipBoardItem::Clock(offset) => {
+                    let id = self.db.new_clock(Clock {
+                        pos: mouse - offset,
+                        period: 1,
                     });
                     self.selected.insert(id);
                 }
@@ -2417,6 +2717,7 @@ impl App {
             InstanceKind::Gate(_)
             | InstanceKind::Power
             | InstanceKind::Lamp
+            | InstanceKind::Clock
             | InstanceKind::CustomCircuit(_) => {}
         }
     }

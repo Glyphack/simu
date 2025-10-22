@@ -237,6 +237,14 @@ impl ConnectionManager {
                 let desired = target - current;
                 db.move_instance_and_propagate(src.ins, desired);
             }
+            InstanceKind::Clock => {
+                let c = db.get_clock_mut(src.ins);
+                let info = assets::CLOCK_GRAPHICS.pins[src.index as usize];
+                let pin_offset = info.offset;
+                let current = c.pos + pin_offset;
+                let desired = target - current;
+                db.move_instance_and_propagate(src.ins, desired);
+            }
             InstanceKind::CustomCircuit(_) => {
                 let pin_offset = db.pin_offset(src);
                 let cc = db.get_custom_circuit_mut(src.ins);

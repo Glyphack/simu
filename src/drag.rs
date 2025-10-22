@@ -122,6 +122,14 @@ impl App {
                             offset,
                         }));
                     }
+                    InstanceKind::Clock => {
+                        let clock = self.db.get_clock(instance);
+                        let offset = clock.pos - mouse;
+                        self.drag = Some(Drag::Canvas(CanvasDrag::Single {
+                            id: instance,
+                            offset,
+                        }));
+                    }
                     InstanceKind::CustomCircuit(_) => {
                         let cc = self.db.get_custom_circuit(instance);
                         let offset = cc.pos - mouse;
@@ -164,11 +172,15 @@ impl App {
                     let new_pos = mouse + offset;
                     let mut moved = false;
                     match self.db.ty(id) {
-                        InstanceKind::Gate(_) | InstanceKind::Power | InstanceKind::Lamp => {
+                        InstanceKind::Gate(_)
+                        | InstanceKind::Power
+                        | InstanceKind::Lamp
+                        | InstanceKind::Clock => {
                             let current_pos = match self.db.ty(id) {
                                 InstanceKind::Gate(_) => self.db.get_gate(id).pos,
                                 InstanceKind::Power => self.db.get_power(id).pos,
                                 InstanceKind::Lamp => self.db.get_lamp(id).pos,
+                                InstanceKind::Clock => self.db.get_clock(id).pos,
                                 _ => unreachable!(),
                             };
                             let desired = new_pos - current_pos;
