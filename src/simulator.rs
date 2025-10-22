@@ -76,6 +76,7 @@ impl Value {
     }
 }
 
+#[derive(Default)]
 pub struct Simulator {
     /// Final result - maps each pin to its current value
     pub current: HashMap<Pin, Value>,
@@ -89,12 +90,7 @@ pub struct Simulator {
 
 impl Simulator {
     pub(crate) fn new() -> Self {
-        Self {
-            current: Default::default(),
-            last_iterations: 0,
-            status: SimulationStatus::Running,
-            current_iteration: 0,
-        }
+        Self::default()
     }
 
     fn rebuild_sorted_instances(&self, db: &DB) -> Vec<InstanceId> {

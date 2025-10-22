@@ -966,7 +966,7 @@ pub struct App {
     pub label_edit_buffer: String,
     // Simulation service - holds simulation state and results
     #[serde(skip)]
-    pub simulator: Option<Simulator>,
+    pub simulator: Simulator,
 }
 
 impl Default for App {
@@ -993,7 +993,7 @@ impl Default for App {
             context_menu_pos: Pos2::ZERO,
             editing_label: None,
             label_edit_buffer: String::new(),
-            simulator: None,
+            simulator: Simulator::new(),
         }
     }
 }
@@ -1058,10 +1058,7 @@ impl App {
     }
 
     fn is_on(&self, pin: Pin) -> bool {
-        let Some(sim) = &self.simulator else {
-            return false;
-        };
-        let Some(v) = sim.current.get(&pin) else {
+        let Some(v) = self.simulator.current.get(&pin) else {
             return false;
         };
 
@@ -1148,7 +1145,7 @@ impl App {
                     self.selected.clear();
                     self.drag = None;
                     self.connection_manager = ConnectionManager::new(&self.db);
-                    self.simulator = None;
+                    self.simulator = Simulator::new();
                 }
             });
     }
@@ -1446,10 +1443,8 @@ impl App {
         //     self.context_menu_pos = mouse_world - self.viewport_offset; // Convert to screen coordinates
         // }
 
-        if self.current_dirty || self.simulator.is_none() {
-            let mut sim = Simulator::new();
-            sim.compute(&self.db);
-            self.simulator = Some(sim);
+        if self.current_dirty {
+            self.simulator.compute(&self.db);
             self.current_dirty = false;
         }
 
@@ -2160,39 +2155,24 @@ impl App {
 
         // Simulation status
         writeln!(out, "\n=== Simulation Status ===").ok();
-        if let Some(sim) = &self.simulator {
-            match sim.status {
-                SimulationStatus::Stable { iterations } => {
-                    writeln!(out, "Status: STABLE (after {iterations} iterations)").ok();
-                }
-                SimulationStatus::Unstable { max_reached } => {
-                    if max_reached {
-                        let iters = sim.last_iterations;
-                        writeln!(out, "Status: UNSTABLE (max iterations: {iters})").ok();
-                    } else {
-                        writeln!(out, "Status: UNSTABLE").ok();
-                    }
-                }
-                SimulationStatus::Running => {
-                    writeln!(out, "Status: ⏳ RUNNING...").ok();
+        match self.simulator.status {
+            SimulationStatus::Stable { iterations } => {
+                writeln!(out, "Status: STABLE (after {iterations} iterations)").ok();
+            }
+            SimulationStatus::Unstable { max_reached } => {
+                if max_reached {
+                    let iters = self.simulator.last_iterations;
+                    writeln!(out, "Status: UNSTABLE (max iterations: {iters})").ok();
+                } else {
+                    writeln!(out, "Status: UNSTABLE").ok();
                 }
             }
-            let iters = sim.last_iterations;
-            writeln!(out, "Iterations: {iters}").ok();
-            let powered = if let Some(simulator) = &self.simulator {
-                simulator
-                    .current
-                    .iter()
-                    .filter(|v| *v.1 == Value::One)
-                    .count()
-            } else {
-                0
-            };
-            writeln!(out, "Powered pins: {powered}").ok();
-        } else {
-            writeln!(out, "Status: No simulation yet").ok();
+            SimulationStatus::Running => {
+                writeln!(out, "Status: ⏳ RUNNING...").ok();
+            }
         }
-
+        let iters = self.simulator.last_iterations;
+        writeln!(out, "Iterations: {iters}").ok();
         writeln!(out, "\nGates:").ok();
         for (id, g) in &self.db.gates {
             writeln!(out, "  {}", g.display(&self.db)).ok();
