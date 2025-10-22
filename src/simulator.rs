@@ -256,7 +256,8 @@ impl Simulator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::{Connection, Gate, GateKind, Lamp, Power};
+    use crate::app::{Gate, GateKind, Lamp, Power};
+    use crate::connection_manager::Connection;
     use egui::{Pos2, pos2};
 
     fn create_test_db() -> DB {

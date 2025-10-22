@@ -1,10 +1,61 @@
 #![allow(clippy::allow_attributes)]
-use crate::app::{Connection, DB, InstanceId, InstanceKind, Pin, SNAP_THRESHOLD};
+use crate::app::{DB, InstanceId, InstanceKind, Pin, SNAP_THRESHOLD};
 use crate::assets;
 use egui::Pos2;
 use std::collections::{HashMap, HashSet};
 
 const SPATIAL_INDEX_GRID_SIZE: f32 = 100.0;
+
+// A normalized, order-independent connection between two pins
+#[derive(serde::Deserialize, serde::Serialize, Copy, Debug, Clone)]
+pub struct Connection {
+    pub a: Pin,
+    pub b: Pin,
+}
+
+impl Connection {
+    pub fn new(p1: Pin, p2: Pin) -> Self {
+        Self { a: p2, b: p1 }
+    }
+
+    pub fn involves_instance(&self, id: InstanceId) -> bool {
+        self.a.ins == id || self.b.ins == id
+    }
+
+    pub fn display(&self, db: &DB) -> String {
+        format!("{} <-> {}", self.a.display(db), self.b.display(db))
+    }
+
+    pub fn get_pin_first(&self, pin: Pin) -> Option<(Pin, Pin)> {
+        if self.a == pin {
+            Some((self.a, self.b))
+        } else if self.b == pin {
+            Some((self.b, self.a))
+        } else {
+            None
+        }
+    }
+}
+
+impl PartialEq for Connection {
+    fn eq(&self, other: &Self) -> bool {
+        (self.a == other.a && self.b == other.b) || (self.a == other.b && self.b == other.a)
+    }
+}
+
+impl Eq for Connection {}
+
+impl std::hash::Hash for Connection {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        let (p1, p2) = if self.a <= self.b {
+            (self.a, self.b)
+        } else {
+            (self.b, self.a)
+        };
+        p1.hash(state);
+        p2.hash(state);
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct GridCell(i32, i32);
@@ -217,6 +268,9 @@ impl ConnectionManager {
 
     /// Process all dirty entities and update connections
     pub fn update_connections(&mut self, db: &mut DB) -> bool {
+        if self.dirty_instances.is_empty() {
+            return false;
+        }
         let pins_to_update = self.pins_to_update(db);
         let mut new_connections = Vec::new();
         for &pin in &pins_to_update {
@@ -258,5 +312,54 @@ impl ConnectionManager {
             "ConnectionManager:\n  dirty_instances: {:?}",
             self.dirty_instances
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Connection;
+    use crate::app::{InstanceId, Pin};
+    use std::collections::HashSet;
+
+    fn create_test_pins() -> (Pin, Pin, Pin) {
+        let id1 = InstanceId::from(1);
+        let id2 = InstanceId::from(2);
+        let id3 = InstanceId::from(3);
+        let pin1 = Pin { ins: id1, index: 0 };
+        let pin2 = Pin { ins: id2, index: 0 };
+        let pin3 = Pin { ins: id3, index: 0 };
+        (pin1, pin2, pin3)
+    }
+
+    #[test]
+    fn connection_equality_order_independent() {
+        let (pin1, pin2, _) = create_test_pins();
+
+        let conn1 = Connection::new(pin1, pin2);
+        let conn2 = Connection::new(pin2, pin1);
+
+        assert_eq!(conn1, conn2);
+    }
+
+    #[test]
+    fn connection_hash_order_independent() {
+        let (pin1, pin2, _) = create_test_pins();
+
+        let conn1 = Connection::new(pin1, pin2);
+        let conn2 = Connection::new(pin2, pin1);
+
+        let mut set = HashSet::new();
+        set.insert(conn1);
+        assert!(set.contains(&conn2));
+    }
+
+    #[test]
+    fn connection_different_pins_not_equal() {
+        let (pin1, pin2, pin3) = create_test_pins();
+
+        let conn1 = Connection::new(pin1, pin2);
+        let conn2 = Connection::new(pin1, pin3);
+
+        assert_ne!(conn1, conn2);
     }
 }

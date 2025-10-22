@@ -3,8 +3,9 @@ use std::collections::HashSet;
 use egui::{Pos2, Rect, Vec2};
 
 use crate::{
-    app::{App, ClipBoardItem, Connection, InstanceId, Pin},
+    app::{App, ClipBoardItem, InstanceId, Pin},
     assets,
+    connection_manager::Connection,
 };
 
 #[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]

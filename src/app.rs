@@ -12,7 +12,7 @@ use crate::simulator::{SimulationStatus, Simulator, Value};
 use crate::{
     assets::{self},
     config::CanvasConfig,
-    connection_manager::ConnectionManager,
+    connection_manager::{Connection, ConnectionManager},
     custom_circuit::{self, CustomCircuit, CustomCircuitDefinition},
     drag::Drag,
 };
@@ -59,6 +59,12 @@ slotmap::new_key_type! {
 impl Display for InstanceId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&format!("{:?}", self.0))
+    }
+}
+
+impl From<u32> for InstanceId {
+    fn from(value: u32) -> Self {
+        Self(slotmap::KeyData::from_ffi(value as u64))
     }
 }
 
@@ -143,50 +149,6 @@ impl Pin {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PinInfo {
     pub kind: crate::assets::PinKind,
-}
-
-// A normalized, order-independent connection between two pins
-#[derive(serde::Deserialize, serde::Serialize, Copy, Debug, Clone, Eq)]
-pub struct Connection {
-    pub a: Pin,
-    pub b: Pin,
-}
-
-impl Connection {
-    pub fn new(p1: Pin, p2: Pin) -> Self {
-        Self { a: p2, b: p1 }
-    }
-
-    pub fn involves_instance(&self, id: InstanceId) -> bool {
-        self.a.ins == id || self.b.ins == id
-    }
-
-    pub fn display(&self, db: &DB) -> String {
-        format!("{} <-> {}", self.a.display(db), self.b.display(db))
-    }
-
-    fn get_pin_first(&self, pin: Pin) -> Option<(Pin, Pin)> {
-        if self.a == pin {
-            Some((self.a, self.b))
-        } else if self.b == pin {
-            Some((self.b, self.a))
-        } else {
-            None
-        }
-    }
-}
-
-impl PartialEq for Connection {
-    fn eq(&self, other: &Self) -> bool {
-        self.a == other.a && self.b == other.b
-    }
-}
-
-impl Hash for Connection {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.a.hash(state);
-        self.b.hash(state);
-    }
 }
 
 // Gate
