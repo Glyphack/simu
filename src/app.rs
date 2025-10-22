@@ -1447,8 +1447,8 @@ impl App {
         // }
 
         if self.current_dirty || self.simulator.is_none() {
-            let mut sim = Simulator::new(self.db.clone());
-            sim.compute();
+            let mut sim = Simulator::new();
+            sim.compute(&self.db);
             self.simulator = Some(sim);
             self.current_dirty = false;
         }

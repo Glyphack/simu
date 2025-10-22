@@ -77,7 +77,6 @@ impl Value {
 }
 
 pub struct Simulator {
-    db: DB,
     /// Final result - maps each pin to its current value
     pub current: HashMap<Pin, Value>,
     /// Number of iterations taken in last compute
@@ -89,9 +88,8 @@ pub struct Simulator {
 }
 
 impl Simulator {
-    pub(crate) fn new(db: DB) -> Self {
+    pub(crate) fn new() -> Self {
         Self {
-            db,
             current: Default::default(),
             last_iterations: 0,
             status: SimulationStatus::Running,
@@ -99,13 +97,13 @@ impl Simulator {
         }
     }
 
-    fn rebuild_sorted_instances(&self) -> Vec<InstanceId> {
-        let mut ids: Vec<InstanceId> = self.db.types.keys().collect();
+    fn rebuild_sorted_instances(&self, db: &DB) -> Vec<InstanceId> {
+        let mut ids: Vec<InstanceId> = db.types.keys().collect();
         ids.sort_unstable();
         ids
     }
 
-    pub fn compute(&mut self) -> HashSet<Pin> {
+    pub fn compute(&mut self, db: &DB) -> HashSet<Pin> {
         log::info!("=== Begin simulation ===");
 
         self.current_iteration = 0;
@@ -115,25 +113,25 @@ impl Simulator {
         let mut previous_state: HashMap<Pin, Value>;
         let mut stable_count = 0;
 
-        let power_ids: Vec<_> = self.db.powers.keys().collect();
+        let power_ids: Vec<_> = db.powers.keys().collect();
         for &id in &power_ids {
-            self.evaluate_power(id);
+            self.evaluate_power(db, id);
         }
 
         while self.current_iteration < MAX_ITERATIONS {
             previous_state = self.current.clone();
 
-            let sorted_instances = self.rebuild_sorted_instances();
+            let sorted_instances = self.rebuild_sorted_instances(db);
             for &id in &sorted_instances {
-                match self.db.ty(id) {
+                match db.ty(id) {
                     InstanceKind::Wire => {
-                        self.evaluate_wire(id);
+                        self.evaluate_wire(db, id);
                     }
                     InstanceKind::Gate(_) => {
-                        self.evaluate_gate(id);
+                        self.evaluate_gate(db, id);
                     }
                     InstanceKind::Lamp => {
-                        self.evaluate_lamp(id);
+                        self.evaluate_lamp(db, id);
                     }
                     InstanceKind::Power | InstanceKind::CustomCircuit(_) => {}
                 }
@@ -171,47 +169,47 @@ impl Simulator {
             .collect()
     }
 
-    fn evaluate_power(&mut self, id: InstanceId) {
-        let p = self.db.get_power(id);
-        let out = self.db.power_output(id);
+    fn evaluate_power(&mut self, db: &DB, id: InstanceId) {
+        let p = db.get_power(id);
+        let out = db.power_output(id);
         let val = if p.on { Value::One } else { Value::Zero };
         self.current.insert(out, val);
     }
 
-    fn evaluate_wire(&mut self, id: InstanceId) {
+    fn evaluate_wire(&mut self, db: &DB, id: InstanceId) {
         let input = {
-            let start = self.db.wire_start(id);
-            let end = self.db.wire_end(id);
+            let start = db.wire_start(id);
+            let end = db.wire_end(id);
 
-            if self.db.pin_info(start).kind == PinKind::Input {
+            if db.pin_info(start).kind == PinKind::Input {
                 start
             } else {
                 end
             }
         };
-        let other = if self.db.wire_start(id) == input {
-            self.db.wire_end(id)
+        let other = if db.wire_start(id) == input {
+            db.wire_end(id)
         } else {
-            self.db.wire_start(id)
+            db.wire_start(id)
         };
 
-        let result = self.get_pin_value(input);
+        let result = self.get_pin_value(db, input);
 
         self.current.insert(input, result);
         self.current.insert(other, result);
     }
 
-    fn evaluate_gate(&mut self, id: InstanceId) {
-        let InstanceKind::Gate(kind) = self.db.ty(id) else {
+    fn evaluate_gate(&mut self, db: &DB, id: InstanceId) {
+        let InstanceKind::Gate(kind) = db.ty(id) else {
             return;
         };
 
-        let inp1 = self.db.gate_inp1(id);
-        let inp2 = self.db.gate_inp2(id);
-        let out = self.db.gate_output(id);
+        let inp1 = db.gate_inp1(id);
+        let inp2 = db.gate_inp2(id);
+        let out = db.gate_output(id);
 
-        let a = self.get_pin_value(inp1);
-        let b = self.get_pin_value(inp2);
+        let a = self.get_pin_value(db, inp1);
+        let b = self.get_pin_value(db, inp2);
 
         let out_val = match kind {
             GateKind::And => a.and(b),
@@ -225,21 +223,21 @@ impl Simulator {
         self.current.insert(out, out_val);
     }
 
-    fn evaluate_lamp(&mut self, id: InstanceId) {
-        let inp = self.db.lamp_input(id);
-        let val = self.get_pin_value(inp);
+    fn evaluate_lamp(&mut self, db: &DB, id: InstanceId) {
+        let inp = db.lamp_input(id);
+        let val = self.get_pin_value(db, inp);
         self.current.insert(inp, val);
     }
 
-    fn get_pin_value(&self, pin: Pin) -> Value {
-        let mut connected = self.db.connected_pins(pin);
+    fn get_pin_value(&self, db: &DB, pin: Pin) -> Value {
+        let mut connected = db.connected_pins(pin);
         connected.push(pin);
         connected.sort_unstable();
         connected.dedup();
 
         let mut result = Value::Zero;
         for other in connected {
-            if self.db.pin_info(other).kind != PinKind::Output {
+            if db.pin_info(other).kind != PinKind::Output {
                 continue;
             }
             if let Some(&val) = self.current.get(&other) {
@@ -301,8 +299,8 @@ mod tests {
 
         add_connection(&mut db, power_out, lamp_in);
 
-        let mut sim = Simulator::new(db.clone());
-        let result = sim.compute();
+        let mut sim = Simulator::new();
+        let result = sim.compute(&db);
 
         assert!(result.contains(&power_out), "Power output should be on");
         assert!(result.contains(&lamp_in), "Lamp input should be on");
@@ -319,8 +317,8 @@ mod tests {
 
         add_connection(&mut db, power_out, lamp_in);
 
-        let mut sim = Simulator::new(db.clone());
-        let result = sim.compute();
+        let mut sim = Simulator::new();
+        let result = sim.compute(&db);
 
         assert!(!result.contains(&power_out), "Power output should be off");
         assert!(!result.contains(&lamp_in), "Lamp input should be off");
@@ -345,8 +343,8 @@ mod tests {
         add_connection(&mut db, power2_out, gate_in2);
         add_connection(&mut db, gate_out, lamp_in);
 
-        let mut sim = Simulator::new(db.clone());
-        let result = sim.compute();
+        let mut sim = Simulator::new();
+        let result = sim.compute(&db);
 
         assert!(result.contains(&gate_out), "AND gate output should be on");
         assert!(result.contains(&lamp_in), "Lamp should be on");
@@ -408,8 +406,8 @@ mod tests {
         // Set S=1, R=0
         db.get_power_mut(s_power).on = true;
 
-        let mut sim = Simulator::new(db.clone());
-        let _result = sim.compute();
+        let mut sim = Simulator::new();
+        let _result = sim.compute(&db);
 
         // Q should be high (1)
         let q_output = db.gate_output(nor1);
@@ -437,8 +435,8 @@ mod tests {
         // Set S=0, R=1
         db.get_power_mut(r_power).on = true;
 
-        let mut sim = Simulator::new(db.clone());
-        let _result = sim.compute();
+        let mut sim = Simulator::new();
+        let _result = sim.compute(&db);
 
         // Q should be low (0)
         let q_output = db.gate_output(nor1);
@@ -465,13 +463,13 @@ mod tests {
 
         // First set the latch to SET state (S=1, R=0)
         db.get_power_mut(s_power).on = true;
-        let mut sim = Simulator::new(db.clone());
-        sim.compute();
+        let mut sim = Simulator::new();
+        sim.compute(&db);
 
         // Now change to HOLD state (S=0, R=0)
         db.get_power_mut(s_power).on = false;
-        let mut sim2 = Simulator::new(db.clone());
-        let _result = sim2.compute();
+        let mut sim2 = Simulator::new();
+        let _result = sim2.compute(&db);
 
         // Q should still be high (1) - holding previous SET state
         let q_output = db.gate_output(nor1);
@@ -493,8 +491,8 @@ mod tests {
         db.get_power_mut(s_power).on = true;
         db.get_power_mut(r_power).on = true;
 
-        let mut sim = Simulator::new(db.clone());
-        let _result = sim.compute();
+        let mut sim = Simulator::new();
+        let _result = sim.compute(&db);
 
         // Both outputs should be 0 (since NOR with any input 1 gives 0)
         let q_output = db.gate_output(nor1);
@@ -515,8 +513,8 @@ mod tests {
 
         // Start in SET state (S=1, R=0)
         db.get_power_mut(s_power).on = true;
-        let mut sim = Simulator::new(db.clone());
-        sim.compute();
+        let mut sim = Simulator::new();
+        sim.compute(&db);
 
         let q_output = db.gate_output(nor1);
         let q_value = sim.current.get(&q_output).copied().unwrap_or(Value::X);
@@ -525,8 +523,8 @@ mod tests {
         // Transition to RESET state (S=0, R=1)
         db.get_power_mut(s_power).on = false;
         db.get_power_mut(r_power).on = true;
-        let mut sim2 = Simulator::new(db.clone());
-        sim2.compute();
+        let mut sim2 = Simulator::new();
+        sim2.compute(&db);
 
         let q_value_after = sim2.current.get(&q_output).copied().unwrap_or(Value::X);
         let q_bar_output = db.gate_output(nor2);
@@ -544,8 +542,8 @@ mod tests {
         // Set S=1, R=0
         db.get_power_mut(s_power).on = true;
 
-        let mut sim = Simulator::new(db.clone());
-        sim.compute();
+        let mut sim = Simulator::new();
+        sim.compute(&db);
 
         // Should stabilize in reasonable number of iterations
         // For a simple SR latch, should be < 10 iterations
@@ -565,8 +563,8 @@ mod tests {
         // Set S=1, R=0
         db.get_power_mut(s_power).on = true;
 
-        let mut sim = Simulator::new(db.clone());
-        sim.compute();
+        let mut sim = Simulator::new();
+        sim.compute(&db);
 
         // The simulator should handle the cycle without infinite recursion
         // If we get here, cycle detection worked (test would hang/crash otherwise)
