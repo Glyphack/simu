@@ -22,10 +22,6 @@ pub enum CanvasDrag {
 
 #[derive(serde::Deserialize, serde::Serialize, Debug, Clone, Copy)]
 pub enum Drag {
-    Panel {
-        pos: Pos2,
-        kind: InstanceKind,
-    },
     Canvas(CanvasDrag),
     Label {
         id: LabelId,
@@ -141,17 +137,6 @@ impl App {
 
     pub fn handle_dragging(&mut self, ui: &mut Ui, mouse: Pos2) {
         match self.drag {
-            Some(Drag::Panel { pos: _, kind }) => match kind {
-                InstanceKind::Gate(gate_kind) => self.draw_gate_preview(ui, gate_kind, mouse),
-                InstanceKind::Power => self.draw_power_preview(ui, mouse),
-                InstanceKind::Wire => {
-                    self.draw_wire(ui, &Wire::new_at(mouse), false, false);
-                }
-                InstanceKind::Lamp => self.draw_lamp_preview(ui, mouse),
-                InstanceKind::CustomCircuit(def) => {
-                    self.draw_custom_circuit_preview(ui, def, mouse);
-                }
-            },
             Some(Drag::Selecting { start }) => {
                 let start_screen = start - self.viewport_offset;
                 let mouse_screen = mouse - self.viewport_offset;
@@ -321,9 +306,6 @@ impl App {
             None => {}
         }
 
-        if let Some(Drag::Panel { pos, kind: _ }) = self.drag.as_mut() {
-            *pos = mouse;
-        }
         self.compute_potential_connections();
     }
 
@@ -332,41 +314,15 @@ impl App {
             return;
         };
         match drag {
-            Drag::Panel { pos, kind } => {
-                if let InstanceKind::CustomCircuit(definition_index) = kind
-                    && definition_index >= self.db.custom_circuit_definitions.len()
-                {
-                    return;
-                }
-
-                let id = match kind {
-                    InstanceKind::Gate(gate_kind) => self.db.new_gate(Gate {
-                        kind: gate_kind,
-                        pos,
-                    }),
-                    InstanceKind::Power => self.db.new_power(Power { pos, on: true }),
-                    InstanceKind::Wire => {
-                        let w = Wire::new_at(pos);
-                        self.db.new_wire(w)
-                    }
-                    InstanceKind::Lamp => self.db.new_lamp(Lamp { pos }),
-                    InstanceKind::CustomCircuit(definition_index) => {
-                        self.db
-                            .new_custom_circuit(crate::custom_circuit::CustomCircuit {
-                                pos,
-                                definition_index,
-                            })
-                    }
-                };
-                self.connection_manager.mark_instance_dirty(id);
-            }
             Drag::Canvas(canvas_drag) => match canvas_drag {
                 CanvasDrag::Single { id, offset: _ } => {
                     self.connection_manager.mark_instance_dirty(id);
+                    self.current_dirty = true;
                 }
                 CanvasDrag::Selected { start: _ } => {
                     let selected: Vec<InstanceId> = self.selected.iter().copied().collect();
                     self.connection_manager.mark_instances_dirty(&selected);
+                    self.current_dirty = true;
                 }
             },
             Drag::Selecting { start } => {
@@ -401,6 +357,7 @@ impl App {
             }
             Drag::Resize { id, start: _ } => {
                 self.connection_manager.mark_instance_dirty(id);
+                self.current_dirty = true;
             }
             Drag::PinToWire {
                 source_pin: _,
@@ -418,9 +375,9 @@ impl App {
             } => {
                 self.connection_manager
                     .mark_instance_dirty(original_wire_id);
+                self.current_dirty = true;
             }
         }
-        self.current_dirty = true;
         self.connection_manager.rebuild_spatial_index(&self.db);
         self.potential_connections.clear();
         self.drag_had_movement = false;

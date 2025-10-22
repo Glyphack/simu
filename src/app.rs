@@ -924,6 +924,10 @@ impl DB {
     }
 }
 
+pub fn current_dirty() -> bool {
+    true
+}
+
 #[derive(serde::Deserialize, serde::Serialize)]
 pub struct App {
     pub canvas_config: CanvasConfig,
@@ -936,7 +940,7 @@ pub struct App {
     // possible connections while dragging
     pub potential_connections: HashSet<Connection>,
     // mark when current needs recomputation
-    #[serde(skip)]
+    #[serde(skip, default = "current_dirty")]
     pub current_dirty: bool,
     pub show_debug: bool,
     // selection set and move preview
@@ -1403,7 +1407,7 @@ impl App {
                     self.handle_drag_end(mouse);
 
                     if self.connection_manager.update_connections(&mut self.db) {
-                        self.current_dirty = true;
+                        // self.current_dirty = true;
                     }
                     if !drag_had_movement {
                         self.selected.clear();
@@ -1886,7 +1890,7 @@ impl App {
                 } => {
                     return Some(Hover::Instance(original_wire_id));
                 }
-                Drag::Panel { .. } | Drag::Selecting { .. } | Drag::Label { .. } => {}
+                Drag::Selecting { .. } | Drag::Label { .. } => {}
             }
         }
         for selected in &self.selected {
@@ -2155,6 +2159,7 @@ impl App {
 
         // Simulation status
         writeln!(out, "\n=== Simulation Status ===").ok();
+        writeln!(out, "needs update {}", self.current_dirty).ok();
         match self.simulator.status {
             SimulationStatus::Stable { iterations } => {
                 writeln!(out, "Status: STABLE (after {iterations} iterations)").ok();

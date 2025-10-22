@@ -80,6 +80,8 @@ impl Value {
 pub struct Simulator {
     /// Final result - maps each pin to its current value
     pub current: HashMap<Pin, Value>,
+    /// Keep what has been already evaluated
+    pub evaluated: HashSet<InstanceId>,
     /// Number of iterations taken in last compute
     pub last_iterations: usize,
     /// Current status of the simulation
@@ -114,23 +116,13 @@ impl Simulator {
             self.evaluate_power(db, id);
         }
 
+        let sorted_instances = self.rebuild_sorted_instances(db);
+
         while self.current_iteration < MAX_ITERATIONS {
             previous_state = self.current.clone();
 
-            let sorted_instances = self.rebuild_sorted_instances(db);
             for &id in &sorted_instances {
-                match db.ty(id) {
-                    InstanceKind::Wire => {
-                        self.evaluate_wire(db, id);
-                    }
-                    InstanceKind::Gate(_) => {
-                        self.evaluate_gate(db, id);
-                    }
-                    InstanceKind::Lamp => {
-                        self.evaluate_lamp(db, id);
-                    }
-                    InstanceKind::Power | InstanceKind::CustomCircuit(_) => {}
-                }
+                self.evaluate(db, id);
             }
 
             self.current_iteration += 1;
@@ -163,6 +155,22 @@ impl Simulator {
             .iter()
             .filter_map(|(pin, val)| if val.is_one() { Some(*pin) } else { None })
             .collect()
+    }
+
+    fn evaluate(&mut self, db: &DB, id: InstanceId) {
+        self.evaluated.insert(id);
+        match db.ty(id) {
+            InstanceKind::Wire => {
+                self.evaluate_wire(db, id);
+            }
+            InstanceKind::Gate(_) => {
+                self.evaluate_gate(db, id);
+            }
+            InstanceKind::Lamp => {
+                self.evaluate_lamp(db, id);
+            }
+            InstanceKind::Power | InstanceKind::CustomCircuit(_) => {}
+        }
     }
 
     fn evaluate_power(&mut self, db: &DB, id: InstanceId) {
@@ -225,7 +233,7 @@ impl Simulator {
         self.current.insert(inp, val);
     }
 
-    fn get_pin_value(&self, db: &DB, pin: Pin) -> Value {
+    fn get_pin_value(&mut self, db: &DB, pin: Pin) -> Value {
         let mut connected = db.connected_pins(pin);
         connected.push(pin);
         connected.sort_unstable();
@@ -235,6 +243,10 @@ impl Simulator {
         for other in connected {
             if db.pin_info(other).kind != PinKind::Output {
                 continue;
+            }
+
+            if !self.evaluated.contains(&other.ins) {
+                self.evaluate(db, other.ins);
             }
             if let Some(&val) = self.current.get(&other) {
                 result = result.or(val);
