@@ -1,17 +1,21 @@
 # Simu - Digital Logic Circuit Simulator
 
 **Build Commands:**
+
 - Native: `cargo run`
 - Web: `trunk serve`
 - All checks: `./check.sh` (includes cargo check/fmt/clippy/test + trunk build)
+- When running commands use quite mode to not waste tokens
 
 **Architecture:**
+
 - Rust 2024 edition with egui/eframe GUI framework
 - Cross-platform (native + WASM web builds)
 - Core modules: app.rs (main logic), connection_manager, custom_circuit, drag, save_load
 - Uses slotmap for entity management, serde for persistence
 
 **Code Style:**
+
 - Strict linting: unsafe_code=deny, extensive clippy rules enabled
 - No unsafe code, warn on trivial issues
 - Formatting: `cargo fmt --all -- --check`
@@ -19,3 +23,14 @@
 - Naming: snake_case functions/variables, PascalCase types, SCREAMING_SNAKE_CASE constants
 - Error handling: Result/Option types preferred over panics
 - Run `./check.sh` after changes to ensure no warnings/errors
+
+
+Implement your code in TDD style
+
+**TDD Principles**
+
+ - Write tests FIRST, watch them fail
+ - Implement minimal code to pass
+ - Refactor only after tests pass
+ - Each test validates one specific behavior
+ - Tests serve as documentation and specification

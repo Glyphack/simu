@@ -135,7 +135,7 @@ impl ConnectionManager {
     }
 
     /// Validate if a connection between two pins is allowed
-    fn validate_connection(&self, db: &DB, c: Connection) -> bool {
+    fn validate_connection(&self, _db: &DB, c: Connection) -> bool {
         if c.a == c.b {
             return false;
         }
@@ -144,46 +144,7 @@ impl ConnectionManager {
             return false;
         }
 
-        let pin1_kind = self.get_pin_kind(db, c.a);
-        let pin2_kind = self.get_pin_kind(db, c.b);
-
-        if matches!(pin1_kind, Some(assets::PinKind::Output))
-            && matches!(pin2_kind, Some(assets::PinKind::Output))
-        {
-            return false;
-        }
-
         true
-    }
-
-    /// Get the kind (Input/Output) of a pin
-    fn get_pin_kind(&self, db: &DB, pin: Pin) -> Option<assets::PinKind> {
-        match db.ty(pin.ins) {
-            InstanceKind::Gate(gate_kind) => {
-                let graphics = gate_kind.graphics();
-                graphics.pins.get(pin.index as usize).map(|p| p.kind)
-            }
-            InstanceKind::Power => {
-                let graphics = &assets::POWER_ON_GRAPHICS;
-                graphics.pins.get(pin.index as usize).map(|p| p.kind)
-            }
-            InstanceKind::Wire => {
-                // Wires can connect to anything
-                Some(assets::PinKind::Input) // Treat as input for validation purposes
-            }
-            InstanceKind::Lamp => {
-                let graphics = &assets::LAMP_GRAPHICS;
-                graphics.pins.get(pin.index as usize).map(|p| p.kind)
-            }
-            InstanceKind::CustomCircuit(_) => {
-                let cc = db.get_custom_circuit(pin.ins);
-                if let Some(def) = db.custom_circuit_definitions.get(cc.definition_index) {
-                    def.external_pins.get(pin.index as usize).map(|p| p.kind)
-                } else {
-                    None
-                }
-            }
-        }
     }
 
     /// Snap a pin to match the position of another pin
@@ -281,11 +242,14 @@ impl ConnectionManager {
             connections_to_keep.insert(*connection);
         }
 
+        // Check if connections actually changed
+        let connections_changed = db.connections != connections_to_keep;
+
         db.connections = connections_to_keep;
 
         self.dirty_instances.clear();
 
-        true
+        connections_changed
     }
 
     /// Get debug information about the connection manager
