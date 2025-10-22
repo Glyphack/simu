@@ -106,7 +106,6 @@ impl Simulator {
 
         self.current_iteration = 0;
         self.status = SimulationStatus::Running;
-        self.current.clear();
 
         let mut previous_state: HashMap<Pin, Value>;
         let mut stable_count = 0;
@@ -233,7 +232,7 @@ impl Simulator {
         self.current.insert(inp, val);
     }
 
-    fn get_pin_value(&mut self, db: &DB, pin: Pin) -> Value {
+    fn get_pin_value(&self, db: &DB, pin: Pin) -> Value {
         let mut connected = db.connected_pins(pin);
         connected.push(pin);
         connected.sort_unstable();
@@ -245,9 +244,6 @@ impl Simulator {
                 continue;
             }
 
-            if !self.evaluated.contains(&other.ins) {
-                self.evaluate(db, other.ins);
-            }
             if let Some(&val) = self.current.get(&other) {
                 result = result.or(val);
             }
@@ -294,6 +290,58 @@ mod tests {
 
     fn add_connection(db: &mut DB, pin_a: Pin, pin_b: Pin) {
         db.connections.insert(Connection::new(pin_a, pin_b));
+    }
+
+    // SR Latch Test Helpers
+    // Creates an SR latch using two NOR gates with cross-coupled feedback
+    // Standard SR NOR latch:
+    //   Q = NOR(R, Q̄)
+    //   Q̄ = NOR(S, Q)
+    //
+    // R (Reset)--[NOR1]--- Q
+    //            ^  |
+    //            |  +------+
+    //            |         |
+    //            +---------v
+    // S (Set) ---[NOR2]--- Q̄
+    fn create_sr_latch(db: &mut DB) -> (InstanceId, InstanceId, InstanceId, InstanceId) {
+        let s_power = db.new_power(Power {
+            pos: Pos2::ZERO,
+            on: false,
+        });
+        let r_power = db.new_power(Power {
+            pos: pos2(0.0, 50.0),
+            on: false,
+        });
+
+        let nor1 = new_gate(db, GateKind::Nor);
+        let nor2 = new_gate(db, GateKind::Nor);
+
+        // R connects to NOR1 input 1 (Q gate)
+        let r_out = db.power_output(r_power);
+        let nor1_in1 = db.gate_inp1(nor1);
+        add_connection(db, r_out, nor1_in1);
+
+        // S connects to NOR2 input 1 (Q̄ gate)
+        let s_out = db.power_output(s_power);
+        let nor2_in1 = db.gate_inp1(nor2);
+        add_connection(db, s_out, nor2_in1);
+
+        // Cross-couple: NOR1 output (Q) -> NOR2 input 2
+        let nor1_out = db.gate_output(nor1);
+        let nor2_in2 = db.gate_inp2(nor2);
+        add_connection(db, nor1_out, nor2_in2);
+
+        // Cross-couple: NOR2 output (Q̄) -> NOR1 input 2
+        let nor2_out = db.gate_output(nor2);
+        let nor1_in2 = db.gate_inp2(nor1);
+        add_connection(db, nor2_out, nor1_in2);
+
+        (s_power, r_power, nor1, nor2)
+    }
+
+    fn get_output(db: &DB, sim: &Simulator, id: InstanceId) -> Value {
+        sim.current[&db.gate_output(id)]
     }
 
     #[test]
@@ -356,54 +404,6 @@ mod tests {
 
         assert!(result.contains(&gate_out), "AND gate output should be on");
         assert!(result.contains(&lamp_in), "Lamp should be on");
-    }
-
-    // SR Latch Test Helpers
-    // Creates an SR latch using two NOR gates with cross-coupled feedback
-    // Standard SR NOR latch:
-    //   Q = NOR(R, Q̄)
-    //   Q̄ = NOR(S, Q)
-    //
-    // R (Reset)--[NOR1]--- Q
-    //            ^  |
-    //            |  +------+
-    //            |         |
-    //            +---------v
-    // S (Set) ---[NOR2]--- Q̄
-    fn create_sr_latch(db: &mut DB) -> (InstanceId, InstanceId, InstanceId, InstanceId) {
-        let s_power = db.new_power(Power {
-            pos: Pos2::ZERO,
-            on: false,
-        });
-        let r_power = db.new_power(Power {
-            pos: pos2(0.0, 50.0),
-            on: false,
-        });
-
-        let nor1 = new_gate(db, GateKind::Nor); // Q gate: Q = NOR(R, Q̄)
-        let nor2 = new_gate(db, GateKind::Nor); // Q̄ gate: Q̄ = NOR(S, Q)
-
-        // R connects to NOR1 input 1 (Q gate)
-        let r_out = db.power_output(r_power);
-        let nor1_in1 = db.gate_inp1(nor1);
-        add_connection(db, r_out, nor1_in1);
-
-        // S connects to NOR2 input 1 (Q̄ gate)
-        let s_out = db.power_output(s_power);
-        let nor2_in1 = db.gate_inp1(nor2);
-        add_connection(db, s_out, nor2_in1);
-
-        // Cross-couple: NOR1 output (Q) -> NOR2 input 2
-        let nor1_out = db.gate_output(nor1);
-        let nor2_in2 = db.gate_inp2(nor2);
-        add_connection(db, nor1_out, nor2_in2);
-
-        // Cross-couple: NOR2 output (Q̄) -> NOR1 input 2
-        let nor2_out = db.gate_output(nor2);
-        let nor1_in2 = db.gate_inp2(nor1);
-        add_connection(db, nor2_out, nor1_in2);
-
-        (s_power, r_power, nor1, nor2)
     }
 
     #[test]
@@ -474,20 +474,23 @@ mod tests {
         let mut sim = Simulator::new();
         sim.compute(&db);
 
-        // Now change to HOLD state (S=0, R=0)
+        assert_eq!(get_output(&db, &sim, nor1), Value::One);
+        assert_eq!(get_output(&db, &sim, nor2), Value::Zero);
+
         db.get_power_mut(s_power).on = false;
-        let mut sim2 = Simulator::new();
-        let _result = sim2.compute(&db);
+        let _result = sim.compute(&db);
 
-        // Q should still be high (1) - holding previous SET state
-        let q_output = db.gate_output(nor1);
-        let q_value = sim2.current.get(&q_output).copied().unwrap_or(Value::X);
-        assert_eq!(q_value, Value::One, "Q should remain 1 in HOLD state");
+        assert_eq!(
+            get_output(&db, &sim, nor1),
+            Value::One,
+            "Q should hold state"
+        );
 
-        // Q̄ should still be low (0)
-        let q_bar_output = db.gate_output(nor2);
-        let q_bar_value = sim2.current.get(&q_bar_output).copied().unwrap_or(Value::X);
-        assert_eq!(q_bar_value, Value::Zero, "Q̄ should remain 0 in HOLD state");
+        assert_eq!(
+            get_output(&db, &sim, nor2),
+            Value::Zero,
+            "Q inverse should hold state"
+        );
     }
 
     #[test]
@@ -561,24 +564,5 @@ mod tests {
             sim.last_iterations
         );
         assert!(sim.last_iterations > 0, "Should take at least 1 iteration");
-    }
-
-    #[test]
-    fn sr_latch_cycle_detection() {
-        let mut db = create_test_db();
-        let (s_power, _r_power, _nor1, _nor2) = create_sr_latch(&mut db);
-
-        // Set S=1, R=0
-        db.get_power_mut(s_power).on = true;
-
-        let mut sim = Simulator::new();
-        sim.compute(&db);
-
-        // The simulator should handle the cycle without infinite recursion
-        // If we get here, cycle detection worked (test would hang/crash otherwise)
-        assert!(
-            sim.last_iterations < 1000,
-            "Should not take excessive iterations"
-        );
     }
 }

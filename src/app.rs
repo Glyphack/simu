@@ -19,6 +19,9 @@ use crate::{
 
 pub const PANEL_BUTTON_MAX_HEIGHT: f32 = 70.0;
 
+pub const LABEL_EDIT_TEXT_SIZE: f32 = 16.0;
+pub const LABEL_DISPLAY_TEXT_SIZE: f32 = 19.0;
+
 // Grid
 pub const GRID_SIZE: f32 = 20.0;
 pub const COLOR_GRID_LIGHT: Color32 = Color32::from_rgb(230, 230, 230);
@@ -1814,7 +1817,7 @@ impl App {
                 .painter()
                 .layout_no_wrap(
                     self.label_edit_buffer.clone(),
-                    egui::FontId::proportional(16.0),
+                    egui::FontId::proportional(LABEL_EDIT_TEXT_SIZE),
                     text_color,
                 )
                 .size();
@@ -1824,7 +1827,7 @@ impl App {
 
             let text_edit = egui::TextEdit::singleline(&mut self.label_edit_buffer)
                 .desired_width(text_edit_size.x)
-                .font(egui::FontId::proportional(16.0));
+                .font(egui::FontId::proportional(LABEL_EDIT_TEXT_SIZE));
 
             ui.put(rect, text_edit).request_focus();
         } else {
@@ -1832,7 +1835,7 @@ impl App {
                 .painter()
                 .layout_no_wrap(
                     label.text.clone(),
-                    egui::FontId::proportional(16.0),
+                    egui::FontId::proportional(LABEL_DISPLAY_TEXT_SIZE),
                     text_color,
                 )
                 .size();
@@ -1845,7 +1848,7 @@ impl App {
                 screen_pos,
                 egui::Align2::CENTER_CENTER,
                 &label.text,
-                egui::FontId::proportional(16.0),
+                egui::FontId::proportional(LABEL_DISPLAY_TEXT_SIZE),
                 text_color,
             );
 

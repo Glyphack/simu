@@ -3,8 +3,8 @@ use std::collections::HashSet;
 use egui::{CornerRadius, Pos2, Rect, Stroke, StrokeKind, Ui, Vec2, pos2};
 
 use crate::app::{
-    App, COLOR_HOVER_PIN_TO_WIRE, COLOR_SELECTION_BOX, Gate, Hover, InstanceId, InstanceKind,
-    LabelId, Lamp, MIN_WIRE_SIZE, Pin, Power, Wire,
+    App, COLOR_HOVER_PIN_TO_WIRE, COLOR_SELECTION_BOX, Hover, InstanceId, InstanceKind, LabelId,
+    MIN_WIRE_SIZE, Pin, Wire,
 };
 
 #[derive(serde::Deserialize, serde::Serialize, Debug, Clone, Copy)]
