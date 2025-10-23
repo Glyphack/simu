@@ -86,8 +86,10 @@ pub struct Simulator {
     pub last_iterations: usize,
     /// Current status of the simulation
     pub status: SimulationStatus,
-    /// Current iteration number (for debugging/UI)
+    /// Current iteration number
     pub current_iteration: usize,
+    /// Are clocks on?
+    pub clocks_on: bool,
 }
 
 impl Simulator {
@@ -116,7 +118,6 @@ impl Simulator {
         }
 
         let sorted_instances = self.rebuild_sorted_instances(db);
-
         while self.current_iteration < MAX_ITERATIONS {
             previous_state = self.current.clone();
 
@@ -169,6 +170,13 @@ impl Simulator {
                 self.evaluate_lamp(db, id);
             }
             InstanceKind::Power | InstanceKind::CustomCircuit(_) => {}
+            InstanceKind::Clock => {
+                if self.clocks_on {
+                    self.current.insert(db.clock_output(id), Value::One);
+                } else {
+                    self.current.insert(db.clock_output(id), Value::Zero);
+                }
+            }
         }
     }
 
@@ -286,6 +294,14 @@ mod tests {
         db.new_gate(Gate {
             pos: Pos2::ZERO,
             kind,
+        })
+    }
+
+    #[expect(dead_code)]
+    fn new_clock(db: &mut DB) -> InstanceId {
+        db.new_clock(crate::app::Clock {
+            pos: Pos2::ZERO,
+            period: 1,
         })
     }
 
@@ -566,4 +582,118 @@ mod tests {
         );
         assert!(sim.last_iterations > 0, "Should take at least 1 iteration");
     }
+
+    // #[test]
+    // fn clock_toggles_over_two_ticks() {
+    //     let mut db = create_test_db();
+    //     let clock = new_clock(&mut db);
+    //     let lamp = new_lamp(&mut db);
+    //
+    //     let clock_out = db.clock_output(clock);
+    //     let lamp_in = db.lamp_input(lamp);
+    //
+    //     add_connection(&mut db, clock_out, lamp_in);
+    //
+    //     let mut sim = Simulator::new(db.clone());
+    //
+    //     // First compute: clock should be Zero (initial state)
+    //     sim.compute();
+    //     let first_value = sim.current.get(&clock_out).copied().unwrap_or(Value::X);
+    //     assert_eq!(first_value, Value::Zero, "Clock should start at Zero");
+    //     assert_eq!(sim.clock_tick, 0, "Clock tick should be 0 initially");
+    //
+    //     // Advance clocks and compute again
+    //     sim.advance_clocks();
+    //     sim.compute();
+    //     let second_value = sim.current.get(&clock_out).copied().unwrap_or(Value::X);
+    //     assert_eq!(second_value, Value::One, "Clock should toggle to One");
+    //     assert_eq!(sim.clock_tick, 1, "Clock tick should be 1 after advance");
+    //
+    //     // Advance clocks and compute again
+    //     sim.advance_clocks();
+    //     sim.compute();
+    //     let third_value = sim.current.get(&clock_out).copied().unwrap_or(Value::X);
+    //     assert_eq!(third_value, Value::Zero, "Clock should toggle back to Zero");
+    //     assert_eq!(
+    //         sim.clock_tick, 2,
+    //         "Clock tick should be 2 after second advance"
+    //     );
+    // }
+    //
+    // #[test]
+    // fn clock_drives_gate() {
+    //     let mut db = create_test_db();
+    //     let clock = new_clock(&mut db);
+    //     let power = new_power(&mut db);
+    //     let gate = new_gate(&mut db, GateKind::And);
+    //     let lamp = new_lamp(&mut db);
+    //
+    //     let clock_out = db.clock_output(clock);
+    //     let power_out = db.power_output(power);
+    //     let gate_in1 = db.gate_inp1(gate);
+    //     let gate_in2 = db.gate_inp2(gate);
+    //     let gate_out = db.gate_output(gate);
+    //     let lamp_in = db.lamp_input(lamp);
+    //
+    //     // Connect: clock -> gate_in1, power -> gate_in2, gate_out -> lamp
+    //     add_connection(&mut db, clock_out, gate_in1);
+    //     add_connection(&mut db, power_out, gate_in2);
+    //     add_connection(&mut db, gate_out, lamp_in);
+    //
+    //     let mut sim = Simulator::new(db.clone());
+    //
+    //     // First compute: clock is Zero, power is One, AND gate output should be Zero
+    //     sim.compute();
+    //     let lamp_val = sim.current.get(&lamp_in).copied().unwrap_or(Value::X);
+    //     assert_eq!(
+    //         lamp_val,
+    //         Value::Zero,
+    //         "Lamp should be off when clock is Zero"
+    //     );
+    //
+    //     // Advance clock and compute: clock is One, power is One, AND gate output should be One
+    //     sim.advance_clocks();
+    //     sim.compute();
+    //     let lamp_val = sim.current.get(&lamp_in).copied().unwrap_or(Value::X);
+    //     assert_eq!(lamp_val, Value::One, "Lamp should be on when clock is One");
+    //
+    //     // Advance clock again: clock is Zero, power is One, AND gate output should be Zero
+    //     sim.advance_clocks();
+    //     sim.compute();
+    //     let lamp_val = sim.current.get(&lamp_in).copied().unwrap_or(Value::X);
+    //     assert_eq!(
+    //         lamp_val,
+    //         Value::Zero,
+    //         "Lamp should be off when clock toggles back to Zero"
+    //     );
+    // }
+    //
+    // #[test]
+    // fn clock_state_resets_on_new_simulator() {
+    //     let mut db = create_test_db();
+    //     let clock = new_clock(&mut db);
+    //
+    //     let clock_out = db.clock_output(clock);
+    //
+    //     // Create first simulator and advance clock
+    //     let mut sim1 = Simulator::new(db.clone());
+    //     sim1.advance_clocks();
+    //     sim1.compute();
+    //     let first_value = sim1.current.get(&clock_out).copied().unwrap_or(Value::X);
+    //     assert_eq!(first_value, Value::One, "Clock should be One after advance");
+    //
+    //     // Create new simulator - clock should reset to Zero
+    //     let mut sim2 = Simulator::new(db.clone());
+    //     sim2.compute();
+    //     let second_value = sim2.current.get(&clock_out).copied().unwrap_or(Value::X);
+    //     assert_eq!(
+    //         second_value,
+    //         Value::Zero,
+    //         "Clock should reset to Zero in new simulator"
+    //     );
+    //     assert_eq!(
+    //         sim2.clock_tick, 0,
+    //         "Clock tick should reset to 0 in new simulator"
+    //     );
+    // }
 }

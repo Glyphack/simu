@@ -160,3 +160,11 @@ pub static LAMP_GRAPHICS: InstanceGraphics = InstanceGraphics {
         offset: Vec2::new(-40.0, 0.0),
     }],
 };
+
+pub static CLOCK_GRAPHICS: InstanceGraphics = InstanceGraphics {
+    svg: include_image!("../assets/wave.svg"),
+    pins: &[PinGraphics {
+        kind: PinKind::Output,
+        offset: Vec2::new(40.0, 0.0),
+    }],
+};
