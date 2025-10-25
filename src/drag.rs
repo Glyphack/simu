@@ -369,6 +369,12 @@ impl App {
                         sel.insert(id);
                     }
                 }
+                for (id, c) in &self.db.clocks {
+                    let r = Rect::from_center_size(c.pos, self.canvas_config.base_gate_size);
+                    if rect.contains_rect(r) {
+                        sel.insert(id);
+                    }
+                }
                 for (id, w) in &self.db.wires {
                     if rect.contains(w.start) && rect.contains(w.end) {
                         sel.insert(id);

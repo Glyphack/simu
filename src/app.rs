@@ -38,6 +38,9 @@ pub const COLOR_HOVER_PIN_TO_WIRE: Color32 = Color32::GRAY;
 pub const COLOR_HOVER_PIN_DETACH: Color32 = Color32::RED;
 pub const PIN_HOVER_THRESHOLD: f32 = 8.0;
 
+pub const INSTANEC_OUTLINE: Vec2 = vec2(6.0, 6.0);
+pub const INSTANEC_OUTLINE_TICKNESS: f32 = 2.0;
+
 pub const NEW_PIN_ON_WIRE_THRESHOLD: f32 = 10.0;
 
 // Connections
@@ -1016,11 +1019,6 @@ pub struct App {
     pub panning: bool,
     #[serde(skip)]
     pub panel_width: f32,
-    // Context menu state
-    #[serde(skip)]
-    pub show_right_click_actions_menu: bool,
-    #[serde(skip)]
-    pub context_menu_pos: Pos2,
     // Label editing state
     #[serde(skip)]
     pub editing_label: Option<LabelId>,
@@ -1054,8 +1052,6 @@ impl Default for App {
             viewport_offset: Vec2::ZERO,
             panning: false,
             panel_width: 0.0,
-            show_right_click_actions_menu: false,
-            context_menu_pos: Pos2::ZERO,
             editing_label: None,
             label_edit_buffer: String::new(),
             simulator: Simulator::default(),
@@ -1096,6 +1092,27 @@ impl eframe::App for App {
 
                 ui.menu_button("View", |ui| {
                     ui.checkbox(&mut self.show_debug, "World Debug");
+                });
+                ui.add_space(16.0);
+
+                ui.menu_button("Tools", |ui| {
+                    if ui.button("Create module").clicked() {
+                        // Generate a unique name for the custom circuit
+                        let circuit_name = format!(
+                            "CustomCircuit_{}",
+                            self.db.custom_circuit_definitions.len() + 1
+                        );
+
+                        match self.create_custom_circuit(circuit_name, &self.selected.clone()) {
+                            Ok(()) => {
+                                log::info!("Custom circuit created successfully");
+                                self.selected.clear();
+                            }
+                            Err(e) => {
+                                log::error!("Failed to create custom circuit: {e}");
+                            }
+                        }
+                    }
                 });
                 ui.add_space(16.0);
 
@@ -1451,7 +1468,7 @@ impl App {
     }
 
     fn draw_canvas(&mut self, ui: &mut Ui) {
-        let (resp, _painter) = ui.allocate_painter(ui.available_size(), Sense::drag());
+        let (resp, _painter) = ui.allocate_painter(ui.available_size(), Sense::click_and_drag());
         let canvas_rect = resp.rect;
 
         // Set clip rectangle to prevent canvas objects from drawing outside canvas bounds
@@ -1459,13 +1476,15 @@ impl App {
 
         Self::draw_grid(ui, canvas_rect, self.viewport_offset);
 
-        let mouse_clicked = resp.clicked();
+        let mouse_clicked_canvas_or_gates = resp.clicked();
         let double_clicked = ui.input(|i| {
             i.pointer
                 .button_double_clicked(egui::PointerButton::Primary)
         });
-        let mouse_dragging = resp.dragged_by(egui::PointerButton::Primary);
         let mouse_up = ui.input(|i| i.pointer.any_released());
+        // To use the canvas clicked we need to set everything on objects. Right now some stuff are
+        // on canvas rect
+        let mouse_clicked = ui.input(|i| i.pointer.primary_pressed());
 
         let right_released = ui.input(|i| i.pointer.secondary_released());
         let right_down = ui.input(|i| i.pointer.secondary_down());
@@ -1514,45 +1533,34 @@ impl App {
         }
 
         if let Some(mouse) = mouse_pos_world {
-            let dragging = self.drag.is_some();
-            let hovered_now = self.get_hovered(mouse);
+            let instance_dragging = self.drag.is_some();
+            self.hovered = self.get_hovered(mouse);
 
-            if mouse_dragging {
-                self.hovered = hovered_now;
+            if mouse_clicked {
                 self.handle_drag_start(mouse);
             }
 
-            if dragging {
+            if instance_dragging {
                 self.handle_dragging(ui, mouse);
-            } else {
-                self.hovered = hovered_now;
             }
 
-            if mouse_up {
-                if dragging {
-                    let drag_had_movement = self.drag_had_movement;
-                    self.handle_drag_end(mouse);
+            if mouse_up && instance_dragging {
+                self.handle_drag_end(mouse);
 
-                    if self.connection_manager.update_connections(&mut self.db) {
-                        // self.current_dirty = true;
-                    }
-                    if !drag_had_movement {
-                        self.selected.clear();
-                        if let Some(Hover::Instance(id)) = hovered_now {
-                            self.selected.insert(id);
-                        }
-                    }
-                } else {
-                    self.selected.clear();
-                    if let Some(Hover::Instance(id)) = hovered_now {
-                        self.selected.insert(id);
-                    }
+                if self.connection_manager.update_connections(&mut self.db) {
+                    // self.current_dirty = true;
                 }
-                self.hovered = hovered_now;
             }
         }
         if self.selected.len() == 1 {
-            self.highlight_selected_actions(ui, mouse_pos_world, mouse_clicked);
+            self.highlight_selected_actions(ui, mouse_pos_world, mouse_clicked_canvas_or_gates);
+        }
+
+        if mouse_clicked_canvas_or_gates {
+            self.selected.clear();
+            if let Some(hovered) = self.hovered {
+                self.selected.insert(hovered.instance());
+            }
         }
 
         if right_clicked
@@ -1564,33 +1572,24 @@ impl App {
             self.current_dirty = true;
         }
 
-        // Handle context menu for selected components
-        // TODO: Custom circuits
-        // if right_clicked
-        //     && !self.selected.is_empty()
-        //     && let Some(mouse_world) = mouse_pos_world
-        // {
-        //     self.show_right_click_actions_menu = true;
-        //     self.context_menu_pos = mouse_world - self.viewport_offset; // Convert to screen coordinates
-        // }
-
         if self.current_dirty {
             self.simulator.compute(&self.db);
             self.current_dirty = false;
         }
 
         // Draw world
-        for (id, gate) in &self.db.gates {
-            self.draw_gate(ui, id, gate);
+        // TODO: Remove the clones. We need to modify the selected, hovered things
+        for (id, gate) in self.db.gates.clone() {
+            self.draw_gate(ui, id, &gate);
         }
-        for (id, power) in &self.db.powers {
-            self.draw_power(ui, id, power);
+        for (id, power) in &self.db.powers.clone() {
+            self.draw_power(ui, id, &power);
         }
-        for (id, lamp) in &self.db.lamps {
-            self.draw_lamp(ui, id, lamp);
+        for (id, lamp) in &self.db.lamps.clone() {
+            self.draw_lamp(ui, id, &lamp);
         }
-        for (id, clock) in &self.db.clocks {
-            self.draw_clock(ui, id, clock);
+        for (id, clock) in &self.db.clocks.clone() {
+            self.draw_clock(ui, id, &clock);
         }
         for (id, custom_circuit) in &self.db.custom_circuits {
             self.draw_custom_circuit(ui, id, custom_circuit);
@@ -1632,8 +1631,6 @@ impl App {
             self.highlight_hovered(ui);
         }
         self.draw_selection_highlight(ui);
-
-        self.draw_right_click_actions_menu(ui);
 
         // Preview wire branching
         if !self.selected.is_empty()
@@ -1723,14 +1720,24 @@ impl App {
         rect
     }
 
-    fn draw_gate(&self, ui: &mut Ui, id: InstanceId, gate: &Gate) {
+    fn set_selected(&mut self, ui: &mut Ui, rect: Rect, id: InstanceId) {
+        let response = ui.allocate_rect(rect, Sense::click_and_drag());
+        if response.clicked() {
+            self.selected.clear();
+            self.selected.insert(id);
+        }
+    }
+
+    fn draw_gate(&mut self, ui: &mut Ui, id: InstanceId, gate: &Gate) {
         let screen_center = gate.pos - self.viewport_offset;
-        self.draw_instance_graphics(ui, gate.kind.graphics(), screen_center, |pin_index| {
-            self.is_on(Pin {
-                ins: id,
-                index: pin_index as u32,
-            })
-        });
+        let rect =
+            self.draw_instance_graphics(ui, gate.kind.graphics(), screen_center, |pin_index| {
+                self.is_on(Pin {
+                    ins: id,
+                    index: pin_index as u32,
+                })
+            });
+        self.set_selected(ui, rect, id);
     }
 
     pub fn draw_gate_preview(&self, ui: &mut Ui, gate_kind: GateKind, pos: Pos2) {
@@ -1738,14 +1745,15 @@ impl App {
         self.draw_instance_graphics(ui, gate_kind.graphics(), screen_center, |_| false);
     }
 
-    fn draw_power(&self, ui: &mut Ui, id: InstanceId, power: &Power) {
+    fn draw_power(&mut self, ui: &mut Ui, id: InstanceId, power: &Power) {
         let screen_center = power.pos - self.viewport_offset;
-        self.draw_instance_graphics(ui, power.graphics(), screen_center, |pin_index| {
+        let rect = self.draw_instance_graphics(ui, power.graphics(), screen_center, |pin_index| {
             self.is_on(Pin {
                 ins: id,
                 index: pin_index as u32,
             })
         });
+        self.set_selected(ui, rect, id);
     }
 
     pub fn draw_power_preview(&self, ui: &mut Ui, pos: Pos2) {
@@ -1754,7 +1762,7 @@ impl App {
         self.draw_instance_graphics(ui, power.graphics(), screen_center, |_| false);
     }
 
-    fn draw_lamp(&self, ui: &mut Ui, id: InstanceId, lamp: &Lamp) {
+    fn draw_lamp(&mut self, ui: &mut Ui, id: InstanceId, lamp: &Lamp) {
         let has_current = self.is_on(self.db.lamp_input(id));
         let screen_center = lamp.pos - self.viewport_offset;
 
@@ -1773,12 +1781,13 @@ impl App {
             }
         }
 
-        self.draw_instance_graphics(ui, lamp.graphics(), screen_center, |pin_index| {
+        let rect = self.draw_instance_graphics(ui, lamp.graphics(), screen_center, |pin_index| {
             self.is_on(Pin {
                 ins: id,
                 index: pin_index as u32,
             })
         });
+        self.set_selected(ui, rect, id);
 
         if has_current {
             let rect = Rect::from_center_size(screen_center, self.canvas_config.base_gate_size);
@@ -1796,15 +1805,17 @@ impl App {
         self.draw_instance_graphics(ui, lamp.graphics(), screen_center, |_| false);
     }
 
-    fn draw_clock(&self, ui: &mut Ui, id: InstanceId, clock: &Clock) {
+    fn draw_clock(&mut self, ui: &mut Ui, id: InstanceId, clock: &Clock) {
         let screen_center = clock.pos - self.viewport_offset;
 
-        self.draw_instance_graphics(ui, clock.graphics(), screen_center, |pin_index| {
+        let rect = self.draw_instance_graphics(ui, clock.graphics(), screen_center, |pin_index| {
             self.is_on(Pin {
                 ins: id,
                 index: pin_index as u32,
             })
         });
+
+        self.set_selected(ui, rect, id);
     }
 
     pub fn draw_clock_preview(&self, ui: &mut Ui, pos: Pos2) {
@@ -2166,12 +2177,12 @@ impl App {
                     let gate = self.db.get_gate(hovered);
                     let outer = Rect::from_center_size(
                         gate.pos - self.viewport_offset,
-                        self.canvas_config.base_gate_size + vec2(3.0, 3.0),
+                        self.canvas_config.base_gate_size + INSTANEC_OUTLINE,
                     );
                     ui.painter().rect_stroke(
                         outer,
                         CornerRadius::default(),
-                        Stroke::new(2.0, COLOR_HOVER_INSTANCE_OUTLINE),
+                        Stroke::new(INSTANEC_OUTLINE_TICKNESS, COLOR_HOVER_INSTANCE_OUTLINE),
                         StrokeKind::Middle,
                     );
                 }
@@ -2179,12 +2190,12 @@ impl App {
                     let power = self.db.get_power(hovered);
                     let outer = Rect::from_center_size(
                         power.pos - self.viewport_offset,
-                        self.canvas_config.base_gate_size + vec2(3.0, 3.0),
+                        self.canvas_config.base_gate_size + INSTANEC_OUTLINE,
                     );
                     ui.painter().rect_stroke(
                         outer,
                         CornerRadius::default(),
-                        Stroke::new(2.0, COLOR_HOVER_INSTANCE_OUTLINE),
+                        Stroke::new(INSTANEC_OUTLINE_TICKNESS, COLOR_HOVER_INSTANCE_OUTLINE),
                         StrokeKind::Middle,
                     );
                 }
@@ -2192,12 +2203,12 @@ impl App {
                     let lamp = self.db.get_lamp(hovered);
                     let outer = Rect::from_center_size(
                         lamp.pos - self.viewport_offset,
-                        self.canvas_config.base_gate_size + vec2(3.0, 3.0),
+                        self.canvas_config.base_gate_size + INSTANEC_OUTLINE,
                     );
                     ui.painter().rect_stroke(
                         outer,
                         CornerRadius::default(),
-                        Stroke::new(2.0, COLOR_HOVER_INSTANCE_OUTLINE),
+                        Stroke::new(INSTANEC_OUTLINE_TICKNESS, COLOR_HOVER_INSTANCE_OUTLINE),
                         StrokeKind::Middle,
                     );
                 }
@@ -2205,12 +2216,12 @@ impl App {
                     let clock = self.db.get_clock(hovered);
                     let outer = Rect::from_center_size(
                         clock.pos - self.viewport_offset,
-                        self.canvas_config.base_gate_size + vec2(3.0, 3.0),
+                        self.canvas_config.base_gate_size + INSTANEC_OUTLINE,
                     );
                     ui.painter().rect_stroke(
                         outer,
                         CornerRadius::default(),
-                        Stroke::new(2.0, COLOR_HOVER_INSTANCE_OUTLINE),
+                        Stroke::new(INSTANEC_OUTLINE_TICKNESS, COLOR_HOVER_INSTANCE_OUTLINE),
                         StrokeKind::Middle,
                     );
                 }
@@ -2220,12 +2231,12 @@ impl App {
                     let cc = self.db.get_custom_circuit(hovered);
                     let outer = Rect::from_center_size(
                         cc.pos - self.viewport_offset,
-                        self.canvas_config.base_gate_size + vec2(3.0, 3.0),
+                        self.canvas_config.base_gate_size + INSTANEC_OUTLINE,
                     );
                     ui.painter().rect_stroke(
                         outer,
                         CornerRadius::default(),
-                        Stroke::new(2.0, COLOR_HOVER_INSTANCE_OUTLINE),
+                        Stroke::new(INSTANEC_OUTLINE_TICKNESS, COLOR_HOVER_INSTANCE_OUTLINE),
                         StrokeKind::Middle,
                     );
                 }
@@ -2244,12 +2255,12 @@ impl App {
                     let g = self.db.get_gate(id);
                     let r = Rect::from_center_size(
                         g.pos - self.viewport_offset,
-                        self.canvas_config.base_gate_size + vec2(6.0, 6.0),
+                        self.canvas_config.base_gate_size + INSTANEC_OUTLINE,
                     );
                     ui.painter().rect_stroke(
                         r,
                         CornerRadius::default(),
-                        Stroke::new(2.0, COLOR_SELECTION_HIGHLIGHT),
+                        Stroke::new(INSTANEC_OUTLINE_TICKNESS, COLOR_SELECTION_HIGHLIGHT),
                         StrokeKind::Outside,
                     );
                 }
@@ -2257,12 +2268,12 @@ impl App {
                     let p = self.db.get_power(id);
                     let r = Rect::from_center_size(
                         p.pos - self.viewport_offset,
-                        self.canvas_config.base_gate_size + vec2(6.0, 6.0),
+                        self.canvas_config.base_gate_size + INSTANEC_OUTLINE,
                     );
                     ui.painter().rect_stroke(
                         r,
                         CornerRadius::default(),
-                        Stroke::new(2.0, COLOR_SELECTION_HIGHLIGHT),
+                        Stroke::new(INSTANEC_OUTLINE_TICKNESS, COLOR_SELECTION_HIGHLIGHT),
                         StrokeKind::Outside,
                     );
                 }
@@ -2270,12 +2281,12 @@ impl App {
                     let l = self.db.get_lamp(id);
                     let r = Rect::from_center_size(
                         l.pos - self.viewport_offset,
-                        self.canvas_config.base_gate_size + vec2(6.0, 6.0),
+                        self.canvas_config.base_gate_size + INSTANEC_OUTLINE,
                     );
                     ui.painter().rect_stroke(
                         r,
                         CornerRadius::default(),
-                        Stroke::new(2.0, COLOR_SELECTION_HIGHLIGHT),
+                        Stroke::new(INSTANEC_OUTLINE_TICKNESS, COLOR_SELECTION_HIGHLIGHT),
                         StrokeKind::Outside,
                     );
                 }
@@ -2283,12 +2294,12 @@ impl App {
                     let c = self.db.get_clock(id);
                     let r = Rect::from_center_size(
                         c.pos - self.viewport_offset,
-                        self.canvas_config.base_gate_size + vec2(6.0, 6.0),
+                        self.canvas_config.base_gate_size + INSTANEC_OUTLINE,
                     );
                     ui.painter().rect_stroke(
                         r,
                         CornerRadius::default(),
-                        Stroke::new(2.0, COLOR_SELECTION_HIGHLIGHT),
+                        Stroke::new(INSTANEC_OUTLINE_TICKNESS, COLOR_SELECTION_HIGHLIGHT),
                         StrokeKind::Outside,
                     );
                 }
@@ -2306,12 +2317,12 @@ impl App {
                     let cc = self.db.get_custom_circuit(id);
                     let r = Rect::from_center_size(
                         cc.pos - self.viewport_offset,
-                        self.canvas_config.base_gate_size + vec2(6.0, 6.0),
+                        self.canvas_config.base_gate_size + INSTANEC_OUTLINE,
                     );
                     ui.painter().rect_stroke(
                         r,
                         CornerRadius::default(),
-                        Stroke::new(2.0, COLOR_SELECTION_HIGHLIGHT),
+                        Stroke::new(INSTANEC_OUTLINE_TICKNESS, COLOR_SELECTION_HIGHLIGHT),
                         StrokeKind::Outside,
                     );
                 }
@@ -2647,48 +2658,6 @@ impl App {
         }
         self.connection_manager.rebuild_spatial_index(&self.db);
         self.current_dirty = true;
-    }
-
-    fn draw_right_click_actions_menu(&mut self, ui: &Ui) {
-        if !self.show_right_click_actions_menu {
-            return;
-        }
-
-        let mut should_close = false;
-        egui::Window::new("Context Menu")
-            .title_bar(false)
-            .resizable(false)
-            .collapsible(false)
-            .fixed_pos(self.context_menu_pos)
-            .show(ui.ctx(), |ui| {
-                ui.set_min_width(150.0);
-                if ui.button("Create Custom Circuit").clicked() {
-                    // Generate a unique name for the custom circuit
-                    let circuit_name = format!(
-                        "CustomCircuit_{}",
-                        self.db.custom_circuit_definitions.len() + 1
-                    );
-
-                    match self.create_custom_circuit(circuit_name, &self.selected.clone()) {
-                        Ok(()) => {
-                            log::info!("Custom circuit created successfully");
-                            self.selected.clear();
-                        }
-                        Err(e) => {
-                            log::error!("Failed to create custom circuit: {e}");
-                        }
-                    }
-                    should_close = true;
-                }
-
-                if ui.button("Cancel").clicked() {
-                    should_close = true;
-                }
-            });
-
-        if should_close {
-            self.show_right_click_actions_menu = false;
-        }
     }
 
     fn highlight_selected_actions(&mut self, ui: &Ui, mouse: Option<Pos2>, mouse_down: bool) {
