@@ -13,7 +13,7 @@ use crate::{
     assets::{self},
     config::CanvasConfig,
     connection_manager::{Connection, ConnectionManager},
-    custom_circuit::{self, CustomCircuit, CustomCircuitDefinition},
+    custom_circuit::{self, Module, ModuleDefinition},
     drag::Drag,
 };
 
@@ -389,9 +389,9 @@ pub struct DB {
     pub wires: SecondaryMap<InstanceId, Wire>,
     pub lamps: SecondaryMap<InstanceId, Lamp>,
     pub clocks: SecondaryMap<InstanceId, Clock>,
-    pub custom_circuits: SecondaryMap<InstanceId, CustomCircuit>,
+    pub modules: SecondaryMap<InstanceId, Module>,
     // Definition of custom circuits created by the user
-    pub custom_circuit_definitions: Vec<CustomCircuitDefinition>,
+    pub module_definitions: Vec<ModuleDefinition>,
     pub connections: HashSet<Connection>,
     // Labels
     pub labels: SlotMap<LabelId, Label>,
@@ -441,10 +441,10 @@ impl DB {
         k
     }
 
-    pub fn new_custom_circuit(&mut self, c: crate::custom_circuit::CustomCircuit) -> InstanceId {
+    pub fn new_custom_circuit(&mut self, c: crate::custom_circuit::Module) -> InstanceId {
         let k = self.instances.insert(());
         let definition_index = c.definition_index;
-        self.custom_circuits.insert(k, c);
+        self.modules.insert(k, c);
         self.types
             .insert(k, InstanceKind::CustomCircuit(definition_index));
         k
@@ -497,17 +497,12 @@ impl DB {
         self.clocks.get_mut(id).expect("clock not found (mut)")
     }
 
-    pub fn get_custom_circuit(&self, id: InstanceId) -> &crate::custom_circuit::CustomCircuit {
-        self.custom_circuits
-            .get(id)
-            .expect("custom circuit not found")
+    pub fn get_custom_circuit(&self, id: InstanceId) -> &crate::custom_circuit::Module {
+        self.modules.get(id).expect("custom circuit not found")
     }
 
-    pub fn get_custom_circuit_mut(
-        &mut self,
-        id: InstanceId,
-    ) -> &mut crate::custom_circuit::CustomCircuit {
-        self.custom_circuits
+    pub fn get_custom_circuit_mut(&mut self, id: InstanceId) -> &mut crate::custom_circuit::Module {
+        self.modules
             .get_mut(id)
             .expect("custom circuit not found (mut)")
     }
@@ -574,7 +569,7 @@ impl DB {
     // Custom circuits (variable pins)
     pub fn custom_circuit_pin(&self, id: InstanceId, n: u32) -> Pin {
         let cc = self.get_custom_circuit(id);
-        let def = &self.custom_circuit_definitions[cc.definition_index];
+        let def = &self.module_definitions[cc.definition_index];
         assert!(
             (n as usize) < def.external_pins.len(),
             "Pin index out of bounds for custom circuit"
@@ -607,7 +602,7 @@ impl DB {
             }
             InstanceKind::CustomCircuit(_) => {
                 let cc = self.get_custom_circuit(pin.ins);
-                let def = &self.custom_circuit_definitions[cc.definition_index];
+                let def = &self.module_definitions[cc.definition_index];
                 def.external_pins[pin.index as usize].kind
             }
         }
@@ -702,8 +697,8 @@ impl DB {
             }
             InstanceKind::CustomCircuit(_) => {
                 let cc = self.get_custom_circuit(id);
-                if cc.definition_index < self.custom_circuit_definitions.len() {
-                    let def = &self.custom_circuit_definitions[cc.definition_index];
+                if cc.definition_index < self.module_definitions.len() {
+                    let def = &self.module_definitions[cc.definition_index];
                     (0..def.external_pins.len() as u32)
                         .map(|i| Pin { ins: id, index: i })
                         .collect()
@@ -779,7 +774,7 @@ impl DB {
             }
             InstanceKind::CustomCircuit(_) => {
                 let cc = self.get_custom_circuit(pin.ins);
-                let def = &self.custom_circuit_definitions[cc.definition_index];
+                let def = &self.module_definitions[cc.definition_index];
                 def.external_pins[pin.index as usize].offset
             }
         }
@@ -1097,21 +1092,7 @@ impl eframe::App for App {
 
                 ui.menu_button("Tools", |ui| {
                     if ui.button("Create module").clicked() {
-                        // Generate a unique name for the custom circuit
-                        let circuit_name = format!(
-                            "CustomCircuit_{}",
-                            self.db.custom_circuit_definitions.len() + 1
-                        );
-
-                        match self.create_custom_circuit(circuit_name, &self.selected.clone()) {
-                            Ok(()) => {
-                                log::info!("Custom circuit created successfully");
-                                self.selected.clear();
-                            }
-                            Err(e) => {
-                                log::error!("Failed to create custom circuit: {e}");
-                            }
-                        }
+                        self.create_module();
                     }
                 });
                 ui.add_space(16.0);
@@ -1258,12 +1239,12 @@ impl App {
                 ui.add_space(8.0);
                 self.draw_label_button(ui);
 
-                if !self.db.custom_circuit_definitions.is_empty() {
+                if !self.db.module_definitions.is_empty() {
                     ui.add_space(8.0);
                     ui.label("Custom Circuits:");
                 }
                 let custom_circuit_indices: Vec<usize> =
-                    (0..self.db.custom_circuit_definitions.len()).collect();
+                    (0..self.db.module_definitions.len()).collect();
                 for i in custom_circuit_indices {
                     self.draw_panel_button(ui, InstanceKind::CustomCircuit(i));
                 }
@@ -1330,9 +1311,9 @@ impl App {
                     .sense(Sense::click_and_drag())
                     .min_size(vec2(78.0, 30.0)),
             ),
-            InstanceKind::CustomCircuit(_) => ui.add(
-                Button::new("Custom")
-                    .sense(Sense::hover())
+            InstanceKind::CustomCircuit(i) => ui.add(
+                Button::new(format!("Custom {}", i))
+                    .sense(Sense::click_and_drag())
                     .min_size(vec2(78.0, 30.0)),
             ),
         };
@@ -1350,7 +1331,7 @@ impl App {
                 InstanceKind::Wire => self.db.new_wire(Wire::new_at(pos)),
                 InstanceKind::Lamp => self.db.new_lamp(Lamp { pos }),
                 InstanceKind::Clock => self.db.new_clock(Clock { pos, period: 1 }),
-                InstanceKind::CustomCircuit(c) => self.db.new_custom_circuit(CustomCircuit {
+                InstanceKind::CustomCircuit(c) => self.db.new_custom_circuit(Module {
                     pos,
                     definition_index: c,
                 }),
@@ -1359,6 +1340,23 @@ impl App {
                 id,
                 offset: Vec2::ZERO,
             }));
+        }
+
+        let d_pressed = ui.input(|i| i.key_pressed(egui::Key::D));
+        if resp.hovered()
+            && d_pressed
+            && let InstanceKind::CustomCircuit(i) = kind
+        {
+            let mut ids = Vec::new();
+            for (id, m) in &self.db.modules {
+                if m.definition_index == i {
+                    ids.push(id);
+                }
+            }
+            for id in ids {
+                self.delete_instance(id);
+            }
+            self.db.module_definitions.remove(i);
         }
         ui.add_space(8.0);
 
@@ -1447,7 +1445,7 @@ impl App {
         self.db.wires.remove(id);
         self.db.lamps.remove(id);
         self.db.clocks.remove(id);
-        self.db.custom_circuits.remove(id);
+        self.db.modules.remove(id);
         self.db.connections.retain(|c| !c.involves_instance(id));
         self.hovered.take();
         self.drag.take();
@@ -1590,8 +1588,8 @@ impl App {
         for (id, clock) in &self.db.clocks.clone() {
             self.draw_clock(ui, id, &clock);
         }
-        for (id, custom_circuit) in &self.db.custom_circuits {
-            self.draw_custom_circuit(ui, id, custom_circuit);
+        for (id, custom_circuit) in &self.db.modules.clone() {
+            self.draw_module(ui, id, custom_circuit);
         }
         for (id, wire) in &self.db.wires {
             let has_current = self.is_on(self.db.wire_start(id));
@@ -1823,20 +1821,24 @@ impl App {
         self.draw_instance_graphics(ui, clock.graphics(), screen_center, |_| false);
     }
 
-    fn draw_custom_circuit(
-        &self,
-        ui: &Ui,
+    fn draw_module(
+        &mut self,
+        ui: &mut Ui,
         id: InstanceId,
-        custom_circuit: &crate::custom_circuit::CustomCircuit,
+        custom_circuit: &crate::custom_circuit::Module,
     ) {
         let screen_center = custom_circuit.pos - self.viewport_offset;
 
-        // Get the definition for this custom circuit
-        if let Some(definition) = self
-            .db
-            .custom_circuit_definitions
-            .get(custom_circuit.definition_index)
         {
+            // Get the definition for this custom circuit
+            let Some(definition) = self
+                .db
+                .module_definitions
+                .get(custom_circuit.definition_index)
+            else {
+                return;
+            };
+
             // Draw as a dark blue rectangle with the name
             let rect = Rect::from_center_size(screen_center, self.canvas_config.base_gate_size);
             ui.painter()
@@ -1883,6 +1885,8 @@ impl App {
                     );
                 }
             }
+
+            self.set_selected(ui, rect, id);
         }
     }
 
@@ -1890,7 +1894,7 @@ impl App {
         let screen_center = pos - self.viewport_offset;
 
         // Get the definition for this custom circuit
-        if let Some(definition) = self.db.custom_circuit_definitions.get(definition_index) {
+        if let Some(definition) = self.db.module_definitions.get(definition_index) {
             // Draw as a dark blue rectangle with the name
             let rect = Rect::from_center_size(screen_center, self.canvas_config.base_gate_size);
             ui.painter()
@@ -2118,6 +2122,17 @@ impl App {
             }
         }
 
+        for (k, _) in &self.db.modules {
+            for pin in self.db.pins_of(k) {
+                if self.is_pin_connected(pin) {
+                    continue;
+                }
+                if self.db.pin_position(pin).distance(mouse_pos) < PIN_HOVER_THRESHOLD {
+                    return Some(Hover::Pin(pin));
+                }
+            }
+        }
+
         // Then instances
         for (k, wire) in &self.db.wires {
             let dist = wire.dist_to_closest_point_on_line(mouse_pos);
@@ -2145,6 +2160,12 @@ impl App {
         }
         for (k, clock) in &self.db.clocks {
             let rect = Rect::from_center_size(clock.pos, self.canvas_config.base_gate_size);
+            if rect.contains(mouse_pos) {
+                return Some(Hover::Instance(k));
+            }
+        }
+        for (k, module) in &self.db.modules {
+            let rect = Rect::from_center_size(module.pos, self.canvas_config.base_gate_size);
             if rect.contains(mouse_pos) {
                 return Some(Hover::Instance(k));
             }
@@ -2339,8 +2360,8 @@ impl App {
             self.db.lamps.len(),
             self.db.clocks.len(),
             self.db.wires.len(),
-            self.db.custom_circuits.len(),
-            self.db.custom_circuit_definitions.len(),
+            self.db.modules.len(),
+            self.db.module_definitions.len(),
             self.db.connections.len()
         )
         .ok();
@@ -2490,6 +2511,11 @@ impl App {
             writeln!(out, "  {}", w.display(&self.db)).ok();
         }
 
+        writeln!(out, "\nModules:").ok();
+        for (id, m) in &self.db.modules {
+            writeln!(out, "  {}", m.display(&self.db, id)).ok();
+        }
+
         writeln!(out, "\nConnections:").ok();
         for c in &self.db.connections {
             writeln!(out, "  {}", c.display(&self.db)).ok();
@@ -2627,7 +2653,7 @@ impl App {
                     self.selected.insert(id);
                 }
                 ClipBoardItem::CustomCircuit(def_index, offset) => {
-                    let id = self.db.new_custom_circuit(custom_circuit::CustomCircuit {
+                    let id = self.db.new_custom_circuit(custom_circuit::Module {
                         pos: mouse - offset,
                         definition_index: def_index,
                     });
@@ -2732,6 +2758,21 @@ impl App {
         }
 
         Some(split_point)
+    }
+
+    fn create_module(&mut self) {
+        // Generate a unique name for the custom circuit
+        let circuit_name = format!("module {}", self.db.module_definitions.len() + 1);
+
+        match self.create_custom_circuit(circuit_name, &self.selected.clone()) {
+            Ok(()) => {
+                log::info!("Custom circuit created successfully");
+                self.selected.clear();
+            }
+            Err(e) => {
+                log::error!("Failed to create custom circuit: {e}");
+            }
+        }
     }
 }
 
