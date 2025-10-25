@@ -17,7 +17,7 @@ use crate::{
     drag::Drag,
 };
 
-pub const PANEL_BUTTON_MAX_HEIGHT: f32 = 70.0;
+pub const PANEL_BUTTON_MAX_HEIGHT: f32 = 50.0;
 
 pub const LABEL_EDIT_TEXT_SIZE: f32 = 16.0;
 pub const LABEL_DISPLAY_TEXT_SIZE: f32 = 19.0;
@@ -1225,7 +1225,7 @@ impl App {
 
     fn draw_panel(&mut self, ui: &mut Ui) {
         egui::ScrollArea::vertical()
-            .auto_shrink([true; 2])
+            .auto_shrink([true, false])
             .show(ui, |ui| {
                 self.draw_panel_button(ui, InstanceKind::Gate(GateKind::And));
                 self.draw_panel_button(ui, InstanceKind::Gate(GateKind::Nand));
