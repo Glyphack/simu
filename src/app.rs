@@ -1481,20 +1481,19 @@ impl App {
             i.pointer
                 .button_double_clicked(egui::PointerButton::Primary)
         });
-        let mouse_up = ui.input(|i| i.pointer.any_released());
-        // To use the canvas clicked we need to set everything on objects. Right now some stuff are
-        // on canvas rect
-        let mouse_clicked = ui.input(|i| i.pointer.primary_pressed());
-
-        let right_released = ui.input(|i| i.pointer.secondary_released());
-        let right_down = ui.input(|i| i.pointer.secondary_down());
-        let right_clicked = ui.input(|i| i.pointer.secondary_clicked());
-
         let mouse_is_visible = resp.contains_pointer();
         let mouse_pos_world = ui
             .ctx()
             .pointer_hover_pos()
             .map(|p| self.screen_to_world(p));
+
+        let mouse_up = ui.input(|i| i.pointer.any_released());
+        // To use the canvas clicked we need to set everything on objects. Right now some stuff are
+        // on canvas rect
+        let mouse_clicked = ui.input(|i| i.pointer.primary_pressed()) && mouse_is_visible;
+        let right_released = ui.input(|i| i.pointer.secondary_released());
+        let right_down = ui.input(|i| i.pointer.secondary_down());
+        let right_clicked = ui.input(|i| i.pointer.secondary_clicked());
 
         let enter_pressed = ui.input(|i| i.key_pressed(egui::Key::Enter));
         let esc_pressed = ui.input(|i| i.key_released(egui::Key::Escape));
