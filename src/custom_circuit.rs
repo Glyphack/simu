@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use egui::{Pos2, Rect, Vec2};
+use egui::{Pos2, Vec2};
 
 use crate::{
     app::{App, DB, InstanceId, InstanceKind, Pin},
@@ -35,7 +35,7 @@ impl Module {
     }
 
     pub fn display(&self, db: &DB, id: InstanceId) -> String {
-        let mut sb = format!("{}", self.name());
+        let mut sb = self.name();
         for pin in db.pins_of(id) {
             sb += "\n";
             sb += pin.display(db).as_str();

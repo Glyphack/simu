@@ -676,6 +676,30 @@ impl DB {
         self.labels.get_mut(id).expect("label not found (mut)")
     }
 
+    pub fn gate_ids(&self) -> Vec<InstanceId> {
+        self.gates.keys().collect()
+    }
+
+    pub fn power_ids(&self) -> Vec<InstanceId> {
+        self.powers.keys().collect()
+    }
+
+    pub fn lamp_ids(&self) -> Vec<InstanceId> {
+        self.lamps.keys().collect()
+    }
+
+    pub fn clock_ids(&self) -> Vec<InstanceId> {
+        self.clocks.keys().collect()
+    }
+
+    pub fn module_ids(&self) -> Vec<InstanceId> {
+        self.modules.keys().collect()
+    }
+
+    pub fn label_ids(&self) -> Vec<LabelId> {
+        self.labels.keys().collect()
+    }
+
     pub fn pins_of(&self, id: InstanceId) -> Vec<Pin> {
         match self.ty(id) {
             InstanceKind::Gate(gk) => {
@@ -1312,7 +1336,7 @@ impl App {
                     .min_size(vec2(78.0, 30.0)),
             ),
             InstanceKind::CustomCircuit(i) => ui.add(
-                Button::new(format!("Custom {}", i))
+                Button::new(format!("Custom {i}"))
                     .sense(Sense::click_and_drag())
                     .min_size(vec2(78.0, 30.0)),
             ),
@@ -1575,21 +1599,20 @@ impl App {
         }
 
         // Draw world
-        // TODO: Remove the clones. We need to modify the selected, hovered things
-        for (id, gate) in self.db.gates.clone() {
-            self.draw_gate(ui, id, &gate);
+        for id in self.db.gate_ids() {
+            self.draw_gate(ui, id);
         }
-        for (id, power) in &self.db.powers.clone() {
-            self.draw_power(ui, id, &power);
+        for id in self.db.power_ids() {
+            self.draw_power(ui, id);
         }
-        for (id, lamp) in &self.db.lamps.clone() {
-            self.draw_lamp(ui, id, &lamp);
+        for id in self.db.lamp_ids() {
+            self.draw_lamp(ui, id);
         }
-        for (id, clock) in &self.db.clocks.clone() {
-            self.draw_clock(ui, id, &clock);
+        for id in self.db.clock_ids() {
+            self.draw_clock(ui, id);
         }
-        for (id, custom_circuit) in &self.db.modules.clone() {
-            self.draw_module(ui, id, custom_circuit);
+        for id in self.db.module_ids() {
+            self.draw_module(ui, id);
         }
         for (id, wire) in &self.db.wires {
             let has_current = self.is_on(self.db.wire_start(id));
@@ -1603,14 +1626,8 @@ impl App {
             );
         }
         // Collect labels to avoid borrowing issues
-        let labels: Vec<(LabelId, Label)> = self
-            .db
-            .labels
-            .iter()
-            .map(|(id, label)| (id, label.clone()))
-            .collect();
-        for (id, label) in labels {
-            self.draw_label(ui, id, &label);
+        for id in self.db.label_ids() {
+            self.draw_label(ui, id);
         }
 
         for c in &self.potential_connections {
@@ -1725,15 +1742,18 @@ impl App {
         }
     }
 
-    fn draw_gate(&mut self, ui: &mut Ui, id: InstanceId, gate: &Gate) {
-        let screen_center = gate.pos - self.viewport_offset;
-        let rect =
-            self.draw_instance_graphics(ui, gate.kind.graphics(), screen_center, |pin_index| {
-                self.is_on(Pin {
-                    ins: id,
-                    index: pin_index as u32,
-                })
-            });
+    fn draw_gate(&mut self, ui: &mut Ui, id: InstanceId) {
+        let (pos, kind) = {
+            let gate = self.db.get_gate(id);
+            (gate.pos, gate.kind)
+        };
+        let screen_center = pos - self.viewport_offset;
+        let rect = self.draw_instance_graphics(ui, kind.graphics(), screen_center, |pin_index| {
+            self.is_on(Pin {
+                ins: id,
+                index: pin_index as u32,
+            })
+        });
         self.set_selected(ui, rect, id);
     }
 
@@ -1742,9 +1762,13 @@ impl App {
         self.draw_instance_graphics(ui, gate_kind.graphics(), screen_center, |_| false);
     }
 
-    fn draw_power(&mut self, ui: &mut Ui, id: InstanceId, power: &Power) {
-        let screen_center = power.pos - self.viewport_offset;
-        let rect = self.draw_instance_graphics(ui, power.graphics(), screen_center, |pin_index| {
+    fn draw_power(&mut self, ui: &mut Ui, id: InstanceId) {
+        let (pos, graphics) = {
+            let power = self.db.get_power(id);
+            (power.pos, power.graphics())
+        };
+        let screen_center = pos - self.viewport_offset;
+        let rect = self.draw_instance_graphics(ui, graphics, screen_center, |pin_index| {
             self.is_on(Pin {
                 ins: id,
                 index: pin_index as u32,
@@ -1759,9 +1783,13 @@ impl App {
         self.draw_instance_graphics(ui, power.graphics(), screen_center, |_| false);
     }
 
-    fn draw_lamp(&mut self, ui: &mut Ui, id: InstanceId, lamp: &Lamp) {
+    fn draw_lamp(&mut self, ui: &mut Ui, id: InstanceId) {
         let has_current = self.is_on(self.db.lamp_input(id));
-        let screen_center = lamp.pos - self.viewport_offset;
+        let (pos, graphics) = {
+            let lamp = self.db.get_lamp(id);
+            (lamp.pos, lamp.graphics())
+        };
+        let screen_center = pos - self.viewport_offset;
 
         if has_current {
             let glow_radius = 60.0;
@@ -1778,7 +1806,7 @@ impl App {
             }
         }
 
-        let rect = self.draw_instance_graphics(ui, lamp.graphics(), screen_center, |pin_index| {
+        let rect = self.draw_instance_graphics(ui, graphics, screen_center, |pin_index| {
             self.is_on(Pin {
                 ins: id,
                 index: pin_index as u32,
@@ -1802,10 +1830,14 @@ impl App {
         self.draw_instance_graphics(ui, lamp.graphics(), screen_center, |_| false);
     }
 
-    fn draw_clock(&mut self, ui: &mut Ui, id: InstanceId, clock: &Clock) {
-        let screen_center = clock.pos - self.viewport_offset;
+    fn draw_clock(&mut self, ui: &mut Ui, id: InstanceId) {
+        let (pos, graphics) = {
+            let clock = self.db.get_clock(id);
+            (clock.pos, clock.graphics())
+        };
+        let screen_center = pos - self.viewport_offset;
 
-        let rect = self.draw_instance_graphics(ui, clock.graphics(), screen_center, |pin_index| {
+        let rect = self.draw_instance_graphics(ui, graphics, screen_center, |pin_index| {
             self.is_on(Pin {
                 ins: id,
                 index: pin_index as u32,
@@ -1821,21 +1853,16 @@ impl App {
         self.draw_instance_graphics(ui, clock.graphics(), screen_center, |_| false);
     }
 
-    fn draw_module(
-        &mut self,
-        ui: &mut Ui,
-        id: InstanceId,
-        custom_circuit: &crate::custom_circuit::Module,
-    ) {
-        let screen_center = custom_circuit.pos - self.viewport_offset;
+    fn draw_module(&mut self, ui: &mut Ui, id: InstanceId) {
+        let (pos, definition_index) = {
+            let module = self.db.get_custom_circuit(id);
+            (module.pos, module.definition_index)
+        };
+        let screen_center = pos - self.viewport_offset;
 
         {
             // Get the definition for this custom circuit
-            let Some(definition) = self
-                .db
-                .module_definitions
-                .get(custom_circuit.definition_index)
-            else {
+            let Some(definition) = self.db.module_definitions.get(definition_index) else {
                 return;
             };
 
@@ -1855,7 +1882,7 @@ impl App {
 
             // Draw external pins
             for (pin_index, ext_pin) in definition.external_pins.iter().enumerate() {
-                let pin_world_pos = custom_circuit.pos + ext_pin.offset;
+                let pin_world_pos = pos + ext_pin.offset;
                 let pin_screen_pos = pin_world_pos - self.viewport_offset;
 
                 // Determine pin color based on whether it has current
@@ -1961,8 +1988,12 @@ impl App {
         );
     }
 
-    fn draw_label(&mut self, ui: &mut Ui, id: LabelId, label: &Label) {
-        let screen_pos = label.pos - self.viewport_offset;
+    fn draw_label(&mut self, ui: &mut Ui, id: LabelId) {
+        let (pos, text) = {
+            let label = self.db.get_label(id);
+            (label.pos, label.text.clone())
+        };
+        let screen_pos = pos - self.viewport_offset;
 
         let is_editing = matches!(self.editing_label, Some(editing_id) if editing_id == id);
 
@@ -1994,7 +2025,7 @@ impl App {
             let text_size = ui
                 .painter()
                 .layout_no_wrap(
-                    label.text.clone(),
+                    text.clone(),
                     egui::FontId::proportional(LABEL_DISPLAY_TEXT_SIZE),
                     text_color,
                 )
@@ -2007,14 +2038,14 @@ impl App {
             ui.painter().text(
                 screen_pos,
                 egui::Align2::CENTER_CENTER,
-                &label.text,
+                &text,
                 egui::FontId::proportional(LABEL_DISPLAY_TEXT_SIZE),
                 text_color,
             );
 
             if response.double_clicked() {
                 self.editing_label = Some(id);
-                self.label_edit_buffer = label.text.clone();
+                self.label_edit_buffer = text;
             }
             if response.hovered() && ui.input(|i| i.key_pressed(egui::Key::D)) {
                 self.delete_label(id);
