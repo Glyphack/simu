@@ -8,6 +8,7 @@ use egui::{
 };
 use slotmap::{SecondaryMap, SlotMap};
 
+use crate::drag::CanvasDrag;
 use crate::simulator::{SimulationStatus, Simulator, Value};
 use crate::{
     assets::{self},
@@ -38,6 +39,7 @@ pub const COLOR_HOVER_PIN_TO_WIRE: Color32 = Color32::GRAY;
 pub const COLOR_HOVER_PIN_DETACH: Color32 = Color32::RED;
 pub const PIN_HOVER_THRESHOLD: f32 = 8.0;
 
+pub const INSTANEC_OUTLINE_EXPAND: f32 = 6.0;
 pub const INSTANEC_OUTLINE: Vec2 = vec2(6.0, 6.0);
 pub const INSTANEC_OUTLINE_TICKNESS: f32 = 2.0;
 
@@ -180,14 +182,14 @@ pub enum GateKind {
 }
 
 impl GateKind {
-    pub fn graphics(&self) -> &assets::InstanceGraphics {
+    pub fn graphics(&self) -> assets::InstanceGraphics {
         match self {
-            Self::Nand => &assets::NAND_GRAPHICS,
-            Self::And => &assets::AND_GRAPHICS,
-            Self::Or => &assets::OR_GRAPHICS,
-            Self::Nor => &assets::NOR_GRAPHICS,
-            Self::Xor => &assets::XOR_GRAPHICS,
-            Self::Xnor => &assets::XNOR_GRAPHICS,
+            Self::Nand => assets::NAND_GRAPHICS.clone(),
+            Self::And => assets::AND_GRAPHICS.clone(),
+            Self::Or => assets::OR_GRAPHICS.clone(),
+            Self::Nor => assets::NOR_GRAPHICS.clone(),
+            Self::Xor => assets::XOR_GRAPHICS.clone(),
+            Self::Xnor => assets::XNOR_GRAPHICS.clone(),
         }
     }
 }
@@ -232,11 +234,11 @@ impl Power {
         )
     }
 
-    fn graphics(&self) -> &assets::InstanceGraphics {
+    fn graphics(&self) -> assets::InstanceGraphics {
         if self.on {
-            &assets::POWER_ON_GRAPHICS
+            assets::POWER_ON_GRAPHICS.clone()
         } else {
-            &assets::POWER_OFF_GRAPHICS
+            assets::POWER_OFF_GRAPHICS.clone()
         }
     }
 }
@@ -264,8 +266,8 @@ impl Lamp {
         )
     }
 
-    fn graphics(&self) -> &assets::InstanceGraphics {
-        &assets::LAMP_GRAPHICS
+    fn graphics(&self) -> assets::InstanceGraphics {
+        assets::LAMP_GRAPHICS.clone()
     }
 }
 
@@ -292,8 +294,8 @@ impl Clock {
         )
     }
 
-    fn graphics(&self) -> &assets::InstanceGraphics {
-        &assets::CLOCK_GRAPHICS
+    fn graphics(&self) -> assets::InstanceGraphics {
+        assets::CLOCK_GRAPHICS.clone()
     }
 }
 
@@ -1204,10 +1206,6 @@ impl App {
         *v == Value::One
     }
 
-    pub fn screen_to_world(&self, pos: Pos2) -> Pos2 {
-        pos + self.viewport_offset
-    }
-
     pub fn draw_main(&mut self, ui: &mut Ui) {
         self.process_pending_load();
 
@@ -1341,10 +1339,7 @@ impl App {
                     .min_size(vec2(78.0, 30.0)),
             ),
         };
-        let mouse_pos_world = ui
-            .ctx()
-            .pointer_interact_pos()
-            .map(|p| self.screen_to_world(p));
+        let mouse_pos_world = self.mouse_pos_world(ui);
 
         if resp.drag_started()
             && let Some(pos) = mouse_pos_world
@@ -1394,13 +1389,10 @@ impl App {
                 .min_size(vec2(78.0, 30.0)),
         );
 
-        let mouse_pos_world = ui
-            .ctx()
-            .pointer_interact_pos()
-            .map(|p| self.screen_to_world(p));
+        let mouse = self.mouse_pos_world(ui);
 
         if resp.drag_started()
-            && let Some(pos) = mouse_pos_world
+            && let Some(pos) = mouse
         {
             let id = self.db.new_label(Label::new(pos));
             self.drag = Some(Drag::Label {
@@ -1504,10 +1496,7 @@ impl App {
                 .button_double_clicked(egui::PointerButton::Primary)
         });
         let mouse_is_visible = resp.contains_pointer();
-        let mouse_pos_world = ui
-            .ctx()
-            .pointer_hover_pos()
-            .map(|p| self.screen_to_world(p));
+        let mouse_pos_world = self.mouse_pos_world(ui);
 
         let mouse_up = ui.input(|i| i.pointer.any_released());
         // To use the canvas clicked we need to set everything on objects. Right now some stuff are
@@ -1700,30 +1689,69 @@ impl App {
         }
     }
 
-    fn draw_instance_graphics<F>(
-        &self,
+    fn set_selected(&mut self, ui: &mut Ui, rect: Rect, id: InstanceId) {
+        let response = ui.allocate_rect(rect, Sense::click_and_drag());
+
+        if response.clicked() {
+            self.selected.clear();
+            self.selected.insert(id);
+        }
+    }
+
+    fn draw_instance_graphics_new(
+        &mut self,
         ui: &mut Ui,
-        graphics: &assets::InstanceGraphics,
-        screen_center: Pos2,
-        highlight_pin: F,
-    ) -> Rect
-    where
-        F: Fn(usize) -> bool,
-    {
-        let rect = Rect::from_center_size(screen_center, self.canvas_config.base_gate_size);
-        draw_icon_canvas(ui, graphics.svg.clone(), rect);
+        graphics: assets::InstanceGraphics,
+        pos: Pos2,
+        id: InstanceId,
+    ) -> Rect {
+        let rect = Rect::from_center_size(pos, self.canvas_config.base_gate_size);
+        let image = get_icon(ui, graphics.svg)
+            .fit_to_exact_size(rect.size())
+            .sense(Sense::click_and_drag());
+        let rect = rect.expand(INSTANEC_OUTLINE_EXPAND);
+        let response = ui.put(rect, image);
+
+        if response.clicked() {
+            self.selected.clear();
+            self.selected.insert(id);
+        }
+        if response.hovered() {
+            self.hovered = Some(Hover::Instance(id));
+        }
+        if response.dragged()
+            && let Some(mouse) = ui.ctx().pointer_interact_pos()
+        {
+            self.drag = Some(Drag::Canvas(CanvasDrag::Single {
+                id,
+                offset: pos - mouse,
+            }));
+        }
 
         for (i, pin) in graphics.pins.iter().enumerate() {
-            let pin_offset = pin.offset;
-            let pin_pos = screen_center + pin_offset;
+            let pin_pos = pos + pin.offset;
             let color = match pin.kind {
                 assets::PinKind::Input => self.canvas_config.base_input_pin_color,
                 assets::PinKind::Output => self.canvas_config.base_output_pin_color,
             };
+
+            let rect = Rect::from_center_size(
+                pin_pos,
+                Vec2::splat(self.canvas_config.base_pin_size + PIN_HOVER_THRESHOLD),
+            );
+            let pin_resp = ui.allocate_rect(rect, Sense::drag());
             ui.painter()
                 .circle_filled(pin_pos, self.canvas_config.base_pin_size, color);
 
-            if highlight_pin(i) {
+            let pin = Pin {
+                ins: id,
+                index: i as u32,
+            };
+            if pin_resp.hovered() {
+                self.hovered = Some(Hover::Pin(pin));
+            }
+
+            if self.is_on(pin) {
                 ui.painter().circle_stroke(
                     pin_pos,
                     self.canvas_config.base_pin_size + 3.0,
@@ -1734,32 +1762,12 @@ impl App {
         rect
     }
 
-    fn set_selected(&mut self, ui: &mut Ui, rect: Rect, id: InstanceId) {
-        let response = ui.allocate_rect(rect, Sense::click_and_drag());
-        if response.clicked() {
-            self.selected.clear();
-            self.selected.insert(id);
-        }
-    }
-
     fn draw_gate(&mut self, ui: &mut Ui, id: InstanceId) {
         let (pos, kind) = {
             let gate = self.db.get_gate(id);
             (gate.pos, gate.kind)
         };
-        let screen_center = pos - self.viewport_offset;
-        let rect = self.draw_instance_graphics(ui, kind.graphics(), screen_center, |pin_index| {
-            self.is_on(Pin {
-                ins: id,
-                index: pin_index as u32,
-            })
-        });
-        self.set_selected(ui, rect, id);
-    }
-
-    pub fn draw_gate_preview(&self, ui: &mut Ui, gate_kind: GateKind, pos: Pos2) {
-        let screen_center = pos - self.viewport_offset;
-        self.draw_instance_graphics(ui, gate_kind.graphics(), screen_center, |_| false);
+        self.draw_instance_graphics_new(ui, kind.graphics(), self.adjusted_pos(pos), id);
     }
 
     fn draw_power(&mut self, ui: &mut Ui, id: InstanceId) {
@@ -1767,20 +1775,7 @@ impl App {
             let power = self.db.get_power(id);
             (power.pos, power.graphics())
         };
-        let screen_center = pos - self.viewport_offset;
-        let rect = self.draw_instance_graphics(ui, graphics, screen_center, |pin_index| {
-            self.is_on(Pin {
-                ins: id,
-                index: pin_index as u32,
-            })
-        });
-        self.set_selected(ui, rect, id);
-    }
-
-    pub fn draw_power_preview(&self, ui: &mut Ui, pos: Pos2) {
-        let power = Power { pos, on: true };
-        let screen_center = pos - self.viewport_offset;
-        self.draw_instance_graphics(ui, power.graphics(), screen_center, |_| false);
+        self.draw_instance_graphics_new(ui, graphics, self.adjusted_pos(pos), id);
     }
 
     fn draw_lamp(&mut self, ui: &mut Ui, id: InstanceId) {
@@ -1789,45 +1784,24 @@ impl App {
             let lamp = self.db.get_lamp(id);
             (lamp.pos, lamp.graphics())
         };
-        let screen_center = pos - self.viewport_offset;
+        let pos = self.adjusted_pos(pos);
 
         if has_current {
-            let glow_radius = 60.0;
+            let glow_radius = 40.0;
             let gradient_steps = 30;
             for i in 0..gradient_steps {
                 let t = i as f32 / gradient_steps as f32;
                 let radius = glow_radius * (1.0 - t);
                 let alpha = (255.0 * (1.0 - t) * 0.4) as u8;
                 ui.painter().circle_filled(
-                    screen_center,
+                    pos + vec2(0.0, -25.0),
                     radius,
                     Color32::from_rgba_unmultiplied(255, 255, 0, alpha),
                 );
             }
         }
 
-        let rect = self.draw_instance_graphics(ui, graphics, screen_center, |pin_index| {
-            self.is_on(Pin {
-                ins: id,
-                index: pin_index as u32,
-            })
-        });
-        self.set_selected(ui, rect, id);
-
-        if has_current {
-            let rect = Rect::from_center_size(screen_center, self.canvas_config.base_gate_size);
-            ui.painter().rect_filled(
-                rect,
-                CornerRadius::default(),
-                Color32::from_rgba_unmultiplied(255, 255, 0, 80),
-            );
-        }
-    }
-
-    pub fn draw_lamp_preview(&self, ui: &mut Ui, pos: Pos2) {
-        let lamp = Lamp { pos };
-        let screen_center = pos - self.viewport_offset;
-        self.draw_instance_graphics(ui, lamp.graphics(), screen_center, |_| false);
+        self.draw_instance_graphics_new(ui, graphics, pos, id);
     }
 
     fn draw_clock(&mut self, ui: &mut Ui, id: InstanceId) {
@@ -1835,22 +1809,8 @@ impl App {
             let clock = self.db.get_clock(id);
             (clock.pos, clock.graphics())
         };
-        let screen_center = pos - self.viewport_offset;
-
-        let rect = self.draw_instance_graphics(ui, graphics, screen_center, |pin_index| {
-            self.is_on(Pin {
-                ins: id,
-                index: pin_index as u32,
-            })
-        });
-
-        self.set_selected(ui, rect, id);
-    }
-
-    pub fn draw_clock_preview(&self, ui: &mut Ui, pos: Pos2) {
-        let clock = Clock { pos, period: 1 };
-        let screen_center = pos - self.viewport_offset;
-        self.draw_instance_graphics(ui, clock.graphics(), screen_center, |_| false);
+        let pos = self.adjusted_pos(pos);
+        self.draw_instance_graphics_new(ui, graphics, pos, id);
     }
 
     fn draw_module(&mut self, ui: &mut Ui, id: InstanceId) {
@@ -1914,45 +1874,6 @@ impl App {
             }
 
             self.set_selected(ui, rect, id);
-        }
-    }
-
-    pub fn draw_custom_circuit_preview(&self, ui: &Ui, definition_index: usize, pos: Pos2) {
-        let screen_center = pos - self.viewport_offset;
-
-        // Get the definition for this custom circuit
-        if let Some(definition) = self.db.module_definitions.get(definition_index) {
-            // Draw as a dark blue rectangle with the name
-            let rect = Rect::from_center_size(screen_center, self.canvas_config.base_gate_size);
-            ui.painter()
-                .rect_filled(rect, CornerRadius::default(), egui::Color32::DARK_BLUE);
-
-            // Draw the name
-            ui.painter().text(
-                rect.center(),
-                egui::Align2::CENTER_CENTER,
-                &definition.name,
-                egui::FontId::default(),
-                egui::Color32::WHITE,
-            );
-
-            // Draw external pins (no current highlighting in preview)
-            for ext_pin in &definition.external_pins {
-                let pin_world_pos = pos + ext_pin.offset;
-                let pin_screen_pos = pin_world_pos - self.viewport_offset;
-
-                let pin_color = match ext_pin.kind {
-                    crate::assets::PinKind::Input => egui::Color32::LIGHT_GREEN,
-                    crate::assets::PinKind::Output => egui::Color32::LIGHT_RED,
-                };
-
-                // Draw the pin
-                ui.painter().circle_filled(
-                    pin_screen_pos,
-                    self.canvas_config.base_pin_size,
-                    pin_color,
-                );
-            }
         }
     }
 
@@ -2053,6 +1974,7 @@ impl App {
         }
     }
 
+    // TODO trying to get rid of it
     pub fn get_hovered(&self, mouse_pos: Pos2) -> Option<Hover> {
         if let Some(v) = self.drag {
             match v {
@@ -2109,39 +2031,6 @@ impl App {
             }
         }
 
-        // First pins
-        for (k, _) in &self.db.powers {
-            for pin in self.db.pins_of(k) {
-                if self.db.pin_position(pin).distance(mouse_pos) < PIN_HOVER_THRESHOLD {
-                    return Some(Hover::Pin(pin));
-                }
-            }
-        }
-
-        for (k, _) in &self.db.gates {
-            for pin in self.db.pins_of(k) {
-                if self.db.pin_position(pin).distance(mouse_pos) < PIN_HOVER_THRESHOLD {
-                    return Some(Hover::Pin(pin));
-                }
-            }
-        }
-
-        for (k, _) in &self.db.lamps {
-            for pin in self.db.pins_of(k) {
-                if self.db.pin_position(pin).distance(mouse_pos) < PIN_HOVER_THRESHOLD {
-                    return Some(Hover::Pin(pin));
-                }
-            }
-        }
-
-        for (k, _) in &self.db.clocks {
-            for pin in self.db.pins_of(k) {
-                if self.db.pin_position(pin).distance(mouse_pos) < PIN_HOVER_THRESHOLD {
-                    return Some(Hover::Pin(pin));
-                }
-            }
-        }
-
         for (k, _) in &self.db.wires {
             for pin in self.db.pins_of(k) {
                 if self.is_pin_connected(pin) {
@@ -2153,54 +2042,6 @@ impl App {
             }
         }
 
-        for (k, _) in &self.db.modules {
-            for pin in self.db.pins_of(k) {
-                if self.is_pin_connected(pin) {
-                    continue;
-                }
-                if self.db.pin_position(pin).distance(mouse_pos) < PIN_HOVER_THRESHOLD {
-                    return Some(Hover::Pin(pin));
-                }
-            }
-        }
-
-        // Then instances
-        for (k, wire) in &self.db.wires {
-            let dist = wire.dist_to_closest_point_on_line(mouse_pos);
-            if dist < WIRE_HIT_DISTANCE {
-                return Some(Hover::Instance(k));
-            }
-        }
-        for (k, power) in &self.db.powers {
-            let rect = Rect::from_center_size(power.pos, self.canvas_config.base_gate_size);
-            if rect.contains(mouse_pos) {
-                return Some(Hover::Instance(k));
-            }
-        }
-        for (k, gate) in &self.db.gates {
-            let rect = Rect::from_center_size(gate.pos, self.canvas_config.base_gate_size);
-            if rect.contains(mouse_pos) {
-                return Some(Hover::Instance(k));
-            }
-        }
-        for (k, lamp) in &self.db.lamps {
-            let rect = Rect::from_center_size(lamp.pos, self.canvas_config.base_gate_size);
-            if rect.contains(mouse_pos) {
-                return Some(Hover::Instance(k));
-            }
-        }
-        for (k, clock) in &self.db.clocks {
-            let rect = Rect::from_center_size(clock.pos, self.canvas_config.base_gate_size);
-            if rect.contains(mouse_pos) {
-                return Some(Hover::Instance(k));
-            }
-        }
-        for (k, module) in &self.db.modules {
-            let rect = Rect::from_center_size(module.pos, self.canvas_config.base_gate_size);
-            if rect.contains(mouse_pos) {
-                return Some(Hover::Instance(k));
-            }
-        }
         for (k, wire) in &self.db.wires {
             let dist = wire.dist_to_closest_point_on_line(mouse_pos);
             if dist < WIRE_HIT_DISTANCE {
@@ -2396,10 +2237,7 @@ impl App {
             self.db.connections.len()
         )
         .ok();
-        let mouse_pos_world = ui
-            .ctx()
-            .pointer_interact_pos()
-            .map(|p| self.screen_to_world(p));
+        let mouse_pos_world = self.mouse_pos_world(ui);
         writeln!(out, "mouse: {mouse_pos_world:?}").ok();
 
         writeln!(out, "hovered: {:?}", self.hovered).ok();
@@ -2805,6 +2643,17 @@ impl App {
             }
         }
     }
+
+    // Adjust position of an object to this screen
+    fn adjusted_pos(&self, pos: Pos2) -> Pos2 {
+        pos - self.viewport_offset
+    }
+
+    fn mouse_pos_world(&self, ui: &Ui) -> Option<Pos2> {
+        ui.ctx()
+            .pointer_interact_pos()
+            .map(|p| p + self.viewport_offset)
+    }
 }
 
 fn get_icon<'a>(ui: &Ui, source: egui::ImageSource<'a>) -> Image<'a> {
@@ -2815,10 +2664,4 @@ fn get_icon<'a>(ui: &Ui, source: egui::ImageSource<'a>) -> Image<'a> {
     }
 
     image
-}
-
-fn draw_icon_canvas(ui: &mut Ui, source: egui::ImageSource<'_>, rect: Rect) {
-    let image = get_icon(ui, source).fit_to_exact_size(rect.size());
-
-    ui.put(rect, image);
 }

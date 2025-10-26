@@ -1,6 +1,7 @@
 use std::fmt::Display;
 
 use egui::{ImageSource, Vec2, include_image};
+#[derive(Debug, Clone)]
 pub struct InstanceGraphics {
     // TODO: Figure out what is the correct way to deal with images
     pub svg: ImageSource<'static>,
