@@ -8,6 +8,7 @@ use egui::{
 };
 use slotmap::{SecondaryMap, SlotMap};
 
+use crate::assets::PinKind;
 use crate::drag::CanvasDrag;
 use crate::simulator::{SimulationStatus, Simulator, Value};
 use crate::{
@@ -37,7 +38,7 @@ pub const COLOR_WIRE_HOVER: Color32 = Color32::GRAY;
 pub const COLOR_HOVER_INSTANCE_OUTLINE: Color32 = Color32::GRAY;
 pub const COLOR_HOVER_PIN_TO_WIRE: Color32 = Color32::GRAY;
 pub const COLOR_HOVER_PIN_DETACH: Color32 = Color32::RED;
-pub const PIN_HOVER_THRESHOLD: f32 = 8.0;
+pub const PIN_HOVER_THRESHOLD: f32 = 10.0;
 
 pub const INSTANEC_OUTLINE_EXPAND: f32 = 6.0;
 pub const INSTANEC_OUTLINE: Vec2 = vec2(6.0, 6.0);
@@ -47,7 +48,7 @@ pub const NEW_PIN_ON_WIRE_THRESHOLD: f32 = 10.0;
 
 // Connections
 pub const COLOR_POTENTIAL_CONN_HIGHLIGHT: Color32 = Color32::LIGHT_BLUE;
-pub const WIRE_HIT_DISTANCE: f32 = 10.0;
+pub const WIRE_HIT_DISTANCE: f32 = 8.0;
 pub const SNAP_THRESHOLD: f32 = 10.0;
 pub const PIN_MOVE_HINT_D: f32 = 10.0;
 pub const PIN_MOVE_HINT_COLOR: Color32 = Color32::GRAY;
@@ -154,6 +155,11 @@ impl Pin {
             pin_info.kind, self.index, instance_display,
         )
     }
+
+    pub fn display_alone(&self, db: &DB) -> String {
+        let pin_info = db.pin_info(*self);
+        format!("pin#{} {:?}", self.index, pin_info.kind)
+    }
 }
 
 /// Information about a pin's direction
@@ -199,7 +205,7 @@ impl Gate {
         // Find the InstanceId for this gate in the database
         for (id, gate) in &db.gates {
             if gate.pos == self.pos && gate.kind == self.kind {
-                return format!("({:?} ({}))", self.kind, id);
+                return format!("{:?} {}", self.kind, id);
             }
         }
         format!(
@@ -331,7 +337,6 @@ pub struct Wire {
 
 impl Wire {
     pub fn display(&self, db: &DB) -> String {
-        // Find the InstanceId for this wire in the database
         for (id, wire) in &db.wires {
             if wire.start == self.start && wire.end == self.end {
                 return format!("Wire {id}");
@@ -610,56 +615,29 @@ impl DB {
         }
     }
 
-    /// Get information about a pin's direction (input or output)
     pub fn pin_info(&self, pin: Pin) -> PinInfo {
         let kind = match self.ty(pin.ins) {
             InstanceKind::Wire => {
-                // Determine if this wire pin is input or output based on connections
-                // The head of wire that is connected to another output is the input pin of the wire.
-                // When both heads are not connected start is the input.
-                let start = self.wire_start(pin.ins);
-                let end = self.wire_end(pin.ins);
+                let is_start = self.wire_start(pin.ins) == pin;
+                let mut kind = None;
 
-                let start_conns = self.connected_pins(start);
-                let mut start_connected_to_output = false;
-                for conn in start_conns {
-                    if self.pin_kind_base(conn) == assets::PinKind::Output {
-                        start_connected_to_output = true;
+                let connected_pins = self.connected_pins(pin);
+                if connected_pins.is_empty() {
+                    if is_start {
+                        kind = Some(PinKind::Input);
+                    } else {
+                        kind = Some(PinKind::Output);
+                    }
+                }
+
+                for c_p in connected_pins {
+                    if self.pin_info(c_p).kind == PinKind::Output {
+                        kind = Some(PinKind::Input);
                         break;
                     }
                 }
 
-                let end_conns = self.connected_pins(end);
-                let mut end_connected_to_output = false;
-                for conn in end_conns {
-                    if self.pin_kind_base(conn) == assets::PinKind::Output {
-                        end_connected_to_output = true;
-                        break;
-                    }
-                }
-
-                // Determine kind based on which pin this is
-                if pin.index == 0 {
-                    // This is the start pin
-                    if start_connected_to_output {
-                        assets::PinKind::Input
-                    } else if end_connected_to_output {
-                        assets::PinKind::Output
-                    } else {
-                        // Default: start is input
-                        assets::PinKind::Input
-                    }
-                } else {
-                    // This is the end pin
-                    if end_connected_to_output {
-                        assets::PinKind::Input
-                    } else if start_connected_to_output {
-                        assets::PinKind::Output
-                    } else {
-                        // Default: end is output (since start is input)
-                        assets::PinKind::Output
-                    }
-                }
+                kind.unwrap_or(PinKind::Input)
             }
             _ => self.pin_kind_base(pin),
         };
@@ -696,6 +674,10 @@ impl DB {
 
     pub fn module_ids(&self) -> Vec<InstanceId> {
         self.modules.keys().collect()
+    }
+
+    pub fn wire_ids(&self) -> Vec<InstanceId> {
+        self.wires.keys().collect()
     }
 
     pub fn label_ids(&self) -> Vec<LabelId> {
@@ -1028,7 +1010,6 @@ pub struct App {
     // selection set and move preview
     // TODO: Selection is not handling labels.
     pub selected: HashSet<InstanceId>,
-    pub drag_had_movement: bool,
     //Copied. Items with their offset compared to a middle point in the rectangle
     pub clipboard: Vec<ClipBoardItem>,
     // Where are we in the world
@@ -1067,7 +1048,6 @@ impl Default for App {
             current_dirty: true,
             show_debug: true,
             selected: Default::default(),
-            drag_had_movement: false,
             clipboard: Default::default(),
             pending_load_json: None,
             viewport_offset: Vec2::ZERO,
@@ -1355,7 +1335,7 @@ impl App {
                     definition_index: c,
                 }),
             };
-            self.drag = Some(Drag::Canvas(crate::drag::CanvasDrag::Single {
+            self.set_drag(Drag::Canvas(crate::drag::CanvasDrag::Single {
                 id,
                 offset: Vec2::ZERO,
             }));
@@ -1395,7 +1375,7 @@ impl App {
             && let Some(pos) = mouse
         {
             let id = self.db.new_label(Label::new(pos));
-            self.drag = Some(Drag::Label {
+            self.set_drag(Drag::Label {
                 id,
                 offset: Vec2::ZERO,
             });
@@ -1490,7 +1470,8 @@ impl App {
 
         Self::draw_grid(ui, canvas_rect, self.viewport_offset);
 
-        let mouse_clicked_canvas_or_gates = resp.clicked();
+        let mouse_clicked_canvas = resp.clicked();
+        let mouse_dragging_canvas = resp.dragged();
         let double_clicked = ui.input(|i| {
             i.pointer
                 .button_double_clicked(egui::PointerButton::Primary)
@@ -1534,7 +1515,6 @@ impl App {
         // Handle double-click on empty canvas to create new label
         if double_clicked
             && self.hovered.is_none()
-            && !self.drag_had_movement
             && let Some(mouse) = mouse_pos_world
         {
             let id = self.db.new_label(Label::new(mouse));
@@ -1543,12 +1523,10 @@ impl App {
         }
 
         if let Some(mouse) = mouse_pos_world {
-            let instance_dragging = self.drag.is_some();
-            self.hovered = self.get_hovered(mouse);
-
-            if mouse_clicked {
-                self.handle_drag_start(mouse);
+            if mouse_dragging_canvas {
+                self.set_drag(Drag::Selecting { start: mouse });
             }
+            let instance_dragging = self.drag.is_some();
 
             if instance_dragging {
                 self.handle_dragging(ui, mouse);
@@ -1563,14 +1541,11 @@ impl App {
             }
         }
         if self.selected.len() == 1 {
-            self.highlight_selected_actions(ui, mouse_pos_world, mouse_clicked_canvas_or_gates);
+            self.highlight_selected_actions(ui, mouse_pos_world, mouse_clicked);
         }
 
-        if mouse_clicked_canvas_or_gates {
+        if mouse_clicked_canvas {
             self.selected.clear();
-            if let Some(hovered) = self.hovered {
-                self.selected.insert(hovered.instance());
-            }
         }
 
         if right_clicked
@@ -1588,6 +1563,7 @@ impl App {
         }
 
         // Draw world
+        self.hovered = None;
         for id in self.db.gate_ids() {
             self.draw_gate(ui, id);
         }
@@ -1603,11 +1579,11 @@ impl App {
         for id in self.db.module_ids() {
             self.draw_module(ui, id);
         }
-        for (id, wire) in &self.db.wires {
+        for id in self.db.wire_ids() {
             let has_current = self.is_on(self.db.wire_start(id));
             self.draw_wire(
                 ui,
-                wire,
+                id,
                 self.hovered
                     .as_ref()
                     .is_some_and(|f| matches!(f, Hover::Instance(_)) && f.instance() == id),
@@ -1634,21 +1610,6 @@ impl App {
             self.highlight_hovered(ui);
         }
         self.draw_selection_highlight(ui);
-
-        // Preview wire branching
-        if !self.selected.is_empty()
-            && let Some(hovered) = self.hovered
-            && let Some(mouse) = mouse_pos_world
-            && self.drag.is_none()
-            && let Hover::Instance(instance_id) = hovered
-            && let Some(split_point) = self.wire_branching_action_point(mouse, instance_id)
-        {
-            ui.painter().circle_filled(
-                split_point - self.viewport_offset,
-                PIN_HOVER_THRESHOLD,
-                COLOR_HOVER_PIN_TO_WIRE,
-            );
-        }
     }
 
     fn draw_grid(ui: &Ui, canvas_rect: Rect, viewport_offset: Vec2) {
@@ -1689,15 +1650,6 @@ impl App {
         }
     }
 
-    fn set_selected(&mut self, ui: &mut Ui, rect: Rect, id: InstanceId) {
-        let response = ui.allocate_rect(rect, Sense::click_and_drag());
-
-        if response.clicked() {
-            self.selected.clear();
-            self.selected.insert(id);
-        }
-    }
-
     fn draw_instance_graphics_new(
         &mut self,
         ui: &mut Ui,
@@ -1722,7 +1674,8 @@ impl App {
         if response.dragged()
             && let Some(mouse) = ui.ctx().pointer_interact_pos()
         {
-            self.drag = Some(Drag::Canvas(CanvasDrag::Single {
+            self.selected.clear();
+            self.set_drag(Drag::Canvas(CanvasDrag::Single {
                 id,
                 offset: pos - mouse,
             }));
@@ -1749,6 +1702,14 @@ impl App {
             };
             if pin_resp.hovered() {
                 self.hovered = Some(Hover::Pin(pin));
+            }
+
+            if pin_resp.dragged() {
+                self.selected.clear();
+                self.set_drag(Drag::PinToWire {
+                    source_pin: pin,
+                    start_pos: pin_pos,
+                });
             }
 
             if self.is_on(pin) {
@@ -1813,7 +1774,7 @@ impl App {
         self.draw_instance_graphics_new(ui, graphics, pos, id);
     }
 
-    fn draw_module(&mut self, ui: &mut Ui, id: InstanceId) {
+    fn draw_module(&self, ui: &Ui, id: InstanceId) {
         let (pos, definition_index) = {
             let module = self.db.get_custom_circuit(id);
             (module.pos, module.definition_index)
@@ -1872,43 +1833,120 @@ impl App {
                     );
                 }
             }
-
-            self.set_selected(ui, rect, id);
         }
     }
 
-    pub fn draw_wire(&self, ui: &Ui, wire: &Wire, hovered: bool, has_current: bool) {
+    pub fn draw_wire(&mut self, ui: &mut Ui, id: InstanceId, hovered: bool, has_current: bool) {
         let mut color = if has_current {
             COLOR_WIRE_POWERED
         } else {
             COLOR_WIRE_IDLE
         };
-
         if hovered {
             color = COLOR_WIRE_HOVER;
         }
+        let wire = *self.db.get_wire(id);
+        let mut pin_interact = false;
+
+        for (i, pin_pos) in [wire.start, wire.end].iter().enumerate() {
+            let pin_pos = self.adjusted_pos(*pin_pos);
+            let pin = Pin {
+                ins: id,
+                index: i as u32,
+            };
+            let rect = Rect::from_center_size(pin_pos, Vec2::splat(PIN_HOVER_THRESHOLD));
+            let pin_resp = ui.allocate_rect(rect, Sense::click_and_drag());
+            if pin_resp.hovered() {
+                self.hovered = Some(Hover::Pin(pin));
+                pin_interact = true;
+            }
+            if pin_resp.clicked() {
+                self.selected.clear();
+                self.selected.insert(id);
+                pin_interact = true;
+            }
+            if pin_resp.dragged() {
+                if self.selected.contains(&id) {
+                    self.set_drag(Drag::Resize {
+                        id: pin.ins,
+                        start: pin.index != 1,
+                    });
+                } else if let Some(mouse) = self.mouse_pos_world(ui) {
+                    self.set_drag(Drag::PinToWire {
+                        source_pin: pin,
+                        start_pos: mouse,
+                    });
+                }
+                pin_interact = true;
+            }
+            ui.painter()
+                .circle(pin_pos, PIN_HOVER_THRESHOLD / 2.0, color, Stroke::NONE);
+        }
+
+        let start = self.adjusted_pos(wire.start);
+        let end = self.adjusted_pos(wire.end);
+
+        let hit_wire = if let Some(mouse_world) = self.mouse_pos_world(ui) {
+            let dist = wire.dist_to_closest_point_on_line(mouse_world);
+            dist < WIRE_HIT_DISTANCE
+        } else {
+            false
+        };
+
+        if hit_wire && !pin_interact {
+            self.hovered = Some(Hover::Instance(id));
+            color = COLOR_WIRE_HOVER;
+
+            if ui.input(|i| i.pointer.primary_clicked()) {
+                self.selected.clear();
+                self.selected.insert(id);
+            }
+
+            if self.selected.len() == 1
+                && self.selected.contains(&id)
+                && let Some(mouse) = self.mouse_pos_world(ui)
+                && let Some(split_point) = self.wire_branching_action_point(mouse, id)
+            {
+                ui.painter().circle_filled(
+                    split_point,
+                    PIN_HOVER_THRESHOLD,
+                    COLOR_HOVER_PIN_TO_WIRE,
+                );
+            }
+
+            if ui.input(|i| i.pointer.primary_down())
+                && let Some(mouse) = self.mouse_pos_world(ui)
+            {
+                if self.selected.len() == 1
+                    && self.selected.contains(&id)
+                    && let Some(split_point) = self.wire_branching_action_point(mouse, id)
+                {
+                    ui.painter().circle_filled(
+                        split_point,
+                        PIN_HOVER_THRESHOLD,
+                        COLOR_HOVER_PIN_TO_WIRE,
+                    );
+                    self.set_drag(Drag::BranchWire {
+                        original_wire_id: id,
+                        split_point,
+                        start_mouse_pos: mouse,
+                    });
+                } else {
+                    let wire_center = pos2(
+                        (wire.start.x + wire.end.x) * 0.5,
+                        (wire.start.y + wire.end.y) * 0.5,
+                    );
+                    let offset = wire_center - mouse;
+                    self.set_drag(Drag::Canvas(CanvasDrag::Single { id, offset }));
+                }
+            }
+        }
 
         ui.painter().line_segment(
-            [
-                wire.start - self.viewport_offset,
-                wire.end - self.viewport_offset,
-            ],
+            [start, end],
             Stroke::new(self.canvas_config.wire_thickness, color),
         );
-        ui.painter().circle(
-            wire.start - self.viewport_offset,
-            PIN_HOVER_THRESHOLD / 2.0,
-            color,
-            Stroke::NONE,
-        );
-        ui.painter().circle(
-            wire.end - self.viewport_offset,
-            PIN_HOVER_THRESHOLD / 2.0,
-            color,
-            Stroke::NONE,
-        );
     }
-
     fn draw_label(&mut self, ui: &mut Ui, id: LabelId) {
         let (pos, text) = {
             let label = self.db.get_label(id);
@@ -1972,84 +2010,6 @@ impl App {
                 self.delete_label(id);
             }
         }
-    }
-
-    // TODO trying to get rid of it
-    pub fn get_hovered(&self, mouse_pos: Pos2) -> Option<Hover> {
-        if let Some(v) = self.drag {
-            match v {
-                Drag::Canvas(canvas_drag) => match canvas_drag {
-                    crate::drag::CanvasDrag::Single { id, offset: _ } => {
-                        return Some(Hover::Instance(id));
-                    }
-                    crate::drag::CanvasDrag::Selected { .. } => {}
-                },
-                Drag::Resize { id, start } => {
-                    let pin = if start {
-                        self.db.wire_start(id)
-                    } else {
-                        self.db.wire_end(id)
-                    };
-                    return Some(Hover::Pin(pin));
-                }
-                Drag::PinToWire {
-                    source_pin,
-                    start_pos: _,
-                } => {
-                    // Source pin is being dragged
-                    return Some(Hover::Pin(source_pin));
-                }
-                Drag::BranchWire {
-                    original_wire_id,
-                    split_point: _,
-                    start_mouse_pos: _,
-                } => {
-                    return Some(Hover::Instance(original_wire_id));
-                }
-                Drag::Selecting { .. } | Drag::Label { .. } => {}
-            }
-        }
-        for selected in &self.selected {
-            match self.db.ty(*selected) {
-                InstanceKind::Wire => {
-                    for pin in self.db.pins_of(*selected) {
-                        if self.db.pin_position(pin).distance(mouse_pos) < PIN_HOVER_THRESHOLD {
-                            return Some(Hover::Pin(pin));
-                        }
-                    }
-                    let wire = self.db.get_wire(*selected);
-                    let dist = wire.dist_to_closest_point_on_line(mouse_pos);
-                    if dist < WIRE_HIT_DISTANCE {
-                        return Some(Hover::Instance(*selected));
-                    }
-                }
-                InstanceKind::Gate(_)
-                | InstanceKind::Power
-                | InstanceKind::Lamp
-                | InstanceKind::Clock
-                | InstanceKind::CustomCircuit(_) => {}
-            }
-        }
-
-        for (k, _) in &self.db.wires {
-            for pin in self.db.pins_of(k) {
-                if self.is_pin_connected(pin) {
-                    continue;
-                }
-                if self.db.pin_position(pin).distance(mouse_pos) < PIN_HOVER_THRESHOLD {
-                    return Some(Hover::Pin(pin));
-                }
-            }
-        }
-
-        for (k, wire) in &self.db.wires {
-            let dist = wire.dist_to_closest_point_on_line(mouse_pos);
-            if dist < WIRE_HIT_DISTANCE {
-                return Some(Hover::Instance(k));
-            }
-        }
-
-        None
     }
 
     fn highlight_hovered(&self, ui: &Ui) {
@@ -2292,21 +2252,23 @@ impl App {
         for (id, g) in &self.db.gates {
             writeln!(out, "  {}", g.display(&self.db)).ok();
             // pins
-            for (i, pin) in g.kind.graphics().pins.iter().enumerate() {
-                let pin_offset = pin.offset;
-                let p = g.pos + pin_offset;
-                let pin_instance = Pin {
-                    ins: id,
-                    index: i as u32,
-                };
-                writeln!(
-                    out,
-                    "    {} at ({:.1},{:.1})",
-                    pin_instance.display(&self.db),
-                    p.x,
-                    p.y
-                )
-                .ok();
+            if false {
+                for (i, pin) in g.kind.graphics().pins.iter().enumerate() {
+                    let pin_offset = pin.offset;
+                    let p = g.pos + pin_offset;
+                    let pin_instance = Pin {
+                        ins: id,
+                        index: i as u32,
+                    };
+                    writeln!(
+                        out,
+                        "    {} at ({:.1},{:.1})",
+                        pin_instance.display(&self.db),
+                        p.x,
+                        p.y
+                    )
+                    .ok();
+                }
             }
         }
 
@@ -2376,8 +2338,13 @@ impl App {
         }
 
         writeln!(out, "\nWires:").ok();
-        for (_id, w) in &self.db.wires {
+        for (id, w) in &self.db.wires {
             writeln!(out, "  {}", w.display(&self.db)).ok();
+            if false {
+                for pin in self.db.pins_of(id) {
+                    writeln!(out, "{}", pin.display_alone(&self.db)).ok();
+                }
+            }
         }
 
         writeln!(out, "\nModules:").ok();
@@ -2574,7 +2541,7 @@ impl App {
                         && mouse_down
                         && mouse.distance(pos) < PIN_MOVE_HINT_D
                     {
-                        self.drag = Some(Drag::Resize {
+                        self.set_drag(Drag::Resize {
                             id: selected,
                             start: pin.index == 0,
                         });

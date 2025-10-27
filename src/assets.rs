@@ -8,7 +8,9 @@ pub struct InstanceGraphics {
     pub pins: &'static [PinGraphics],
 }
 
-#[derive(serde::Deserialize, serde::Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(
+    serde::Deserialize, serde::Serialize, Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd,
+)]
 pub enum PinKind {
     Input,
     Output,

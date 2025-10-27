@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use egui::{CornerRadius, Pos2, Rect, Stroke, StrokeKind, Ui, Vec2, pos2};
 
 use crate::app::{
-    App, COLOR_HOVER_PIN_TO_WIRE, COLOR_SELECTION_BOX, Hover, InstanceId, InstanceKind, LabelId,
+    App, COLOR_HOVER_PIN_TO_WIRE, COLOR_SELECTION_BOX, InstanceId, InstanceKind, LabelId,
     MIN_WIRE_SIZE, Pin, Wire,
 };
 
@@ -46,110 +46,11 @@ pub enum Drag {
 }
 
 impl App {
-    pub fn handle_drag_start(&mut self, mouse: Pos2) {
+    pub fn set_drag(&mut self, drag: Drag) {
         if self.drag.is_some() {
             return;
         }
-
-        self.drag_had_movement = false;
-
-        if self.selected.len() == 1
-            && let Some(wire_id) = self.selected.iter().next()
-            && let Some(split_point) = self.wire_branching_action_point(mouse, *wire_id)
-        {
-            self.drag = Some(Drag::BranchWire {
-                original_wire_id: *wire_id,
-                split_point,
-                start_mouse_pos: mouse,
-            });
-            return;
-        }
-
-        let Some(hovered) = self.hovered else {
-            self.drag = Some(Drag::Selecting { start: mouse });
-            self.potential_connections.clear();
-            return;
-        };
-
-        match hovered {
-            Hover::Pin(pin) => {
-                if self.selected.contains(&pin.ins)
-                    && matches!(self.db.ty(pin.ins), InstanceKind::Wire)
-                {
-                    self.drag = Some(Drag::Resize {
-                        id: pin.ins,
-                        start: pin.index != 1,
-                    });
-                    return;
-                }
-                let pin_pos = self.db.pin_position(pin);
-                self.drag = Some(Drag::PinToWire {
-                    source_pin: pin,
-                    start_pos: pin_pos,
-                });
-            }
-            Hover::Instance(instance) => {
-                if self.selected.contains(&instance) {
-                    self.drag = Some(Drag::Canvas(CanvasDrag::Selected { start: mouse }));
-                    return;
-                }
-                match self.db.ty(instance) {
-                    InstanceKind::Gate(_) => {
-                        let gate = self.db.get_gate(instance);
-                        let offset = gate.pos - mouse;
-                        self.drag = Some(Drag::Canvas(CanvasDrag::Single {
-                            id: instance,
-                            offset,
-                        }));
-                    }
-                    InstanceKind::Power => {
-                        let power = self.db.get_power(instance);
-                        let offset = power.pos - mouse;
-                        self.drag = Some(Drag::Canvas(CanvasDrag::Single {
-                            id: instance,
-                            offset,
-                        }));
-                    }
-                    InstanceKind::Wire => {
-                        let wire = self.db.get_wire(instance);
-
-                        let wire_center = pos2(
-                            (wire.start.x + wire.end.x) * 0.5,
-                            (wire.start.y + wire.end.y) * 0.5,
-                        );
-                        let offset = wire_center - mouse;
-                        self.drag = Some(Drag::Canvas(CanvasDrag::Single {
-                            id: instance,
-                            offset,
-                        }));
-                    }
-                    InstanceKind::Lamp => {
-                        let lamp = self.db.get_lamp(instance);
-                        let offset = lamp.pos - mouse;
-                        self.drag = Some(Drag::Canvas(CanvasDrag::Single {
-                            id: instance,
-                            offset,
-                        }));
-                    }
-                    InstanceKind::Clock => {
-                        let clock = self.db.get_clock(instance);
-                        let offset = clock.pos - mouse;
-                        self.drag = Some(Drag::Canvas(CanvasDrag::Single {
-                            id: instance,
-                            offset,
-                        }));
-                    }
-                    InstanceKind::CustomCircuit(_) => {
-                        let cc = self.db.get_custom_circuit(instance);
-                        let offset = cc.pos - mouse;
-                        self.drag = Some(Drag::Canvas(CanvasDrag::Single {
-                            id: instance,
-                            offset,
-                        }));
-                    }
-                }
-            }
-        }
+        self.drag = Some(drag);
     }
 
     pub fn handle_dragging(&mut self, ui: &mut Ui, mouse: Pos2) {
@@ -172,9 +73,6 @@ impl App {
                     Stroke::new(1.5, COLOR_SELECTION_BOX),
                     StrokeKind::Outside,
                 );
-                if (mouse - start).length_sq() > 0.0 {
-                    self.drag_had_movement = true;
-                }
             }
             Some(Drag::Canvas(canvas_drag)) => match canvas_drag {
                 CanvasDrag::Single { id, offset } => {
@@ -217,7 +115,6 @@ impl App {
 
                     if moved {
                         self.connection_manager.mark_instance_dirty(id);
-                        self.drag_had_movement = true;
                     }
                 }
                 CanvasDrag::Selected { start } => {
@@ -231,7 +128,6 @@ impl App {
                     self.db.move_nonwires_and_resize_wires(&group, desired);
                     if desired.length_sq() > 0.0 {
                         self.connection_manager.mark_instances_dirty(&group);
-                        self.drag_had_movement = true;
                     }
                 }
             },
@@ -257,7 +153,6 @@ impl App {
 
                 if moved {
                     self.connection_manager.mark_instance_dirty(id);
-                    self.drag_had_movement = true;
                 }
             }
             Some(Drag::PinToWire {
@@ -275,7 +170,6 @@ impl App {
                         start: false,
                     });
 
-                    self.drag_had_movement = true;
                     self.connection_manager.mark_instance_dirty(wire_id);
                 } else if drag_distance > 2.0 {
                     ui.painter().line_segment(
@@ -304,7 +198,6 @@ impl App {
                         start: false,
                     });
 
-                    self.drag_had_movement = true;
                     self.connection_manager.mark_instance_dirty(branch_wire_id);
                 } else if drag_distance > 2.0 {
                     ui.painter().line_segment(
@@ -321,7 +214,6 @@ impl App {
                 let label = self.db.get_label_mut(id);
                 if label.pos != new_pos {
                     label.pos = new_pos;
-                    self.drag_had_movement = true;
                 }
             }
             None => {}
@@ -413,7 +305,6 @@ impl App {
         }
         self.connection_manager.rebuild_spatial_index(&self.db);
         self.potential_connections.clear();
-        self.drag_had_movement = false;
     }
 
     pub fn compute_potential_connections(&mut self) {
