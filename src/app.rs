@@ -630,12 +630,13 @@ impl DB {
                     }
                 }
 
-                for c_p in connected_pins {
-                    if self.pin_info(c_p).kind == PinKind::Output {
-                        kind = Some(PinKind::Input);
-                        break;
-                    }
-                }
+                // TODO: Not working
+                // for c_p in connected_pins {
+                // if self.pin_info(c_p).kind == PinKind::Output {
+                //     kind = Some(PinKind::Input);
+                //     break;
+                // }
+                // }
 
                 kind.unwrap_or(PinKind::Input)
             }
