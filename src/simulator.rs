@@ -10,7 +10,7 @@ use crate::{
 const MAX_ITERATIONS: usize = 1000;
 const STABILIZATION_THRESHOLD: usize = 3;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Value {
     Zero,
     One,
@@ -169,7 +169,7 @@ impl Simulator {
             InstanceKind::Lamp => {
                 self.evaluate_lamp(db, id);
             }
-            InstanceKind::Power | InstanceKind::CustomCircuit(_) => {}
+            InstanceKind::Power | InstanceKind::Module(_) => {}
             InstanceKind::Clock => {
                 if self.clocks_on {
                     self.current.insert(db.clock_output(id), Value::One);
@@ -192,7 +192,7 @@ impl Simulator {
             let start = db.wire_start(id);
             let end = db.wire_end(id);
 
-            if db.pin_info(start).kind == PinKind::Input {
+            if start.kind == PinKind::Input {
                 start
             } else {
                 end
@@ -248,7 +248,7 @@ impl Simulator {
 
         let mut result = Value::Zero;
         for other in connected {
-            if db.pin_info(other).kind != PinKind::Output {
+            if other.kind != PinKind::Output {
                 continue;
             }
 

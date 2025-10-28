@@ -77,23 +77,24 @@ impl App {
             Some(Drag::Canvas(canvas_drag)) => match canvas_drag {
                 CanvasDrag::Single { id, offset } => {
                     let new_pos = mouse + offset;
-                    let mut moved = false;
-                    match self.db.ty(id) {
+                    let moved = match self.db.ty(id) {
                         InstanceKind::Gate(_)
                         | InstanceKind::Power
                         | InstanceKind::Lamp
+                        | InstanceKind::Module(_)
                         | InstanceKind::Clock => {
                             let current_pos = match self.db.ty(id) {
                                 InstanceKind::Gate(_) => self.db.get_gate(id).pos,
                                 InstanceKind::Power => self.db.get_power(id).pos,
                                 InstanceKind::Lamp => self.db.get_lamp(id).pos,
                                 InstanceKind::Clock => self.db.get_clock(id).pos,
-                                _ => unreachable!(),
+                                InstanceKind::Module(_) => self.db.get_module(id).pos,
+                                InstanceKind::Wire => unreachable!(),
                             };
                             let desired = new_pos - current_pos;
                             let ids = [id];
                             self.db.move_nonwires_and_resize_wires(&ids, desired);
-                            moved = desired.length_sq() > 0.0;
+                            desired.length_sq() > 0.0
                         }
                         InstanceKind::Wire => {
                             let w = self.db.get_wire_mut(id);
@@ -102,16 +103,9 @@ impl App {
                             let desired = new_pos - center;
                             w.start += desired;
                             w.end += desired;
-                            moved = desired.length_sq() > 0.0;
+                            desired.length_sq() > 0.0
                         }
-                        InstanceKind::CustomCircuit(_) => {
-                            let cc = self.db.get_custom_circuit_mut(id);
-                            if cc.pos != new_pos {
-                                cc.pos = new_pos;
-                                moved = true;
-                            }
-                        }
-                    }
+                    };
 
                     if moved {
                         self.connection_manager.mark_instance_dirty(id);

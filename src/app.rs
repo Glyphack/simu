@@ -15,8 +15,8 @@ use crate::{
     assets::{self},
     config::CanvasConfig,
     connection_manager::{Connection, ConnectionManager},
-    custom_circuit::{self, Module, ModuleDefinition},
     drag::Drag,
+    module::{Module, ModuleDefinition},
 };
 
 pub const PANEL_BUTTON_MAX_HEIGHT: f32 = 50.0;
@@ -101,7 +101,7 @@ pub enum ClipBoardItem {
     Lamp(Vec2),
     Clock(Vec2),
     // Index to definition
-    CustomCircuit(usize, Vec2),
+    Module(usize, Vec2),
     Label(String, Vec2),
 }
 
@@ -112,7 +112,7 @@ pub enum InstanceKind {
     Wire,
     Lamp,
     Clock,
-    CustomCircuit(usize),
+    Module(usize),
 }
 
 // A specific pin on an instance
@@ -122,6 +122,7 @@ pub enum InstanceKind {
 pub struct Pin {
     pub ins: InstanceId,
     pub index: u32,
+    pub kind: PinKind,
 }
 
 impl Pin {
@@ -147,25 +148,21 @@ impl Pin {
                 let clock = db.get_clock(self.ins);
                 clock.display(db)
             }
-            InstanceKind::CustomCircuit(_) => format!("CustomCircuit {{ id: {:?} }}", self.ins),
+            InstanceKind::Module(_) => db.get_module(self.ins).display(db, self.ins),
         };
-        let pin_info = db.pin_info(*self);
         format!(
             "{:?} pin#{} in {} ",
-            pin_info.kind, self.index, instance_display,
+            self.kind, self.index, instance_display,
         )
     }
 
-    pub fn display_alone(&self, db: &DB) -> String {
-        let pin_info = db.pin_info(*self);
-        format!("pin#{} {:?}", self.index, pin_info.kind)
+    pub fn display_alone(&self) -> String {
+        format!("pin#{} {:?}", self.index, self.kind)
     }
-}
 
-/// Information about a pin's direction
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PinInfo {
-    pub kind: crate::assets::PinKind,
+    pub fn new(ins: InstanceId, index: u32, kind: PinKind) -> Self {
+        Self { ins, index, kind }
+    }
 }
 
 // Gate
@@ -333,12 +330,16 @@ impl Label {
 pub struct Wire {
     pub start: Pos2,
     pub end: Pos2,
+    pub input_index: u32,
 }
 
 impl Wire {
     pub fn display(&self, db: &DB) -> String {
         for (id, wire) in &db.wires {
-            if wire.start == self.start && wire.end == self.end {
+            if wire.start == self.start
+                && wire.end == self.end
+                && wire.input_index == self.input_index
+            {
                 return format!("Wire {id}");
             }
         }
@@ -352,7 +353,11 @@ impl Wire {
         Self::new(pos2(pos.x - 30.0, pos.y), pos2(pos.x + 30.0, pos.y))
     }
     pub fn new(start: Pos2, end: Pos2) -> Self {
-        Self { start, end }
+        Self {
+            start,
+            end,
+            input_index: 0,
+        }
     }
 
     pub fn closest_point_on_line(&self, p: Pos2) -> Pos2 {
@@ -397,7 +402,7 @@ pub struct DB {
     pub lamps: SecondaryMap<InstanceId, Lamp>,
     pub clocks: SecondaryMap<InstanceId, Clock>,
     pub modules: SecondaryMap<InstanceId, Module>,
-    // Definition of custom circuits created by the user
+    // Definition of modules created by the user
     pub module_definitions: Vec<ModuleDefinition>,
     pub connections: HashSet<Connection>,
     // Labels
@@ -448,12 +453,11 @@ impl DB {
         k
     }
 
-    pub fn new_custom_circuit(&mut self, c: crate::custom_circuit::Module) -> InstanceId {
+    pub fn new_module(&mut self, c: crate::module::Module) -> InstanceId {
         let k = self.instances.insert(());
         let definition_index = c.definition_index;
         self.modules.insert(k, c);
-        self.types
-            .insert(k, InstanceKind::CustomCircuit(definition_index));
+        self.types.insert(k, InstanceKind::Module(definition_index));
         k
     }
 
@@ -504,14 +508,12 @@ impl DB {
         self.clocks.get_mut(id).expect("clock not found (mut)")
     }
 
-    pub fn get_custom_circuit(&self, id: InstanceId) -> &crate::custom_circuit::Module {
-        self.modules.get(id).expect("custom circuit not found")
+    pub fn get_module(&self, id: InstanceId) -> &crate::module::Module {
+        self.modules.get(id).expect("module not found")
     }
 
-    pub fn get_custom_circuit_mut(&mut self, id: InstanceId) -> &mut crate::custom_circuit::Module {
-        self.modules
-            .get_mut(id)
-            .expect("custom circuit not found (mut)")
+    pub fn get_module_mut(&mut self, id: InstanceId) -> &mut crate::module::Module {
+        self.modules.get_mut(id).expect("modules not found (mut)")
     }
 
     // Pin helper methods with type checking
@@ -520,16 +522,13 @@ impl DB {
     pub fn gate_inp_n(&self, id: InstanceId, n: u32) -> Pin {
         self.get_gate(id); // Type check
         assert!(n < 2, "Gates only have 2 inputs (0 and 1)");
-        Pin {
-            ins: id,
-            index: if n == 0 { 0 } else { 2 },
-        }
+        Pin::new(id, if n == 0 { 0 } else { 2 }, PinKind::Input)
     }
 
     pub fn gate_output_n(&self, id: InstanceId, n: u32) -> Pin {
         self.get_gate(id); // Type check
         assert!(n == 0, "Gates only have 1 output");
-        Pin { ins: id, index: 1 }
+        Pin::new(id, 1, PinKind::Output)
     }
 
     pub fn gate_inp1(&self, id: InstanceId) -> Pin {
@@ -547,7 +546,15 @@ impl DB {
     pub fn wire_pin_n(&self, id: InstanceId, n: u32) -> Pin {
         self.get_wire(id); // Type check
         assert!(n < 2, "Wires only have 2 pins (0 and 1)");
-        Pin { ins: id, index: n }
+        Pin::new(
+            id,
+            n,
+            if n == 0 {
+                PinKind::Input
+            } else {
+                PinKind::Output
+            },
+        )
     }
 
     pub fn wire_start(&self, id: InstanceId) -> Pin {
@@ -560,89 +567,17 @@ impl DB {
 
     pub fn power_output(&self, id: InstanceId) -> Pin {
         self.get_power(id);
-        Pin { ins: id, index: 0 }
+        Pin::new(id, 0, PinKind::Output)
     }
 
     pub fn lamp_input(&self, id: InstanceId) -> Pin {
         self.get_lamp(id);
-        Pin { ins: id, index: 0 }
+        Pin::new(id, 0, PinKind::Input)
     }
 
     pub fn clock_output(&self, id: InstanceId) -> Pin {
         self.get_clock(id);
-        Pin { ins: id, index: 0 }
-    }
-
-    // Custom circuits (variable pins)
-    pub fn custom_circuit_pin(&self, id: InstanceId, n: u32) -> Pin {
-        let cc = self.get_custom_circuit(id);
-        let def = &self.module_definitions[cc.definition_index];
-        assert!(
-            (n as usize) < def.external_pins.len(),
-            "Pin index out of bounds for custom circuit"
-        );
-        Pin { ins: id, index: n }
-    }
-
-    /// Get the base pin kind without considering wire connections (avoids recursion)
-    fn pin_kind_base(&self, pin: Pin) -> assets::PinKind {
-        match self.ty(pin.ins) {
-            InstanceKind::Gate(gk) => {
-                let graphics = gk.graphics();
-                graphics.pins[pin.index as usize].kind
-            }
-            InstanceKind::Power => {
-                let graphics = &assets::POWER_ON_GRAPHICS;
-                graphics.pins[pin.index as usize].kind
-            }
-            InstanceKind::Wire => {
-                // For wires, return Input by default to avoid recursion
-                assets::PinKind::Input
-            }
-            InstanceKind::Lamp => {
-                let graphics = &assets::LAMP_GRAPHICS;
-                graphics.pins[pin.index as usize].kind
-            }
-            InstanceKind::Clock => {
-                let graphics = &assets::CLOCK_GRAPHICS;
-                graphics.pins[pin.index as usize].kind
-            }
-            InstanceKind::CustomCircuit(_) => {
-                let cc = self.get_custom_circuit(pin.ins);
-                let def = &self.module_definitions[cc.definition_index];
-                def.external_pins[pin.index as usize].kind
-            }
-        }
-    }
-
-    pub fn pin_info(&self, pin: Pin) -> PinInfo {
-        let kind = match self.ty(pin.ins) {
-            InstanceKind::Wire => {
-                let is_start = self.wire_start(pin.ins) == pin;
-                let mut kind = None;
-
-                let connected_pins = self.connected_pins(pin);
-                if connected_pins.is_empty() {
-                    if is_start {
-                        kind = Some(PinKind::Input);
-                    } else {
-                        kind = Some(PinKind::Output);
-                    }
-                }
-
-                // TODO: Not working
-                // for c_p in connected_pins {
-                // if self.pin_info(c_p).kind == PinKind::Output {
-                //     kind = Some(PinKind::Input);
-                //     break;
-                // }
-                // }
-
-                kind.unwrap_or(PinKind::Input)
-            }
-            _ => self.pin_kind_base(pin),
-        };
-        PinInfo { kind }
+        Pin::new(id, 0, PinKind::Output)
     }
 
     pub fn new_label(&mut self, label: Label) -> LabelId {
@@ -688,37 +623,77 @@ impl DB {
     pub fn pins_of(&self, id: InstanceId) -> Vec<Pin> {
         match self.ty(id) {
             InstanceKind::Gate(gk) => {
-                let n = gk.graphics().pins.len();
-                (0..n as u32).map(|i| Pin { ins: id, index: i }).collect()
+                let graphics = gk.graphics();
+                graphics
+                    .pins
+                    .iter()
+                    .enumerate()
+                    .map(|(i, p)| Pin::new(id, i as u32, p.kind))
+                    .collect()
             }
             InstanceKind::Power => {
-                let n = assets::POWER_ON_GRAPHICS.pins.len();
-                (0..n as u32).map(|i| Pin { ins: id, index: i }).collect()
+                let graphics = assets::POWER_OFF_GRAPHICS.clone();
+                graphics
+                    .pins
+                    .iter()
+                    .enumerate()
+                    .map(|(i, p)| Pin::new(id, i as u32, p.kind))
+                    .collect()
             }
-            InstanceKind::Wire => vec![Pin { ins: id, index: 0 }, Pin { ins: id, index: 1 }],
+            InstanceKind::Wire => {
+                let wire = self.get_wire(id);
+                vec![
+                    Pin::new(
+                        id,
+                        0,
+                        if wire.input_index == 0 {
+                            assets::PinKind::Input
+                        } else {
+                            assets::PinKind::Output
+                        },
+                    ),
+                    Pin::new(
+                        id,
+                        1,
+                        if wire.input_index == 1 {
+                            assets::PinKind::Input
+                        } else {
+                            assets::PinKind::Output
+                        },
+                    ),
+                ]
+            }
             InstanceKind::Lamp => {
-                let n = assets::LAMP_GRAPHICS.pins.len();
-                (0..n as u32).map(|i| Pin { ins: id, index: i }).collect()
+                let graphics = assets::LAMP_GRAPHICS.clone();
+                graphics
+                    .pins
+                    .iter()
+                    .enumerate()
+                    .map(|(i, p)| Pin::new(id, i as u32, p.kind))
+                    .collect()
             }
             InstanceKind::Clock => {
-                let n = assets::CLOCK_GRAPHICS.pins.len();
-                (0..n as u32).map(|i| Pin { ins: id, index: i }).collect()
+                let graphics = assets::CLOCK_GRAPHICS.clone();
+                graphics
+                    .pins
+                    .iter()
+                    .enumerate()
+                    .map(|(i, p)| Pin::new(id, i as u32, p.kind))
+                    .collect()
             }
-            InstanceKind::CustomCircuit(_) => {
-                let cc = self.get_custom_circuit(id);
-                if cc.definition_index < self.module_definitions.len() {
-                    let def = &self.module_definitions[cc.definition_index];
-                    (0..def.external_pins.len() as u32)
-                        .map(|i| Pin { ins: id, index: i })
-                        .collect()
-                } else {
-                    Vec::new()
-                }
+            InstanceKind::Module(_) => {
+                let cc = self.get_module(id);
+                let def = &self.module_definitions[cc.definition_index];
+                def.pins
+                    .iter()
+                    .enumerate()
+                    .map(|(i, pin)| Pin::new(id, i as u32, *pin))
+                    .collect()
             }
         }
     }
 
-    pub fn pin_position(&self, pin: Pin) -> Pos2 {
+    pub fn pin_position(&self, pin: Pin, canvas_config: &CanvasConfig) -> Pos2 {
         match self.ty(pin.ins) {
             InstanceKind::Gate(gk) => {
                 let g = self.get_gate(pin.ins);
@@ -744,14 +719,14 @@ impl DB {
                 let info = c.graphics().pins[pin.index as usize];
                 c.pos + info.offset
             }
-            InstanceKind::CustomCircuit(_) => {
-                let cc = self.get_custom_circuit(pin.ins);
-                cc.pos + self.pin_offset(pin)
+            InstanceKind::Module(_) => {
+                let cc = self.get_module(pin.ins);
+                cc.pos + self.pin_offset(pin, canvas_config)
             }
         }
     }
 
-    pub fn pin_offset(&self, pin: Pin) -> Vec2 {
+    pub fn pin_offset(&self, pin: Pin, canvas_config: &CanvasConfig) -> Vec2 {
         match self.ty(pin.ins) {
             InstanceKind::Gate(gk) => {
                 let info = gk.graphics().pins[pin.index as usize];
@@ -781,10 +756,39 @@ impl DB {
                 let info = c.graphics().pins[pin.index as usize];
                 info.offset
             }
-            InstanceKind::CustomCircuit(_) => {
-                let cc = self.get_custom_circuit(pin.ins);
+            InstanceKind::Module(_) => {
+                let cc = self.get_module(pin.ins);
                 let def = &self.module_definitions[cc.definition_index];
-                def.external_pins[pin.index as usize].offset
+                let kind = def.pins[pin.index as usize];
+                let base_size = canvas_config.base_gate_size;
+                let is_input = matches!(kind, crate::assets::PinKind::Input);
+                let indices: Vec<usize> = def
+                    .pins
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, &k)| if k == kind { Some(i) } else { None })
+                    .collect();
+                let local_i = indices
+                    .iter()
+                    .position(|&i| i == pin.index as usize)
+                    .expect("pin index not found in indices");
+                let num = indices.len();
+                let spacing = if num == 1 {
+                    0.0
+                } else {
+                    base_size.y / (num - 1) as f32
+                };
+                let y = if num == 1 {
+                    cc.pos.y
+                } else {
+                    cc.pos.y - base_size.y / 2.0 + local_i as f32 * spacing
+                };
+                let x = if is_input {
+                    cc.pos.x - base_size.x / 2.0
+                } else {
+                    cc.pos.x + base_size.x / 2.0
+                };
+                egui::Vec2::new(x - cc.pos.x, y - cc.pos.y)
             }
         }
     }
@@ -850,8 +854,8 @@ impl DB {
                     let c = self.get_clock_mut(*id);
                     c.pos += delta;
                 }
-                InstanceKind::CustomCircuit(_) => {
-                    let cc = self.get_custom_circuit_mut(*id);
+                InstanceKind::Module(_) => {
+                    let cc = self.get_module_mut(*id);
                     cc.pos += delta;
                 }
             }
@@ -872,9 +876,14 @@ impl DB {
         }
     }
 
-    pub fn move_instance_and_propagate(&mut self, id: InstanceId, delta: Vec2) {
+    pub fn move_instance_and_propagate(
+        &mut self,
+        id: InstanceId,
+        delta: Vec2,
+        canvas_config: &CanvasConfig,
+    ) {
         let mut visited = HashSet::new();
-        self.move_instance_and_propagate_recursive(id, delta, &mut visited);
+        self.move_instance_and_propagate_recursive(id, delta, &mut visited, canvas_config);
     }
 
     fn move_instance_and_propagate_recursive(
@@ -882,6 +891,7 @@ impl DB {
         id: InstanceId,
         delta: Vec2,
         visited: &mut HashSet<InstanceId>,
+        canvas_config: &CanvasConfig,
     ) {
         if !visited.insert(id) {
             return;
@@ -910,8 +920,8 @@ impl DB {
                 let c = self.get_clock_mut(id);
                 c.pos += delta;
             }
-            InstanceKind::CustomCircuit(_) => {
-                let cc = self.get_custom_circuit_mut(id);
+            InstanceKind::Module(_) => {
+                let cc = self.get_module_mut(id);
                 cc.pos += delta;
             }
         }
@@ -937,8 +947,7 @@ impl DB {
                                 .connections
                                 .contains(&Connection::new(wire_pin, moved_pin))
                             {
-                                // Update the wire endpoint to match the new pin position
-                                let new_pin_pos = self.pin_position(moved_pin);
+                                let new_pin_pos = self.pin_position(moved_pin, canvas_config);
                                 let w = self.get_wire_mut(connected_id);
                                 if wire_pin.index == 0 {
                                     w.start = new_pin_pos;
@@ -955,9 +964,14 @@ impl DB {
                 | InstanceKind::Power
                 | InstanceKind::Lamp
                 | InstanceKind::Clock
-                | InstanceKind::CustomCircuit(_) => {
+                | InstanceKind::Module(_) => {
                     // For non-wires, propagate the same delta
-                    self.move_instance_and_propagate_recursive(connected_id, delta, visited);
+                    self.move_instance_and_propagate_recursive(
+                        connected_id,
+                        delta,
+                        visited,
+                        canvas_config,
+                    );
                 }
             }
         }
@@ -1037,11 +1051,12 @@ pub struct App {
 
 impl Default for App {
     fn default() -> Self {
+        let canvas_config = CanvasConfig::default();
         let db = DB::default();
-        let c = ConnectionManager::new(&db);
+        let c = ConnectionManager::new(&db, &canvas_config);
         Self {
             db,
-            canvas_config: Default::default(),
+            canvas_config,
             drag: Default::default(),
             hovered: Default::default(),
             connection_manager: c,
@@ -1244,12 +1259,12 @@ impl App {
 
                 if !self.db.module_definitions.is_empty() {
                     ui.add_space(8.0);
-                    ui.label("Custom Circuits:");
+                    ui.label("Modules:");
                 }
                 let custom_circuit_indices: Vec<usize> =
                     (0..self.db.module_definitions.len()).collect();
                 for i in custom_circuit_indices {
-                    self.draw_panel_button(ui, InstanceKind::CustomCircuit(i));
+                    self.draw_panel_button(ui, InstanceKind::Module(i));
                 }
 
                 ui.add_space(8.0);
@@ -1263,7 +1278,7 @@ impl App {
                     self.hovered = None;
                     self.selected.clear();
                     self.drag = None;
-                    self.connection_manager = ConnectionManager::new(&self.db);
+                    self.connection_manager = ConnectionManager::new(&self.db, &self.canvas_config);
                     self.simulator = Simulator::new();
                 }
             });
@@ -1314,7 +1329,7 @@ impl App {
                     .sense(Sense::click_and_drag())
                     .min_size(vec2(78.0, 30.0)),
             ),
-            InstanceKind::CustomCircuit(i) => ui.add(
+            InstanceKind::Module(i) => ui.add(
                 Button::new(format!("Custom {i}"))
                     .sense(Sense::click_and_drag())
                     .min_size(vec2(78.0, 30.0)),
@@ -1331,7 +1346,7 @@ impl App {
                 InstanceKind::Wire => self.db.new_wire(Wire::new_at(pos)),
                 InstanceKind::Lamp => self.db.new_lamp(Lamp { pos }),
                 InstanceKind::Clock => self.db.new_clock(Clock { pos, period: 1 }),
-                InstanceKind::CustomCircuit(c) => self.db.new_custom_circuit(Module {
+                InstanceKind::Module(c) => self.db.new_module(Module {
                     pos,
                     definition_index: c,
                 }),
@@ -1345,7 +1360,7 @@ impl App {
         let d_pressed = ui.input(|i| i.key_pressed(egui::Key::D));
         if resp.hovered()
             && d_pressed
-            && let InstanceKind::CustomCircuit(i) = kind
+            && let InstanceKind::Module(i) = kind
         {
             let mut ids = Vec::new();
             for (id, m) in &self.db.modules {
@@ -1599,7 +1614,7 @@ impl App {
         for c in &self.potential_connections {
             // Highlight the pin that it's going to attach. The stable pin.
             let pin_to_highlight = c.b;
-            let p = self.db.pin_position(pin_to_highlight);
+            let p = self.db.pin_position(pin_to_highlight, &self.canvas_config);
             ui.painter().circle_filled(
                 p - self.viewport_offset,
                 SNAP_THRESHOLD,
@@ -1697,10 +1712,7 @@ impl App {
             ui.painter()
                 .circle_filled(pin_pos, self.canvas_config.base_pin_size, color);
 
-            let pin = Pin {
-                ins: id,
-                index: i as u32,
-            };
+            let pin = Pin::new(id, i as u32, pin.kind);
             if pin_resp.hovered() {
                 self.hovered = Some(Hover::Pin(pin));
             }
@@ -1775,65 +1787,131 @@ impl App {
         self.draw_instance_graphics_new(ui, graphics, pos, id);
     }
 
-    fn draw_module(&self, ui: &Ui, id: InstanceId) {
+    fn draw_module(&mut self, ui: &mut Ui, id: InstanceId) {
         let (pos, definition_index) = {
-            let module = self.db.get_custom_circuit(id);
+            let module = self.db.get_module(id);
             (module.pos, module.definition_index)
         };
         let screen_center = pos - self.viewport_offset;
 
         {
-            // Get the definition for this custom circuit
-            let Some(definition) = self.db.module_definitions.get(definition_index) else {
-                return;
+            let (name, pins) = {
+                let Some(definition) = self.db.module_definitions.get(definition_index) else {
+                    return;
+                };
+                (definition.name.clone(), definition.pins.clone())
             };
 
-            // Draw as a dark blue rectangle with the name
             let rect = Rect::from_center_size(screen_center, self.canvas_config.base_gate_size);
             ui.painter()
                 .rect_filled(rect, CornerRadius::default(), egui::Color32::DARK_BLUE);
 
-            // Draw the name
             ui.painter().text(
                 rect.center(),
                 egui::Align2::CENTER_CENTER,
-                &definition.name,
+                &name,
                 egui::FontId::default(),
                 egui::Color32::WHITE,
             );
 
-            // Draw external pins
-            for (pin_index, ext_pin) in definition.external_pins.iter().enumerate() {
-                let pin_world_pos = pos + ext_pin.offset;
-                let pin_screen_pos = pin_world_pos - self.viewport_offset;
+            let response = ui.allocate_rect(rect, Sense::click_and_drag());
 
-                // Determine pin color based on whether it has current
-                let has_current = self.is_on(Pin {
-                    ins: id,
-                    index: pin_index as u32,
-                });
+            if response.clicked() {
+                self.selected.clear();
+                self.selected.insert(id);
+            }
+            if response.hovered() {
+                self.hovered = Some(Hover::Instance(id));
+            }
+            if response.dragged()
+                && let Some(mouse) = ui.ctx().pointer_interact_pos()
+            {
+                self.selected.clear();
+                self.set_drag(Drag::Canvas(CanvasDrag::Single {
+                    id,
+                    offset: screen_center - mouse,
+                }));
+            }
 
-                let pin_color = match ext_pin.kind {
-                    crate::assets::PinKind::Input => egui::Color32::LIGHT_GREEN,
-                    crate::assets::PinKind::Output => egui::Color32::LIGHT_RED,
-                };
-
-                // Draw the pin
-                ui.painter().circle_filled(
-                    pin_screen_pos,
-                    self.canvas_config.base_pin_size,
-                    pin_color,
-                );
-
-                // Add outline if it has current
-                if has_current {
-                    ui.painter().circle_stroke(
-                        pin_screen_pos,
-                        self.canvas_config.base_pin_size + 3.0,
-                        egui::Stroke::new(2.0, COLOR_PIN_POWERED_OUTLINE),
-                    );
+            // Collect input and output pin indices
+            let mut input_indices = vec![];
+            let mut output_indices = vec![];
+            for (i, &kind) in pins.iter().enumerate() {
+                match kind {
+                    crate::assets::PinKind::Input => input_indices.push(i),
+                    crate::assets::PinKind::Output => output_indices.push(i),
                 }
             }
+
+            // Base size for layout
+            let base_size = self.canvas_config.base_gate_size;
+            let left_x = screen_center.x - base_size.x / 2.0;
+            let right_x = screen_center.x + base_size.x / 2.0;
+            let top_y = screen_center.y - base_size.y / 2.0;
+            let _bottom_y = screen_center.y + base_size.y / 2.0;
+
+            // Helper function to place pins
+            let mut place_pins = |indices: &Vec<usize>, x: f32| {
+                if indices.is_empty() {
+                    return;
+                }
+                let num = indices.len();
+                let spacing = if num == 1 {
+                    0.0
+                } else {
+                    base_size.y / (num - 1) as f32
+                };
+                for (local_i, &pin_index) in indices.iter().enumerate() {
+                    let y = if num == 1 {
+                        screen_center.y
+                    } else {
+                        top_y + local_i as f32 * spacing
+                    };
+                    let pin_pos_world = egui::Pos2::new(x, y);
+                    let pin_screen_pos = self.adjusted_pos(pin_pos_world);
+
+                    let pin_color = match pins[pin_index] {
+                        crate::assets::PinKind::Input => egui::Color32::LIGHT_RED,
+                        crate::assets::PinKind::Output => egui::Color32::LIGHT_GREEN,
+                    };
+
+                    ui.painter().circle_filled(
+                        pin_screen_pos,
+                        self.canvas_config.base_pin_size,
+                        pin_color,
+                    );
+
+                    let has_current = self.is_on(Pin::new(id, pin_index as u32, pins[pin_index]));
+
+                    if has_current {
+                        ui.painter().circle_stroke(
+                            pin_screen_pos,
+                            self.canvas_config.base_pin_size + 3.0,
+                            egui::Stroke::new(2.0, COLOR_PIN_POWERED_OUTLINE),
+                        );
+                    }
+
+                    let pin_rect = Rect::from_center_size(
+                        pin_screen_pos,
+                        Vec2::splat(self.canvas_config.base_pin_size + PIN_HOVER_THRESHOLD),
+                    );
+                    let pin_resp = ui.allocate_rect(pin_rect, Sense::drag());
+                    let pin = Pin::new(id, pin_index as u32, pins[pin_index]);
+                    if pin_resp.hovered() {
+                        self.hovered = Some(Hover::Pin(pin));
+                    }
+                    if pin_resp.dragged() {
+                        self.selected.clear();
+                        self.set_drag(Drag::PinToWire {
+                            source_pin: pin,
+                            start_pos: pin_pos_world,
+                        });
+                    }
+                }
+            };
+
+            place_pins(&input_indices, left_x);
+            place_pins(&output_indices, right_x);
         }
     }
 
@@ -1851,11 +1929,16 @@ impl App {
 
         for (i, pin_pos) in [wire.start, wire.end].iter().enumerate() {
             let pin_pos = self.adjusted_pos(*pin_pos);
-            let pin = Pin {
-                ins: id,
-                index: i as u32,
+            let kind = if i == wire.input_index as usize {
+                PinKind::Input
+            } else {
+                PinKind::Output
             };
-            let rect = Rect::from_center_size(pin_pos, Vec2::splat(PIN_HOVER_THRESHOLD));
+            let pin = Pin::new(id, i as u32, kind);
+            let rect = Rect::from_center_size(
+                pin_pos,
+                Vec2::splat(self.canvas_config.base_pin_size + PIN_HOVER_THRESHOLD),
+            );
             let pin_resp = ui.allocate_rect(rect, Sense::click_and_drag());
             if pin_resp.hovered() {
                 self.hovered = Some(Hover::Pin(pin));
@@ -1872,29 +1955,45 @@ impl App {
                         id: pin.ins,
                         start: pin.index != 1,
                     });
-                } else if let Some(mouse) = self.mouse_pos_world(ui) {
+                } else {
                     self.set_drag(Drag::PinToWire {
                         source_pin: pin,
-                        start_pos: mouse,
+                        start_pos: pin_pos,
                     });
                 }
                 pin_interact = true;
             }
+            let mut pin_color = if i == wire.input_index as usize {
+                Color32::RED
+            } else {
+                Color32::GREEN
+            };
+            // Only show red/green if pin is not connected
+            let is_connected = self
+                .db
+                .connections
+                .iter()
+                .any(|conn| conn.a == pin || conn.b == pin);
+            if is_connected {
+                pin_color = color;
+            }
             ui.painter()
-                .circle(pin_pos, PIN_HOVER_THRESHOLD / 2.0, color, Stroke::NONE);
+                .circle(pin_pos, PIN_HOVER_THRESHOLD / 2.0, pin_color, Stroke::NONE);
         }
 
         let start = self.adjusted_pos(wire.start);
         let end = self.adjusted_pos(wire.end);
 
-        let hit_wire = if let Some(mouse_world) = self.mouse_pos_world(ui) {
+        let hit_wire = if pin_interact {
+            false
+        } else if let Some(mouse_world) = self.mouse_pos_world(ui) {
             let dist = wire.dist_to_closest_point_on_line(mouse_world);
             dist < WIRE_HIT_DISTANCE
         } else {
             false
         };
 
-        if hit_wire && !pin_interact {
+        if hit_wire {
             self.hovered = Some(Hover::Instance(id));
             color = COLOR_WIRE_HOVER;
 
@@ -2021,7 +2120,7 @@ impl App {
         match hovered {
             Hover::Pin(pin) => {
                 let color = COLOR_HOVER_PIN_TO_WIRE;
-                let pin_pos = self.db.pin_position(pin) - self.viewport_offset;
+                let pin_pos = self.db.pin_position(pin, &self.canvas_config) - self.viewport_offset;
                 ui.painter()
                     .circle_filled(pin_pos, PIN_HOVER_THRESHOLD, color);
             }
@@ -2080,8 +2179,8 @@ impl App {
                 }
                 // Wire is highlighted when drawing
                 InstanceKind::Wire => {}
-                InstanceKind::CustomCircuit(_) => {
-                    let cc = self.db.get_custom_circuit(hovered);
+                InstanceKind::Module(_) => {
+                    let cc = self.db.get_module(hovered);
                     let outer = Rect::from_center_size(
                         cc.pos - self.viewport_offset,
                         self.canvas_config.base_gate_size + INSTANEC_OUTLINE,
@@ -2158,7 +2257,7 @@ impl App {
                 }
                 InstanceKind::Wire => {
                     for pin in self.db.pins_of(id) {
-                        let pos = self.db.pin_position(pin);
+                        let pos = self.db.pin_position(pin, &self.canvas_config);
                         ui.painter().circle_filled(
                             pos - self.viewport_offset,
                             PIN_MOVE_HINT_D,
@@ -2166,8 +2265,8 @@ impl App {
                         );
                     }
                 }
-                InstanceKind::CustomCircuit(_) => {
-                    let cc = self.db.get_custom_circuit(id);
+                InstanceKind::Module(_) => {
+                    let cc = self.db.get_module(id);
                     let r = Rect::from_center_size(
                         cc.pos - self.viewport_offset,
                         self.canvas_config.base_gate_size + INSTANEC_OUTLINE,
@@ -2187,7 +2286,7 @@ impl App {
         let mut out = String::new();
         writeln!(
             out,
-            "counts: gates={}, powers={}, lamps={}, clocks={}, wires={}, custom_circuits={}, custom_defs={}, conns={}",
+            "counts: gates={}, powers={}, lamps={}, clocks={}, wires={}, modules={}, custom_defs={}, conns={}",
             self.db.gates.len(),
             self.db.powers.len(),
             self.db.lamps.len(),
@@ -2253,14 +2352,11 @@ impl App {
         for (id, g) in &self.db.gates {
             writeln!(out, "  {}", g.display(&self.db)).ok();
             // pins
-            if false {
+            if true {
                 for (i, pin) in g.kind.graphics().pins.iter().enumerate() {
                     let pin_offset = pin.offset;
                     let p = g.pos + pin_offset;
-                    let pin_instance = Pin {
-                        ins: id,
-                        index: i as u32,
-                    };
+                    let pin_instance = Pin::new(id, i as u32, pin.kind);
                     writeln!(
                         out,
                         "    {} at ({:.1},{:.1})",
@@ -2279,10 +2375,7 @@ impl App {
             for (i, pin) in p.graphics().pins.iter().enumerate() {
                 let pin_offset = pin.offset;
                 let pp = p.pos + pin_offset;
-                let pin_instance = Pin {
-                    ins: id,
-                    index: i as u32,
-                };
+                let pin_instance = Pin::new(id, i as u32, pin.kind);
                 writeln!(
                     out,
                     "    {} at ({:.1},{:.1})",
@@ -2301,10 +2394,7 @@ impl App {
             for (i, pin) in lamp.graphics().pins.iter().enumerate() {
                 let pin_offset = pin.offset;
                 let p = lamp.pos + pin_offset;
-                let pin_instance = Pin {
-                    ins: id,
-                    index: i as u32,
-                };
+                let pin_instance = Pin::new(id, i as u32, pin.kind);
                 writeln!(
                     out,
                     "    {} at ({:.1},{:.1})",
@@ -2323,10 +2413,7 @@ impl App {
             for (i, pin) in clock.graphics().pins.iter().enumerate() {
                 let pin_offset = pin.offset;
                 let p = clock.pos + pin_offset;
-                let pin_instance = Pin {
-                    ins: id,
-                    index: i as u32,
-                };
+                let pin_instance = Pin::new(id, i as u32, pin.kind);
                 writeln!(
                     out,
                     "    {} at ({:.1},{:.1})",
@@ -2341,9 +2428,9 @@ impl App {
         writeln!(out, "\nWires:").ok();
         for (id, w) in &self.db.wires {
             writeln!(out, "  {}", w.display(&self.db)).ok();
-            if false {
+            if true {
                 for pin in self.db.pins_of(id) {
-                    writeln!(out, "{}", pin.display_alone(&self.db)).ok();
+                    writeln!(out, "{}", pin.display_alone()).ok();
                 }
             }
         }
@@ -2351,6 +2438,11 @@ impl App {
         writeln!(out, "\nModules:").ok();
         for (id, m) in &self.db.modules {
             writeln!(out, "  {}", m.display(&self.db, id)).ok();
+        }
+
+        writeln!(out, "\nModule Def:").ok();
+        for m in &self.db.module_definitions {
+            writeln!(out, "  {}", m.display_definition()).ok();
         }
 
         writeln!(out, "\nConnections:").ok();
@@ -2400,8 +2492,8 @@ impl App {
                     let c = self.db.get_clock(id);
                     points.push(c.pos);
                 }
-                InstanceKind::CustomCircuit(_) => {
-                    let cc = self.db.get_custom_circuit(id);
+                InstanceKind::Module(_) => {
+                    let cc = self.db.get_module(id);
                     points.push(cc.pos);
                 }
             }
@@ -2434,12 +2526,9 @@ impl App {
                     let c = self.db.get_clock(id);
                     object_pos.push(ClipBoardItem::Clock(center - c.pos));
                 }
-                InstanceKind::CustomCircuit(_) => {
-                    let cc = self.db.get_custom_circuit(id);
-                    object_pos.push(ClipBoardItem::CustomCircuit(
-                        cc.definition_index,
-                        center - cc.pos,
-                    ));
+                InstanceKind::Module(_) => {
+                    let cc = self.db.get_module(id);
+                    object_pos.push(ClipBoardItem::Module(cc.definition_index, center - cc.pos));
                 }
             }
         }
@@ -2489,8 +2578,8 @@ impl App {
                     self.connection_manager.mark_instance_dirty(id);
                     self.selected.insert(id);
                 }
-                ClipBoardItem::CustomCircuit(def_index, offset) => {
-                    let id = self.db.new_custom_circuit(custom_circuit::Module {
+                ClipBoardItem::Module(def_index, offset) => {
+                    let id = self.db.new_module(Module {
                         pos: mouse - offset,
                         definition_index: def_index,
                     });
@@ -2531,7 +2620,7 @@ impl App {
         match self.db.ty(selected) {
             InstanceKind::Wire => {
                 for pin in self.db.pins_of(selected) {
-                    let pos = self.db.pin_position(pin);
+                    let pos = self.db.pin_position(pin, &self.canvas_config);
                     ui.painter().circle_filled(
                         pos - self.viewport_offset,
                         PIN_MOVE_HINT_D,
@@ -2553,7 +2642,7 @@ impl App {
             | InstanceKind::Power
             | InstanceKind::Lamp
             | InstanceKind::Clock
-            | InstanceKind::CustomCircuit(_) => {}
+            | InstanceKind::Module(_) => {}
         }
     }
 
@@ -2598,16 +2687,15 @@ impl App {
     }
 
     fn create_module(&mut self) {
-        // Generate a unique name for the custom circuit
         let circuit_name = format!("module {}", self.db.module_definitions.len() + 1);
 
         match self.create_custom_circuit(circuit_name, &self.selected.clone()) {
             Ok(()) => {
-                log::info!("Custom circuit created successfully");
+                log::info!("module created successfully");
                 self.selected.clear();
             }
             Err(e) => {
-                log::error!("Failed to create custom circuit: {e}");
+                log::error!("Failed to create module: {e}");
             }
         }
     }
