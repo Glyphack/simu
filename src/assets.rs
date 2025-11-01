@@ -1,13 +1,16 @@
 use std::fmt::Display;
 
 use egui::{ImageSource, Vec2, include_image};
+#[derive(Debug, Clone)]
 pub struct InstanceGraphics {
     // TODO: Figure out what is the correct way to deal with images
     pub svg: ImageSource<'static>,
     pub pins: &'static [PinGraphics],
 }
 
-#[derive(serde::Deserialize, serde::Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(
+    serde::Deserialize, serde::Serialize, Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd,
+)]
 pub enum PinKind {
     Input,
     Output,

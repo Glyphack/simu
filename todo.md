@@ -1,1 +1,1 @@
-- [ ] Test for <https://www.geeksforgeeks.org/digital-logic/what-is-jk-flip-flop/>
+- Test for <https://www.geeksforgeeks.org/digital-logic/what-is-jk-flip-flop/>

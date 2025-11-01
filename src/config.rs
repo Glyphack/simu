@@ -1,6 +1,6 @@
 use egui::{Color32, Vec2, vec2};
 
-#[derive(serde::Deserialize, serde::Serialize)]
+#[derive(Clone, serde::Deserialize, serde::Serialize)]
 pub struct CanvasConfig {
     pub base_gate_size: Vec2,
     pub base_pin_size: f32,
