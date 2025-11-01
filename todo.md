@@ -1,3 +1,1 @@
 - Test for <https://www.geeksforgeeks.org/digital-logic/what-is-jk-flip-flop/>
-- Remove wire input and output and calculate the input/output during simulation
-- Review the display methods and make them consistent

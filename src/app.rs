@@ -516,6 +516,12 @@ impl DB {
         self.modules.get_mut(id).expect("modules not found (mut)")
     }
 
+    pub fn get_module_def(&self, def_index: usize) -> &ModuleDefinition {
+        self.module_definitions
+            .get(def_index)
+            .expect("module def not found")
+    }
+
     // Pin helper methods with type checking
 
     // Gates - generic versions
@@ -1041,6 +1047,13 @@ pub struct App {
     pub editing_label: Option<LabelId>,
     #[serde(skip)]
     pub label_edit_buffer: String,
+    // Module creation dialog state
+    #[serde(skip)]
+    pub creating_module: bool,
+    #[serde(skip)]
+    pub module_name_buffer: String,
+    #[serde(skip)]
+    pub module_creation_error: Option<String>,
     // Simulation service - holds simulation state and results
     #[serde(skip)]
     pub simulator: Simulator,
@@ -1071,6 +1084,9 @@ impl Default for App {
             panel_width: 0.0,
             editing_label: None,
             label_edit_buffer: String::new(),
+            creating_module: false,
+            module_name_buffer: String::new(),
+            module_creation_error: None,
             simulator: Simulator::default(),
             clock_controller: ClockController::default(),
         }
@@ -1210,6 +1226,52 @@ impl App {
                 egui_logger::logger_ui().show(ui);
             });
         }
+
+        if self.creating_module {
+            egui::Window::new("Create Module")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ui.ctx(), |ui| {
+                    ui.vertical(|ui| {
+                        ui.label("Enter module name:");
+                        let response = ui.text_edit_singleline(&mut self.module_name_buffer);
+
+                        // Auto-focus the text input when dialog opens
+                        response.request_focus();
+
+                        // Check for Enter key to confirm
+                        if ui.input(|i| i.key_pressed(egui::Key::Enter))
+                            && !self.module_name_buffer.trim().is_empty()
+                        {
+                            self.confirm_module_creation();
+                        }
+
+                        // Check for Escape key to cancel
+                        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                            self.creating_module = false;
+                            self.module_name_buffer.clear();
+                            self.module_creation_error = None;
+                        }
+
+                        // Show error message if any
+                        if let Some(error) = &self.module_creation_error {
+                            ui.colored_label(egui::Color32::RED, error);
+                        }
+
+                        ui.horizontal(|ui| {
+                            if ui.button("Create").clicked() {
+                                self.confirm_module_creation();
+                            }
+                            if ui.button("Cancel").clicked() {
+                                self.creating_module = false;
+                                self.module_name_buffer.clear();
+                                self.module_creation_error = None;
+                            }
+                        });
+                    });
+                });
+        }
         ui.with_layout(Layout::left_to_right(Align::Min), |ui| {
             self.canvas_config = CanvasConfig::default();
             if self.show_debug {
@@ -1330,7 +1392,7 @@ impl App {
                     .min_size(vec2(78.0, 30.0)),
             ),
             InstanceKind::Module(i) => ui.add(
-                Button::new(format!("Custom {i}"))
+                Button::new(self.db.get_module_def(i).name.clone())
                     .sense(Sense::click_and_drag())
                     .min_size(vec2(78.0, 30.0)),
             ),
@@ -1402,6 +1464,10 @@ impl App {
     }
 
     fn handle_copy_pasting(&mut self, ui: &Ui, mouse_pos_world: Option<Pos2>) {
+        if self.creating_module {
+            return;
+        }
+
         let mut copy_event_detected = false;
         let mut paste_event_detected = false;
         ui.ctx().input(|i| {
@@ -1431,6 +1497,10 @@ impl App {
     }
 
     fn handle_deletion(&mut self, ui: &Ui) {
+        if self.creating_module {
+            return;
+        }
+
         let bs_pressed = ui.input(|i| i.key_pressed(egui::Key::Backspace));
         let d_pressed = ui.input(|i| i.key_pressed(egui::Key::D));
 
@@ -1506,71 +1576,75 @@ impl App {
         let enter_pressed = ui.input(|i| i.key_pressed(egui::Key::Enter));
         let esc_pressed = ui.input(|i| i.key_released(egui::Key::Escape));
 
-        if right_down && mouse_is_visible && self.hovered.is_none() {
-            self.panning = true;
-        }
-        if right_released || !mouse_is_visible {
-            self.panning = false;
-        }
-        if self.panning {
-            self.viewport_offset += ui.input(|i| i.pointer.delta());
-        }
-
-        self.handle_copy_pasting(ui, mouse_pos_world);
-        self.handle_deletion(ui);
-
-        if let Some(editing_id) = self.editing_label {
-            let label = self.db.get_label_mut(editing_id);
-            label.text = self.label_edit_buffer.clone();
-            if mouse_up || enter_pressed || esc_pressed {
-                self.editing_label = None;
-                self.label_edit_buffer.clear();
+        if !self.creating_module {
+            if right_down && mouse_is_visible && self.hovered.is_none() {
+                self.panning = true;
             }
-        }
-
-        // Handle double-click on empty canvas to create new label
-        if double_clicked
-            && self.hovered.is_none()
-            && let Some(mouse) = mouse_pos_world
-        {
-            let id = self.db.new_label(Label::new(mouse));
-            self.editing_label = Some(id);
-            self.label_edit_buffer = String::from("Label");
-        }
-
-        if let Some(mouse) = mouse_pos_world {
-            if mouse_dragging_canvas {
-                self.set_drag(Drag::Selecting { start: mouse });
+            if right_released || !mouse_is_visible {
+                self.panning = false;
             }
-            let instance_dragging = self.drag.is_some();
-
-            if instance_dragging {
-                self.handle_dragging(ui, mouse);
+            if self.panning {
+                self.viewport_offset += ui.input(|i| i.pointer.delta());
             }
 
-            if mouse_up && instance_dragging {
-                self.handle_drag_end(mouse);
+            self.handle_copy_pasting(ui, mouse_pos_world);
+            self.handle_deletion(ui);
 
-                if self.connection_manager.update_connections(&mut self.db) {
-                    // self.current_dirty = true;
+            if let Some(editing_id) = self.editing_label {
+                let label = self.db.get_label_mut(editing_id);
+                label.text = self.label_edit_buffer.clone();
+                if mouse_up || enter_pressed || esc_pressed {
+                    self.editing_label = None;
+                    self.label_edit_buffer.clear();
+                }
+            }
+
+            if double_clicked
+                && self.hovered.is_none()
+                && let Some(mouse) = mouse_pos_world
+            {
+                let id = self.db.new_label(Label::new(mouse));
+                self.editing_label = Some(id);
+                self.label_edit_buffer = String::from("Label");
+            }
+
+            if let Some(mouse) = mouse_pos_world {
+                if mouse_dragging_canvas {
+                    self.set_drag(Drag::Selecting { start: mouse });
+                }
+                let instance_dragging = self.drag.is_some();
+
+                if instance_dragging {
+                    self.handle_dragging(ui, mouse);
+                }
+
+                if mouse_up && instance_dragging {
+                    self.handle_drag_end(mouse);
+
+                    if self.connection_manager.update_connections(&mut self.db) {
+                        // self.current_dirty = true;
+                    }
                 }
             }
         }
-        if self.selected.len() == 1 {
-            self.highlight_selected_actions(ui, mouse_pos_world, mouse_clicked);
-        }
 
-        if mouse_clicked_canvas {
-            self.selected.clear();
-        }
+        if !self.creating_module {
+            if self.selected.len() == 1 {
+                self.highlight_selected_actions(ui, mouse_pos_world, mouse_clicked);
+            }
 
-        if right_clicked
-            && let Some(id) = self.hovered.as_ref().map(|i| i.instance())
-            && matches!(self.db.ty(id), InstanceKind::Power)
-        {
-            let p = self.db.get_power_mut(id);
-            p.on = !p.on;
-            self.current_dirty = true;
+            if mouse_clicked_canvas {
+                self.selected.clear();
+            }
+
+            if right_clicked
+                && let Some(id) = self.hovered.as_ref().map(|i| i.instance())
+                && matches!(self.db.ty(id), InstanceKind::Power)
+            {
+                let p = self.db.get_power_mut(id);
+                p.on = !p.on;
+                self.current_dirty = true;
+            }
         }
 
         if self.current_dirty {
@@ -2687,15 +2761,31 @@ impl App {
     }
 
     fn create_module(&mut self) {
-        let circuit_name = format!("module {}", self.db.module_definitions.len() + 1);
+        self.creating_module = true;
+        self.module_name_buffer = format!("module {}", self.db.module_definitions.len() + 1);
+        self.module_creation_error = None;
+    }
 
-        match self.create_custom_circuit(circuit_name, &self.selected.clone()) {
+    fn confirm_module_creation(&mut self) {
+        // Validate the module name and clone it to avoid borrow issues
+        let name = self.module_name_buffer.trim().to_owned();
+        if name.is_empty() {
+            self.module_creation_error = Some("Module name cannot be empty".to_owned());
+            return;
+        }
+
+        match self.create_module_definition(name.clone(), &self.selected.clone()) {
             Ok(()) => {
-                log::info!("module created successfully");
+                log::info!("module created successfully: {name}");
                 self.selected.clear();
+                // Close the dialog
+                self.creating_module = false;
+                self.module_name_buffer.clear();
+                self.module_creation_error = None;
             }
             Err(e) => {
                 log::error!("Failed to create module: {e}");
+                self.module_creation_error = Some(format!("Failed to create module: {e}"));
             }
         }
     }

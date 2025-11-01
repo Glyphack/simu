@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use egui::Pos2;
 
@@ -11,13 +11,6 @@ use crate::{
 pub struct ModuleDefinition {
     pub name: String,
     pub pins: Vec<PinKind>,
-    pub truth_table: TruthTable,
-}
-
-#[derive(serde::Deserialize, serde::Serialize, Debug, Clone, Default)]
-pub struct TruthTable {
-    // Map of turned on pins to output turned on pins
-    table: HashMap<Vec<Pin>, Vec<Pin>>,
 }
 
 #[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
@@ -27,12 +20,12 @@ pub struct Module {
 }
 
 impl Module {
-    pub fn name(&self) -> String {
-        format!("module {}", self.definition_index + 1)
+    pub fn name(&self, db: &DB) -> String {
+        db.get_module_def(self.definition_index).name.clone()
     }
 
-    pub fn display(&self, _db: &DB, id: InstanceId) -> String {
-        let mut sb = self.name();
+    pub fn display(&self, db: &DB, id: InstanceId) -> String {
+        let mut sb = self.name(db);
         sb += &format!(" {id}");
         sb
     }
@@ -44,10 +37,6 @@ impl ModuleDefinition {
         sb += &format!("Pins: {}\n", self.pins.len());
         for pin in &self.pins {
             sb += &format!("  {pin}");
-        }
-        sb += &format!("Truth table entries: {}\n", self.truth_table.table.len());
-        for (inputs, outputs) in &self.truth_table.table {
-            sb += &format!("  {inputs:?} -> {outputs:?}\n");
         }
         sb
     }
@@ -72,7 +61,7 @@ impl App {
         Box::leak(pins.into_boxed_slice())
     }
 
-    pub fn create_custom_circuit(
+    pub fn create_module_definition(
         &mut self,
         name: String,
         instances: &HashSet<InstanceId>,
@@ -97,15 +86,8 @@ impl App {
         if free_pins.is_empty() {
             return Err("Selected components have no free pins to expose".to_owned());
         }
-        let truth_table = TruthTable::default();
-
         let pins = free_pins.iter().map(|p| p.kind).collect();
-
-        let definition = ModuleDefinition {
-            name,
-            pins,
-            truth_table,
-        };
+        let definition = ModuleDefinition { name, pins };
 
         self.db.module_definitions.push(definition);
 
