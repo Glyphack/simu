@@ -42,7 +42,7 @@ pub const PIN_HOVER_THRESHOLD: f32 = 10.0;
 
 pub const INSTANEC_OUTLINE_EXPAND: f32 = 6.0;
 pub const INSTANEC_OUTLINE: Vec2 = vec2(6.0, 6.0);
-pub const INSTANEC_OUTLINE_TICKNESS: f32 = 2.0;
+pub const INSTANEC_OUTLINE_THICKNESS: f32 = 2.0;
 
 pub const NEW_PIN_ON_WIRE_THRESHOLD: f32 = 10.0;
 
@@ -2208,7 +2208,7 @@ impl App {
                     ui.painter().rect_stroke(
                         outer,
                         CornerRadius::default(),
-                        Stroke::new(INSTANEC_OUTLINE_TICKNESS, COLOR_HOVER_INSTANCE_OUTLINE),
+                        Stroke::new(INSTANEC_OUTLINE_THICKNESS, COLOR_HOVER_INSTANCE_OUTLINE),
                         StrokeKind::Middle,
                     );
                 }
@@ -2221,7 +2221,7 @@ impl App {
                     ui.painter().rect_stroke(
                         outer,
                         CornerRadius::default(),
-                        Stroke::new(INSTANEC_OUTLINE_TICKNESS, COLOR_HOVER_INSTANCE_OUTLINE),
+                        Stroke::new(INSTANEC_OUTLINE_THICKNESS, COLOR_HOVER_INSTANCE_OUTLINE),
                         StrokeKind::Middle,
                     );
                 }
@@ -2234,7 +2234,7 @@ impl App {
                     ui.painter().rect_stroke(
                         outer,
                         CornerRadius::default(),
-                        Stroke::new(INSTANEC_OUTLINE_TICKNESS, COLOR_HOVER_INSTANCE_OUTLINE),
+                        Stroke::new(INSTANEC_OUTLINE_THICKNESS, COLOR_HOVER_INSTANCE_OUTLINE),
                         StrokeKind::Middle,
                     );
                 }
@@ -2247,7 +2247,7 @@ impl App {
                     ui.painter().rect_stroke(
                         outer,
                         CornerRadius::default(),
-                        Stroke::new(INSTANEC_OUTLINE_TICKNESS, COLOR_HOVER_INSTANCE_OUTLINE),
+                        Stroke::new(INSTANEC_OUTLINE_THICKNESS, COLOR_HOVER_INSTANCE_OUTLINE),
                         StrokeKind::Middle,
                     );
                 }
@@ -2262,7 +2262,7 @@ impl App {
                     ui.painter().rect_stroke(
                         outer,
                         CornerRadius::default(),
-                        Stroke::new(INSTANEC_OUTLINE_TICKNESS, COLOR_HOVER_INSTANCE_OUTLINE),
+                        Stroke::new(INSTANEC_OUTLINE_THICKNESS, COLOR_HOVER_INSTANCE_OUTLINE),
                         StrokeKind::Middle,
                     );
                 }
@@ -2286,7 +2286,7 @@ impl App {
                     ui.painter().rect_stroke(
                         r,
                         CornerRadius::default(),
-                        Stroke::new(INSTANEC_OUTLINE_TICKNESS, COLOR_SELECTION_HIGHLIGHT),
+                        Stroke::new(INSTANEC_OUTLINE_THICKNESS, COLOR_SELECTION_HIGHLIGHT),
                         StrokeKind::Outside,
                     );
                 }
@@ -2299,7 +2299,7 @@ impl App {
                     ui.painter().rect_stroke(
                         r,
                         CornerRadius::default(),
-                        Stroke::new(INSTANEC_OUTLINE_TICKNESS, COLOR_SELECTION_HIGHLIGHT),
+                        Stroke::new(INSTANEC_OUTLINE_THICKNESS, COLOR_SELECTION_HIGHLIGHT),
                         StrokeKind::Outside,
                     );
                 }
@@ -2312,7 +2312,7 @@ impl App {
                     ui.painter().rect_stroke(
                         r,
                         CornerRadius::default(),
-                        Stroke::new(INSTANEC_OUTLINE_TICKNESS, COLOR_SELECTION_HIGHLIGHT),
+                        Stroke::new(INSTANEC_OUTLINE_THICKNESS, COLOR_SELECTION_HIGHLIGHT),
                         StrokeKind::Outside,
                     );
                 }
@@ -2325,7 +2325,7 @@ impl App {
                     ui.painter().rect_stroke(
                         r,
                         CornerRadius::default(),
-                        Stroke::new(INSTANEC_OUTLINE_TICKNESS, COLOR_SELECTION_HIGHLIGHT),
+                        Stroke::new(INSTANEC_OUTLINE_THICKNESS, COLOR_SELECTION_HIGHLIGHT),
                         StrokeKind::Outside,
                     );
                 }
@@ -2348,7 +2348,7 @@ impl App {
                     ui.painter().rect_stroke(
                         r,
                         CornerRadius::default(),
-                        Stroke::new(INSTANEC_OUTLINE_TICKNESS, COLOR_SELECTION_HIGHLIGHT),
+                        Stroke::new(INSTANEC_OUTLINE_THICKNESS, COLOR_SELECTION_HIGHLIGHT),
                         StrokeKind::Outside,
                     );
                 }
