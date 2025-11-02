@@ -622,7 +622,6 @@ impl App {
     }
 
     pub fn delete_instance(&mut self, id: InstanceId) {
-        self.db.instances.remove(id);
         self.db.types.remove(id);
         self.db.gates.remove(id);
         self.db.powers.remove(id);

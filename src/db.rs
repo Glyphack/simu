@@ -50,11 +50,13 @@ impl From<u32> for ModuleDefId {
 }
 
 #[derive(Default, serde::Deserialize, serde::Serialize, Debug, Clone)]
+pub struct Circuit {}
+
+#[derive(Default, serde::Deserialize, serde::Serialize, Debug, Clone)]
 pub struct DB {
-    // Primary key allocator; ensures unique keys across all instance kinds
-    pub instances: SlotMap<InstanceId, ()>,
+    pub circuit: Circuit,
     // Type registry for each instance id
-    pub types: SecondaryMap<InstanceId, InstanceKind>,
+    pub types: SlotMap<InstanceId, InstanceKind>,
     // Per-kind payloads keyed off the primary key space
     pub gates: SecondaryMap<InstanceId, Gate>,
     pub powers: SecondaryMap<InstanceId, Power>,
@@ -62,11 +64,11 @@ pub struct DB {
     pub lamps: SecondaryMap<InstanceId, Lamp>,
     pub clocks: SecondaryMap<InstanceId, Clock>,
     pub modules: SecondaryMap<InstanceId, Module>,
-    // Definition of modules created by the user
-    pub module_definitions: SlotMap<ModuleDefId, ModuleDefinition>,
     pub connections: HashSet<Connection>,
     // Labels
     pub labels: SlotMap<LabelId, Label>,
+    // Definition of modules created by the user
+    pub module_definitions: SlotMap<ModuleDefId, ModuleDefinition>,
 }
 
 impl DB {
@@ -74,50 +76,43 @@ impl DB {
         Self::default()
     }
     pub fn new_gate(&mut self, g: Gate) -> InstanceId {
-        let k = self.instances.insert(());
+        let k = self.types.insert(InstanceKind::Gate(g.kind));
         self.gates.insert(k, g);
         let kind = self
             .gates
             .get(k)
             .expect("gate must exist right after insertion")
             .kind;
-        self.types.insert(k, InstanceKind::Gate(kind));
         k
     }
 
     pub fn new_power(&mut self, p: Power) -> InstanceId {
-        let k = self.instances.insert(());
+        let k = self.types.insert(InstanceKind::Power);
         self.powers.insert(k, p);
-        self.types.insert(k, InstanceKind::Power);
         k
     }
 
     pub fn new_wire(&mut self, w: Wire) -> InstanceId {
-        let k = self.instances.insert(());
+        let k = self.types.insert(InstanceKind::Wire);
         self.wires.insert(k, w);
-        self.types.insert(k, InstanceKind::Wire);
         k
     }
 
     pub fn new_lamp(&mut self, l: Lamp) -> InstanceId {
-        let k = self.instances.insert(());
+        let k = self.types.insert(InstanceKind::Lamp);
         self.lamps.insert(k, l);
-        self.types.insert(k, InstanceKind::Lamp);
         k
     }
 
     pub fn new_clock(&mut self, c: Clock) -> InstanceId {
-        let k = self.instances.insert(());
+        let k = self.types.insert(InstanceKind::Clock);
         self.clocks.insert(k, c);
-        self.types.insert(k, InstanceKind::Clock);
         k
     }
 
     pub fn new_module(&mut self, c: crate::module::Module) -> InstanceId {
-        let k = self.instances.insert(());
-        let definition_index = c.definition_index;
+        let k = self.types.insert(InstanceKind::Module(c.definition_index));
         self.modules.insert(k, c);
-        self.types.insert(k, InstanceKind::Module(definition_index));
         k
     }
 

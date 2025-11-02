@@ -124,7 +124,7 @@ impl ConnectionManager {
         self.pin_position_cache.clear();
 
         // Index all pins by their grid cell
-        for (instance_id, _) in &db.instances {
+        for (instance_id, _) in &db.types {
             for pin in db.pins_of(instance_id) {
                 let pos = db.pin_position(pin, &self.canvas_config);
                 let cell = GridCell::from_pos(pos);
@@ -292,7 +292,7 @@ impl ConnectionManager {
         pins_to_update.sort_unstable();
         pins_to_update.dedup();
 
-        if pins_to_update.len() > db.instances.len() / 4 {
+        if pins_to_update.len() > db.types.len() / 4 {
             self.rebuild_spatial_index(db);
         } else {
             self.update_spatial_index_for_pins(db, &pins_to_update);
