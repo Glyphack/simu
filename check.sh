@@ -2,6 +2,8 @@
 # This scripts runs various CI-like checks in a convenient way.
 set -eu
 
+rustup override set 1.89
+
 cargo check --quiet --workspace --all-targets
 cargo check --quiet --workspace --all-features --lib --target wasm32-unknown-unknown
 cargo fmt --all -- --check
