@@ -2,10 +2,9 @@ use std::collections::HashSet;
 
 use egui::{CornerRadius, Pos2, Rect, Stroke, StrokeKind, Ui, Vec2, pos2};
 
-use crate::app::{
-    App, COLOR_HOVER_PIN_TO_WIRE, COLOR_SELECTION_BOX, InstanceId, InstanceKind, LabelId,
-    MIN_WIRE_SIZE, Pin, Wire,
-};
+use crate::app::{App, COLOR_HOVER_PIN_TO_WIRE, COLOR_SELECTION_BOX, MIN_WIRE_SIZE};
+
+use crate::db::{InstanceId, InstanceKind, LabelId, Pin, Wire};
 
 #[derive(serde::Deserialize, serde::Serialize, Debug, Clone, Copy)]
 pub enum CanvasDrag {

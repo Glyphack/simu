@@ -3,8 +3,9 @@ use std::collections::HashSet;
 use egui::Pos2;
 
 use crate::{
-    app::{App, DB, InstanceId, Pin},
+    app::App,
     assets::{PinGraphics, PinKind},
+    db::{DB, InstanceId, Pin},
 };
 
 #[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]

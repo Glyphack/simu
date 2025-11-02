@@ -3,8 +3,8 @@ use std::collections::{HashMap, HashSet};
 use log;
 
 use crate::{
-    app::{DB, GateKind, InstanceId, InstanceKind, Pin},
     assets::PinKind,
+    db::{DB, GateKind, InstanceId, InstanceKind, Pin},
 };
 
 const MAX_ITERATIONS: usize = 1000;
@@ -264,8 +264,8 @@ impl Simulator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::{Gate, GateKind, Lamp, Power};
     use crate::connection_manager::Connection;
+    use crate::db::{Clock, Gate, GateKind, Lamp, Power};
     use egui::{Pos2, pos2};
 
     fn create_test_db() -> DB {
@@ -299,7 +299,7 @@ mod tests {
 
     #[expect(dead_code)]
     fn new_clock(db: &mut DB) -> InstanceId {
-        db.new_clock(crate::app::Clock {
+        db.new_clock(Clock {
             pos: Pos2::ZERO,
             period: 1,
         })

@@ -1,7 +1,8 @@
 #![allow(clippy::allow_attributes)]
-use crate::app::{DB, InstanceId, InstanceKind, Pin, SNAP_THRESHOLD};
+use crate::app::SNAP_THRESHOLD;
 use crate::assets;
 use crate::config::CanvasConfig;
+use crate::db::{DB, InstanceId, InstanceKind, Pin};
 use egui::Pos2;
 use std::collections::{HashMap, HashSet};
 
@@ -352,8 +353,8 @@ impl ConnectionManager {
 mod tests {
     use super::Connection;
     use crate::{
-        app::{InstanceId, Pin},
         assets::PinKind,
+        db::{InstanceId, Pin},
     };
     use std::collections::HashSet;
 
