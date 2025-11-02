@@ -33,6 +33,22 @@ slotmap::new_key_type! {
     pub struct LabelId;
 }
 
+impl From<u32> for LabelId {
+    fn from(value: u32) -> Self {
+        Self(slotmap::KeyData::from_ffi(value as u64))
+    }
+}
+
+slotmap::new_key_type! {
+    pub struct ModuleDefId;
+}
+
+impl From<u32> for ModuleDefId {
+    fn from(value: u32) -> Self {
+        Self(slotmap::KeyData::from_ffi(value as u64))
+    }
+}
+
 #[derive(Default, serde::Deserialize, serde::Serialize, Debug, Clone)]
 pub struct DB {
     // Primary key allocator; ensures unique keys across all instance kinds
@@ -47,7 +63,7 @@ pub struct DB {
     pub clocks: SecondaryMap<InstanceId, Clock>,
     pub modules: SecondaryMap<InstanceId, Module>,
     // Definition of modules created by the user
-    pub module_definitions: Vec<ModuleDefinition>,
+    pub module_definitions: SlotMap<ModuleDefId, ModuleDefinition>,
     pub connections: HashSet<Connection>,
     // Labels
     pub labels: SlotMap<LabelId, Label>,
@@ -152,15 +168,15 @@ impl DB {
         self.clocks.get_mut(id).expect("clock not found (mut)")
     }
 
-    pub fn get_module(&self, id: InstanceId) -> &crate::module::Module {
+    pub fn get_module(&self, id: InstanceId) -> &Module {
         self.modules.get(id).expect("module not found")
     }
 
-    pub fn get_module_mut(&mut self, id: InstanceId) -> &mut crate::module::Module {
+    pub fn get_module_mut(&mut self, id: InstanceId) -> &mut Module {
         self.modules.get_mut(id).expect("modules not found (mut)")
     }
 
-    pub fn get_module_def(&self, def_index: usize) -> &ModuleDefinition {
+    pub fn get_module_def(&self, def_index: ModuleDefId) -> &ModuleDefinition {
         self.module_definitions
             .get(def_index)
             .expect("module def not found")
@@ -332,13 +348,8 @@ impl DB {
                     .collect()
             }
             InstanceKind::Module(_) => {
-                let cc = self.get_module(id);
-                let def = &self.module_definitions[cc.definition_index];
-                def.pins
-                    .iter()
-                    .enumerate()
-                    .map(|(i, pin)| Pin::new(id, i as u32, *pin))
-                    .collect()
+                // TODO: Modules
+                vec![]
             }
         }
     }
@@ -407,38 +418,8 @@ impl DB {
                 info.offset
             }
             InstanceKind::Module(_) => {
-                let cc = self.get_module(pin.ins);
-                let def = &self.module_definitions[cc.definition_index];
-                let kind = def.pins[pin.index as usize];
-                let base_size = canvas_config.base_gate_size;
-                let is_input = matches!(kind, crate::assets::PinKind::Input);
-                let indices: Vec<usize> = def
-                    .pins
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(i, &k)| if k == kind { Some(i) } else { None })
-                    .collect();
-                let local_i = indices
-                    .iter()
-                    .position(|&i| i == pin.index as usize)
-                    .expect("pin index not found in indices");
-                let num = indices.len();
-                let spacing = if num == 1 {
-                    0.0
-                } else {
-                    base_size.y / (num - 1) as f32
-                };
-                let y = if num == 1 {
-                    cc.pos.y
-                } else {
-                    cc.pos.y - base_size.y / 2.0 + local_i as f32 * spacing
-                };
-                let x = if is_input {
-                    cc.pos.x - base_size.x / 2.0
-                } else {
-                    cc.pos.x + base_size.x / 2.0
-                };
-                egui::Vec2::new(x - cc.pos.x, y - cc.pos.y)
+                // TODO: Modules
+                Vec2::ZERO
             }
         }
     }
@@ -635,7 +616,7 @@ pub enum InstanceKind {
     Wire,
     Lamp,
     Clock,
-    Module(usize),
+    Module(ModuleDefId),
 }
 
 #[derive(serde::Deserialize, serde::Serialize, PartialEq, Eq, Copy, Debug, Clone)]

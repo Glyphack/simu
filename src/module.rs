@@ -4,25 +4,28 @@ use egui::Pos2;
 
 use crate::{
     app::App,
-    assets::{PinGraphics, PinKind},
-    db::{DB, InstanceId, Pin},
+    assets::PinGraphics,
+    db::{DB, InstanceId, ModuleDefId, Pin},
 };
 
 #[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
 pub struct ModuleDefinition {
     pub name: String,
-    pub pins: Vec<PinKind>,
 }
 
 #[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
 pub struct Module {
     pub pos: Pos2,
-    pub definition_index: usize,
+    pub definition_index: ModuleDefId,
 }
 
 impl Module {
     pub fn name(&self, db: &DB) -> String {
         db.get_module_def(self.definition_index).name.clone()
+    }
+
+    pub fn definition<'a>(&self, db: &'a DB) -> &'a ModuleDefinition {
+        db.get_module_def(self.definition_index)
     }
 
     pub fn display(&self, db: &DB, id: InstanceId) -> String {
@@ -34,11 +37,7 @@ impl Module {
 
 impl ModuleDefinition {
     pub fn display_definition(&self) -> String {
-        let mut sb = format!("Module: {}\n", self.name);
-        sb += &format!("Pins: {}\n", self.pins.len());
-        for pin in &self.pins {
-            sb += &format!("  {pin}");
-        }
+        let sb = format!("Module: {}\n", self.name);
         sb
     }
 }
@@ -87,10 +86,9 @@ impl App {
         if free_pins.is_empty() {
             return Err("Selected components have no free pins to expose".to_owned());
         }
-        let pins = free_pins.iter().map(|p| p.kind).collect();
-        let definition = ModuleDefinition { name, pins };
+        let definition = ModuleDefinition { name };
 
-        self.db.module_definitions.push(definition);
+        self.db.module_definitions.insert(definition);
 
         Ok(())
     }

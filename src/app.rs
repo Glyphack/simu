@@ -1,5 +1,6 @@
 use crate::db::{
-    Clock, DB, Gate, GateKind, InstanceId, InstanceKind, Label, LabelId, Lamp, Pin, Power, Wire,
+    Clock, DB, Gate, GateKind, InstanceId, InstanceKind, Label, LabelId, Lamp, ModuleDefId, Pin,
+    Power, Wire,
 };
 use std::collections::HashSet;
 use std::fmt::Write as _;
@@ -82,7 +83,7 @@ pub enum ClipBoardItem {
     Lamp(Vec2),
     Clock(Vec2),
     // Index to definition
-    Module(usize, Vec2),
+    Module(ModuleDefId, Vec2),
     Label(String, Vec2),
 }
 
@@ -425,9 +426,8 @@ impl App {
                     ui.add_space(8.0);
                     ui.label("Modules:");
                 }
-                let custom_circuit_indices: Vec<usize> =
-                    (0..self.db.module_definitions.len()).collect();
-                for i in custom_circuit_indices {
+                let keys: Vec<ModuleDefId> = self.db.module_definitions.keys().collect();
+                for i in keys {
                     self.draw_panel_button(ui, InstanceKind::Module(i));
                 }
 
@@ -971,12 +971,10 @@ impl App {
         let screen_center = pos - self.viewport_offset;
 
         {
-            let (name, pins) = {
-                let Some(definition) = self.db.module_definitions.get(definition_index) else {
-                    return;
-                };
-                (definition.name.clone(), definition.pins.clone())
-            };
+            let definition = self.db.get_module(id).definition(&self.db);
+            // TODO: Pins for modules
+            let name = definition.name.clone();
+            let pins = [];
 
             let rect = Rect::from_center_size(screen_center, self.canvas_config.base_gate_size);
             ui.painter()
@@ -1617,7 +1615,7 @@ impl App {
         }
 
         writeln!(out, "\nModule Def:").ok();
-        for m in &self.db.module_definitions {
+        for (_id, m) in &self.db.module_definitions {
             writeln!(out, "  {}", m.display_definition()).ok();
         }
 
