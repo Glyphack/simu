@@ -1,6 +1,8 @@
 #![allow(clippy::allow_attributes)]
-use crate::app::{DB, InstanceId, InstanceKind, Pin, SNAP_THRESHOLD};
+use crate::app::SNAP_THRESHOLD;
 use crate::assets;
+use crate::config::CanvasConfig;
+use crate::db::{DB, InstanceId, InstanceKind, Pin};
 use egui::Pos2;
 use std::collections::{HashMap, HashSet};
 
@@ -88,11 +90,18 @@ pub struct ConnectionManager {
 
     /// Cache of pin positions to detect when pins move
     pin_position_cache: HashMap<Pin, Pos2>,
+
+    canvas_config: CanvasConfig,
 }
 
 impl ConnectionManager {
-    pub fn new(db: &DB) -> Self {
-        let mut new = Self::default();
+    pub fn new(db: &DB, canvas_config: &CanvasConfig) -> Self {
+        let mut new = Self {
+            dirty_instances: Default::default(),
+            spatial_index: Default::default(),
+            pin_position_cache: Default::default(),
+            canvas_config: canvas_config.clone(),
+        };
         new.rebuild_spatial_index(db);
         new
     }
@@ -115,9 +124,9 @@ impl ConnectionManager {
         self.pin_position_cache.clear();
 
         // Index all pins by their grid cell
-        for (instance_id, _) in &db.instances {
+        for (instance_id, _) in &db.types {
             for pin in db.pins_of(instance_id) {
-                let pos = db.pin_position(pin);
+                let pos = db.pin_position(pin, &self.canvas_config);
                 let cell = GridCell::from_pos(pos);
 
                 self.spatial_index.entry(cell).or_default().push(pin);
@@ -130,7 +139,7 @@ impl ConnectionManager {
     /// Update spatial index for specific pins that have moved
     fn update_spatial_index_for_pins(&mut self, db: &DB, pins: &[Pin]) {
         for &pin in pins {
-            let new_pos = db.pin_position(pin);
+            let new_pos = db.pin_position(pin, &self.canvas_config);
 
             // Remove from old cell if position changed
             if let Some(old_pos) = self.pin_position_cache.get(&pin)
@@ -153,8 +162,9 @@ impl ConnectionManager {
 
     /// Find potential connections for a pin using spatial indexing
     pub fn find_connections_for_pin(&self, db: &DB, pin: Pin) -> Vec<Connection> {
-        let mut connections = Vec::new();
-        let pin_pos = db.pin_position(pin);
+        let mut wire_connections = Vec::new();
+        let mut non_wire_connections = Vec::new();
+        let pin_pos = db.pin_position(pin, &self.canvas_config);
         let cell = GridCell::from_pos(pin_pos);
 
         // Check this cell and neighboring cells
@@ -165,7 +175,7 @@ impl ConnectionManager {
                         continue;
                     }
 
-                    let other_pos = db.pin_position(other_pin);
+                    let other_pos = db.pin_position(other_pin, &self.canvas_config);
                     let distance = (pin_pos - other_pos).length();
 
                     // First pin will move to attach
@@ -176,13 +186,25 @@ impl ConnectionManager {
                     };
 
                     if distance <= SNAP_THRESHOLD && self.validate_connection(db, connection) {
-                        connections.push(connection);
+                        let is_wire = matches!(db.ty(other_pin.ins), InstanceKind::Wire);
+                        if is_wire {
+                            wire_connections.push(connection);
+                        } else {
+                            non_wire_connections.push(connection);
+                        }
                     }
                 }
             }
         }
 
-        connections
+        // For wire pins, prefer non-wire connections over wire connections
+        if matches!(db.ty(pin.ins), InstanceKind::Wire) && !non_wire_connections.is_empty() {
+            non_wire_connections
+        } else {
+            let mut all = non_wire_connections;
+            all.extend(wire_connections);
+            all
+        }
     }
 
     /// Validate if a connection between two pins is allowed
@@ -195,12 +217,16 @@ impl ConnectionManager {
             return false;
         }
 
+        // One pin must be input, the other output
+        if c.a.kind == c.b.kind {
+            return false;
+        }
         true
     }
 
     /// Snap a pin to match the position of another pin
     fn snap_pin_to_other(&self, db: &mut DB, src: Pin, dst: Pin) {
-        let target = db.pin_position(dst);
+        let target = db.pin_position(dst, &self.canvas_config);
         match db.ty(src.ins) {
             InstanceKind::Wire => {
                 if src.index == 0 {
@@ -219,7 +245,7 @@ impl ConnectionManager {
                 let pin_offset = info.offset;
                 let current = g.pos + pin_offset;
                 let desired = target - current;
-                db.move_instance_and_propagate(src.ins, desired);
+                db.move_instance_and_propagate(src.ins, desired, &self.canvas_config);
             }
             InstanceKind::Power => {
                 let p = db.get_power_mut(src.ins);
@@ -227,7 +253,7 @@ impl ConnectionManager {
                 let pin_offset = info.offset;
                 let current = p.pos + pin_offset;
                 let desired = target - current;
-                db.move_instance_and_propagate(src.ins, desired);
+                db.move_instance_and_propagate(src.ins, desired, &self.canvas_config);
             }
             InstanceKind::Lamp => {
                 let l = db.get_lamp_mut(src.ins);
@@ -235,7 +261,7 @@ impl ConnectionManager {
                 let pin_offset = info.offset;
                 let current = l.pos + pin_offset;
                 let desired = target - current;
-                db.move_instance_and_propagate(src.ins, desired);
+                db.move_instance_and_propagate(src.ins, desired, &self.canvas_config);
             }
             InstanceKind::Clock => {
                 let c = db.get_clock_mut(src.ins);
@@ -243,14 +269,14 @@ impl ConnectionManager {
                 let pin_offset = info.offset;
                 let current = c.pos + pin_offset;
                 let desired = target - current;
-                db.move_instance_and_propagate(src.ins, desired);
+                db.move_instance_and_propagate(src.ins, desired, &self.canvas_config);
             }
-            InstanceKind::CustomCircuit(_) => {
-                let pin_offset = db.pin_offset(src);
-                let cc = db.get_custom_circuit_mut(src.ins);
+            InstanceKind::Module(_) => {
+                let pin_offset = db.pin_offset(src, &self.canvas_config);
+                let cc = db.get_module_mut(src.ins);
                 let current = cc.pos + pin_offset;
                 let desired = target - current;
-                db.move_instance_and_propagate(src.ins, desired);
+                db.move_instance_and_propagate(src.ins, desired, &self.canvas_config);
             }
         }
     }
@@ -266,7 +292,7 @@ impl ConnectionManager {
         pins_to_update.sort_unstable();
         pins_to_update.dedup();
 
-        if pins_to_update.len() > db.instances.len() / 4 {
+        if pins_to_update.len() > db.types.len() / 4 {
             self.rebuild_spatial_index(db);
         } else {
             self.update_spatial_index_for_pins(db, &pins_to_update);
@@ -291,8 +317,8 @@ impl ConnectionManager {
                 && !self.dirty_instances.contains(&connection.b.ins);
 
             if keep_connection {
-                let p1 = db.pin_position(connection.a);
-                let p2 = db.pin_position(connection.b);
+                let p1 = db.pin_position(connection.a, &self.canvas_config);
+                let p2 = db.pin_position(connection.b, &self.canvas_config);
                 if (p1 - p2).length() <= SNAP_THRESHOLD {
                     connections_to_keep.insert(*connection);
                 }
@@ -326,16 +352,19 @@ impl ConnectionManager {
 #[cfg(test)]
 mod tests {
     use super::Connection;
-    use crate::app::{InstanceId, Pin};
+    use crate::{
+        assets::PinKind,
+        db::{InstanceId, Pin},
+    };
     use std::collections::HashSet;
 
     fn create_test_pins() -> (Pin, Pin, Pin) {
         let id1 = InstanceId::from(1);
         let id2 = InstanceId::from(2);
         let id3 = InstanceId::from(3);
-        let pin1 = Pin { ins: id1, index: 0 };
-        let pin2 = Pin { ins: id2, index: 0 };
-        let pin3 = Pin { ins: id3, index: 0 };
+        let pin1 = Pin::new(id1, 1, PinKind::Input);
+        let pin2 = Pin::new(id2, 2, PinKind::Input);
+        let pin3 = Pin::new(id3, 3, PinKind::Input);
         (pin1, pin2, pin3)
     }
 
