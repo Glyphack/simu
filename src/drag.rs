@@ -236,37 +236,37 @@ impl App {
                 let max = pos2(start.x.max(mouse_pos.x), start.y.max(mouse_pos.y));
                 let rect = Rect::from_min_max(min, max);
                 let mut sel: HashSet<InstanceId> = HashSet::new();
-                for (id, g) in &self.db.gates {
+                for (id, g) in &self.db.circuit.gates {
                     let r = Rect::from_center_size(g.pos, self.canvas_config.base_gate_size);
                     if rect.contains_rect(r) {
                         sel.insert(id);
                     }
                 }
-                for (id, p) in &self.db.powers {
+                for (id, p) in &self.db.circuit.powers {
                     let r = Rect::from_center_size(p.pos, self.canvas_config.base_gate_size);
                     if rect.contains_rect(r) {
                         sel.insert(id);
                     }
                 }
-                for (id, l) in &self.db.lamps {
+                for (id, l) in &self.db.circuit.lamps {
                     let r = Rect::from_center_size(l.pos, self.canvas_config.base_gate_size);
                     if rect.contains_rect(r) {
                         sel.insert(id);
                     }
                 }
-                for (id, c) in &self.db.clocks {
+                for (id, c) in &self.db.circuit.clocks {
                     let r = Rect::from_center_size(c.pos, self.canvas_config.base_gate_size);
                     if rect.contains_rect(r) {
                         sel.insert(id);
                     }
                 }
-                for (id, m) in &self.db.modules {
+                for (id, m) in &self.db.circuit.modules {
                     let r = Rect::from_center_size(m.pos, self.canvas_config.base_gate_size);
                     if rect.contains_rect(r) {
                         sel.insert(id);
                     }
                 }
-                for (id, w) in &self.db.wires {
+                for (id, w) in &self.db.circuit.wires {
                     if rect.contains(w.start) && rect.contains(w.end) {
                         sel.insert(id);
                     }

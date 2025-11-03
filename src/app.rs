@@ -12,7 +12,7 @@ use egui::{
 
 use crate::assets::PinKind;
 use crate::drag::CanvasDrag;
-use crate::simulator::{SimulationStatus, Simulator, Value};
+use crate::simulator::{SimulationStatus, Simulator, Value, lamp_input, wire_start};
 use crate::{
     assets::{self},
     config::CanvasConfig,
@@ -475,17 +475,8 @@ impl App {
                 ui.add(egui::ImageButton::new(s).sense(Sense::click_and_drag()))
             }
             InstanceKind::Clock => {
-                let s = get_icon(
-                    ui,
-                    Clock {
-                        pos: Pos2::ZERO,
-                        period: 1,
-                    }
-                    .graphics()
-                    .svg
-                    .clone(),
-                )
-                .max_height(PANEL_BUTTON_MAX_HEIGHT);
+                let s = get_icon(ui, Clock { pos: Pos2::ZERO }.graphics().svg.clone())
+                    .max_height(PANEL_BUTTON_MAX_HEIGHT);
                 ui.add(egui::ImageButton::new(s).sense(Sense::click_and_drag()))
             }
             InstanceKind::Wire => ui.add(
@@ -509,7 +500,7 @@ impl App {
                 InstanceKind::Power => self.db.new_power(Power { pos, on: true }),
                 InstanceKind::Wire => self.db.new_wire(Wire::new_at(pos)),
                 InstanceKind::Lamp => self.db.new_lamp(Lamp { pos }),
-                InstanceKind::Clock => self.db.new_clock(Clock { pos, period: 1 }),
+                InstanceKind::Clock => self.db.new_clock(Clock { pos }),
                 InstanceKind::Module(c) => self.db.new_module(Module {
                     pos,
                     definition_index: c,
@@ -527,7 +518,7 @@ impl App {
             && let InstanceKind::Module(i) = kind
         {
             let mut ids = Vec::new();
-            for (id, m) in &self.db.modules {
+            for (id, m) in &self.db.circuit.modules {
                 if m.definition_index == i {
                     ids.push(id);
                 }
@@ -622,25 +613,18 @@ impl App {
     }
 
     pub fn delete_instance(&mut self, id: InstanceId) {
-        self.db.types.remove(id);
-        self.db.gates.remove(id);
-        self.db.powers.remove(id);
-        self.db.wires.remove(id);
-        self.db.lamps.remove(id);
-        self.db.clocks.remove(id);
-        self.db.modules.remove(id);
-        self.db.connections.retain(|c| !c.involves_instance(id));
         self.hovered.take();
         self.drag.take();
         self.selected.remove(&id);
 
         self.connection_manager.dirty_instances.remove(&id);
+        self.db.circuit.remove(id);
         self.connection_manager.rebuild_spatial_index(&self.db);
         self.current_dirty = true;
     }
 
     pub fn delete_label(&mut self, id: LabelId) {
-        self.db.labels.remove(id);
+        self.db.circuit.labels.remove(id);
         if self.editing_label == Some(id) {
             self.editing_label = None;
         }
@@ -749,7 +733,7 @@ impl App {
         }
 
         if self.current_dirty {
-            self.simulator.compute(&self.db);
+            self.simulator.compute(&self.db.circuit);
             self.current_dirty = false;
         }
 
@@ -771,7 +755,7 @@ impl App {
             self.draw_module(ui, id);
         }
         for id in self.db.wire_ids() {
-            let has_current = self.is_on(self.db.wire_start(id));
+            let has_current = self.is_on(wire_start(id));
             self.draw_wire(
                 ui,
                 id,
@@ -928,7 +912,7 @@ impl App {
     }
 
     fn draw_lamp(&mut self, ui: &mut Ui, id: InstanceId) {
-        let has_current = self.is_on(self.db.lamp_input(id));
+        let has_current = self.is_on(lamp_input(id));
         let (pos, graphics) = {
             let lamp = self.db.get_lamp(id);
             (lamp.pos, lamp.graphics())
@@ -1144,6 +1128,7 @@ impl App {
             // Only show red/green if pin is not connected
             let is_connected = self
                 .db
+                .circuit
                 .connections
                 .iter()
                 .any(|conn| conn.a == pin || conn.b == pin);
@@ -1369,10 +1354,6 @@ impl App {
         }
     }
 
-    pub fn is_pin_connected(&self, pin: Pin) -> bool {
-        self.db.connections.iter().any(|c| c.a == pin || c.b == pin)
-    }
-
     fn draw_selection_highlight(&self, ui: &Ui) {
         for &id in &self.selected {
             match self.db.ty(id) {
@@ -1459,15 +1440,15 @@ impl App {
         let mut out = String::new();
         writeln!(
             out,
-            "counts: gates={}, powers={}, lamps={}, clocks={}, wires={}, modules={}, custom_defs={}, conns={}",
-            self.db.gates.len(),
-            self.db.powers.len(),
-            self.db.lamps.len(),
-            self.db.clocks.len(),
-            self.db.wires.len(),
-            self.db.modules.len(),
+            "counts: gates={}, powers={}, lamps={}, clocks={}, wires={}, modules={}, conns={}, module defs={}",
+            self.db.circuit.gates.len(),
+            self.db.circuit.powers.len(),
+            self.db.circuit.lamps.len(),
+            self.db.circuit.clocks.len(),
+            self.db.circuit.wires.len(),
+            self.db.circuit.modules.len(),
+            self.db.circuit.connections.len(),
             self.db.module_definitions.len(),
-            self.db.connections.len()
         )
         .ok();
         let mouse_pos_world = self.mouse_pos_world(ui);
@@ -1522,8 +1503,8 @@ impl App {
         writeln!(out, "Voltage: {}", self.clock_controller.voltage).ok();
 
         writeln!(out, "\nGates:").ok();
-        for (id, g) in &self.db.gates {
-            writeln!(out, "  {}", g.display(&self.db)).ok();
+        for (id, g) in &self.db.circuit.gates {
+            writeln!(out, "  {}", g.display(&self.db, id)).ok();
             // pins
             if true {
                 for (i, pin) in g.kind.graphics().pins.iter().enumerate() {
@@ -1543,8 +1524,8 @@ impl App {
         }
 
         writeln!(out, "\nPowers:").ok();
-        for (id, p) in &self.db.powers {
-            writeln!(out, "  {}", p.display(&self.db)).ok();
+        for (id, p) in &self.db.circuit.powers {
+            writeln!(out, "  {}", p.display(&self.db, id)).ok();
             for (i, pin) in p.graphics().pins.iter().enumerate() {
                 let pin_offset = pin.offset;
                 let pp = p.pos + pin_offset;
@@ -1561,8 +1542,8 @@ impl App {
         }
 
         writeln!(out, "\nLamps:").ok();
-        for (id, lamp) in &self.db.lamps {
-            writeln!(out, "  {}", lamp.display(&self.db)).ok();
+        for (id, lamp) in &self.db.circuit.lamps {
+            writeln!(out, "  {}", lamp.display(&self.db, id)).ok();
             // Show pins
             for (i, pin) in lamp.graphics().pins.iter().enumerate() {
                 let pin_offset = pin.offset;
@@ -1580,8 +1561,8 @@ impl App {
         }
 
         writeln!(out, "\nClocks:").ok();
-        for (id, clock) in &self.db.clocks {
-            writeln!(out, "  {}", clock.display(&self.db)).ok();
+        for (id, clock) in &self.db.circuit.clocks {
+            writeln!(out, "  {}", clock.display(&self.db, id)).ok();
             // Show pins
             for (i, pin) in clock.graphics().pins.iter().enumerate() {
                 let pin_offset = pin.offset;
@@ -1599,8 +1580,8 @@ impl App {
         }
 
         writeln!(out, "\nWires:").ok();
-        for (id, w) in &self.db.wires {
-            writeln!(out, "  {}", w.display(&self.db)).ok();
+        for (id, w) in &self.db.circuit.wires {
+            writeln!(out, "  {}", w.display(&self.db, id)).ok();
             if true {
                 for pin in self.db.pins_of(id) {
                     writeln!(out, "{}", pin.display_alone()).ok();
@@ -1609,7 +1590,7 @@ impl App {
         }
 
         writeln!(out, "\nModules:").ok();
-        for (id, m) in &self.db.modules {
+        for (id, m) in &self.db.circuit.modules {
             writeln!(out, "  {}", m.display(&self.db, id)).ok();
         }
 
@@ -1619,7 +1600,7 @@ impl App {
         }
 
         writeln!(out, "\nConnections:").ok();
-        for c in &self.db.connections {
+        for c in &self.db.circuit.connections {
             writeln!(out, "  {}", c.display(&self.db)).ok();
         }
 
@@ -1768,7 +1749,6 @@ impl App {
                 ClipBoardItem::Clock(offset) => {
                     let id = self.db.new_clock(Clock {
                         pos: mouse - offset,
-                        period: 1,
                     });
                     self.selected.insert(id);
                 }

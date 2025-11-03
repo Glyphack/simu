@@ -50,11 +50,7 @@ impl From<u32> for ModuleDefId {
 }
 
 #[derive(Default, serde::Deserialize, serde::Serialize, Debug, Clone)]
-pub struct Circuit {}
-
-#[derive(Default, serde::Deserialize, serde::Serialize, Debug, Clone)]
-pub struct DB {
-    pub circuit: Circuit,
+pub struct Circuit {
     // Type registry for each instance id
     pub types: SlotMap<InstanceId, InstanceKind>,
     // Per-kind payloads keyed off the primary key space
@@ -67,22 +63,43 @@ pub struct DB {
     pub connections: HashSet<Connection>,
     // Labels
     pub labels: SlotMap<LabelId, Label>,
-    // Definition of modules created by the user
-    pub module_definitions: SlotMap<ModuleDefId, ModuleDefinition>,
 }
-
-impl DB {
-    pub fn new() -> Self {
-        Self::default()
+impl Circuit {
+    pub fn ty(&self, id: InstanceId) -> InstanceKind {
+        self.types
+            .get(id)
+            .copied()
+            .unwrap_or_else(|| panic!("instance type missing for id: {id:?}"))
     }
+
+    pub fn remove(&mut self, id: InstanceId) {
+        match self.ty(id) {
+            InstanceKind::Gate(gate_kind) => {
+                self.gates.remove(id);
+            }
+            InstanceKind::Power => {
+                self.powers.remove(id);
+            }
+            InstanceKind::Wire => {
+                self.wires.remove(id);
+            }
+            InstanceKind::Lamp => {
+                self.lamps.remove(id);
+            }
+            InstanceKind::Clock => {
+                self.clocks.remove(id);
+            }
+            InstanceKind::Module(module_def_id) => {
+                self.modules.remove(id);
+            }
+        };
+        self.types.remove(id);
+        self.connections.retain(|c| !c.involves_instance(id));
+    }
+
     pub fn new_gate(&mut self, g: Gate) -> InstanceId {
         let k = self.types.insert(InstanceKind::Gate(g.kind));
         self.gates.insert(k, g);
-        let kind = self
-            .gates
-            .get(k)
-            .expect("gate must exist right after insertion")
-            .kind;
         k
     }
 
@@ -114,13 +131,6 @@ impl DB {
         let k = self.types.insert(InstanceKind::Module(c.definition_index));
         self.modules.insert(k, c);
         k
-    }
-
-    pub fn ty(&self, id: InstanceId) -> InstanceKind {
-        self.types
-            .get(id)
-            .copied()
-            .unwrap_or_else(|| panic!("instance type missing for id: {id:?}"))
     }
 
     pub fn get_gate(&self, id: InstanceId) -> &Gate {
@@ -171,76 +181,6 @@ impl DB {
         self.modules.get_mut(id).expect("modules not found (mut)")
     }
 
-    pub fn get_module_def(&self, def_index: ModuleDefId) -> &ModuleDefinition {
-        self.module_definitions
-            .get(def_index)
-            .expect("module def not found")
-    }
-
-    // Pin helper methods with type checking
-
-    // Gates - generic versions
-    pub fn gate_inp_n(&self, id: InstanceId, n: u32) -> Pin {
-        self.get_gate(id); // Type check
-        assert!(n < 2, "Gates only have 2 inputs (0 and 1)");
-        Pin::new(id, if n == 0 { 0 } else { 2 }, PinKind::Input)
-    }
-
-    pub fn gate_output_n(&self, id: InstanceId, n: u32) -> Pin {
-        self.get_gate(id); // Type check
-        assert!(n == 0, "Gates only have 1 output");
-        Pin::new(id, 1, PinKind::Output)
-    }
-
-    pub fn gate_inp1(&self, id: InstanceId) -> Pin {
-        self.gate_inp_n(id, 0)
-    }
-
-    pub fn gate_inp2(&self, id: InstanceId) -> Pin {
-        self.gate_inp_n(id, 1)
-    }
-
-    pub fn gate_output(&self, id: InstanceId) -> Pin {
-        self.gate_output_n(id, 0)
-    }
-
-    pub fn wire_pin_n(&self, id: InstanceId, n: u32) -> Pin {
-        self.get_wire(id); // Type check
-        assert!(n < 2, "Wires only have 2 pins (0 and 1)");
-        Pin::new(
-            id,
-            n,
-            if n == 0 {
-                PinKind::Input
-            } else {
-                PinKind::Output
-            },
-        )
-    }
-
-    pub fn wire_start(&self, id: InstanceId) -> Pin {
-        self.wire_pin_n(id, 0)
-    }
-
-    pub fn wire_end(&self, id: InstanceId) -> Pin {
-        self.wire_pin_n(id, 1)
-    }
-
-    pub fn power_output(&self, id: InstanceId) -> Pin {
-        self.get_power(id);
-        Pin::new(id, 0, PinKind::Output)
-    }
-
-    pub fn lamp_input(&self, id: InstanceId) -> Pin {
-        self.get_lamp(id);
-        Pin::new(id, 0, PinKind::Input)
-    }
-
-    pub fn clock_output(&self, id: InstanceId) -> Pin {
-        self.get_clock(id);
-        Pin::new(id, 0, PinKind::Output)
-    }
-
     pub fn new_label(&mut self, label: Label) -> LabelId {
         self.labels.insert(label)
     }
@@ -280,6 +220,176 @@ impl DB {
     pub fn label_ids(&self) -> Vec<LabelId> {
         self.labels.keys().collect()
     }
+
+    // Connections
+
+    pub fn connected_pins_of_instance(&self, id: InstanceId) -> Vec<Pin> {
+        let mut out = Vec::new();
+        for c in &self.connections {
+            if c.a.ins == id {
+                out.push(c.b);
+            } else if c.b.ins == id {
+                out.push(c.a);
+            }
+        }
+        out
+    }
+
+    // Connected pins to this pin
+    pub fn connected_pins(&self, pin: Pin) -> Vec<Pin> {
+        let mut res = Vec::new();
+        for c in &self.connections {
+            if let Some((_, other)) = c.get_pin_first(pin) {
+                res.push(other);
+            }
+        }
+        res
+    }
+
+    pub fn connected_insntances(&self, id: InstanceId) -> Vec<InstanceId> {
+        let mut out = vec![id];
+        for c in &self.connections {
+            if c.a.ins == id {
+                out.push(c.b.ins);
+            } else if c.b.ins == id {
+                out.push(c.a.ins);
+            }
+        }
+        out
+    }
+}
+
+#[derive(Default, serde::Deserialize, serde::Serialize, Debug, Clone)]
+pub struct DB {
+    pub circuit: Circuit,
+    // Definition of modules created by the user
+    pub module_definitions: SlotMap<ModuleDefId, ModuleDefinition>,
+}
+
+impl DB {
+    pub fn new_gate(&mut self, g: Gate) -> InstanceId {
+        self.circuit.new_gate(g)
+    }
+
+    pub fn new_power(&mut self, p: Power) -> InstanceId {
+        self.circuit.new_power(p)
+    }
+
+    pub fn new_wire(&mut self, w: Wire) -> InstanceId {
+        self.circuit.new_wire(w)
+    }
+
+    pub fn new_lamp(&mut self, l: Lamp) -> InstanceId {
+        self.circuit.new_lamp(l)
+    }
+
+    pub fn new_clock(&mut self, c: Clock) -> InstanceId {
+        self.circuit.new_clock(c)
+    }
+
+    pub fn new_module(&mut self, c: crate::module::Module) -> InstanceId {
+        self.circuit.new_module(c)
+    }
+
+    pub fn ty(&self, id: InstanceId) -> InstanceKind {
+        self.circuit.ty(id)
+    }
+
+    pub fn get_gate(&self, id: InstanceId) -> &Gate {
+        self.circuit.get_gate(id)
+    }
+
+    pub fn get_gate_mut(&mut self, id: InstanceId) -> &mut Gate {
+        self.circuit.get_gate_mut(id)
+    }
+
+    pub fn get_power(&self, id: InstanceId) -> &Power {
+        self.circuit.get_power(id)
+    }
+
+    pub fn get_power_mut(&mut self, id: InstanceId) -> &mut Power {
+        self.circuit.get_power_mut(id)
+    }
+
+    pub fn get_wire(&self, id: InstanceId) -> &Wire {
+        self.circuit.get_wire(id)
+    }
+
+    pub fn get_wire_mut(&mut self, id: InstanceId) -> &mut Wire {
+        self.circuit.get_wire_mut(id)
+    }
+
+    pub fn get_lamp(&self, id: InstanceId) -> &Lamp {
+        self.circuit.get_lamp(id)
+    }
+
+    pub fn get_lamp_mut(&mut self, id: InstanceId) -> &mut Lamp {
+        self.circuit.get_lamp_mut(id)
+    }
+
+    pub fn get_clock(&self, id: InstanceId) -> &Clock {
+        self.circuit.get_clock(id)
+    }
+
+    pub fn get_clock_mut(&mut self, id: InstanceId) -> &mut Clock {
+        self.circuit.get_clock_mut(id)
+    }
+
+    pub fn get_module(&self, id: InstanceId) -> &Module {
+        self.circuit.get_module(id)
+    }
+
+    pub fn get_module_mut(&mut self, id: InstanceId) -> &mut Module {
+        self.circuit.get_module_mut(id)
+    }
+
+    pub fn new_label(&mut self, label: Label) -> LabelId {
+        self.circuit.new_label(label)
+    }
+
+    pub fn get_label(&self, id: LabelId) -> &Label {
+        self.circuit.get_label(id)
+    }
+
+    pub fn get_label_mut(&mut self, id: LabelId) -> &mut Label {
+        self.circuit.get_label_mut(id)
+    }
+
+    pub fn gate_ids(&self) -> Vec<InstanceId> {
+        self.circuit.gate_ids()
+    }
+
+    pub fn power_ids(&self) -> Vec<InstanceId> {
+        self.circuit.power_ids()
+    }
+
+    pub fn lamp_ids(&self) -> Vec<InstanceId> {
+        self.circuit.lamp_ids()
+    }
+
+    pub fn clock_ids(&self) -> Vec<InstanceId> {
+        self.circuit.clock_ids()
+    }
+
+    pub fn module_ids(&self) -> Vec<InstanceId> {
+        self.circuit.module_ids()
+    }
+
+    pub fn wire_ids(&self) -> Vec<InstanceId> {
+        self.circuit.wire_ids()
+    }
+
+    pub fn label_ids(&self) -> Vec<LabelId> {
+        self.circuit.label_ids()
+    }
+
+    pub fn get_module_def(&self, def_index: ModuleDefId) -> &ModuleDefinition {
+        self.module_definitions
+            .get(def_index)
+            .expect("module def not found")
+    }
+
+    // Pin helper methods with type checking
 
     pub fn pins_of(&self, id: InstanceId) -> Vec<Pin> {
         match self.ty(id) {
@@ -420,38 +530,16 @@ impl DB {
     }
 
     pub fn connected_pins_of_instance(&self, id: InstanceId) -> Vec<Pin> {
-        let mut out = Vec::new();
-        for c in &self.connections {
-            if c.a.ins == id {
-                out.push(c.b);
-            } else if c.b.ins == id {
-                out.push(c.a);
-            }
-        }
-        out
+        self.circuit.connected_pins_of_instance(id)
     }
 
     // Connected pins to this pin
     pub fn connected_pins(&self, pin: Pin) -> Vec<Pin> {
-        let mut res = Vec::new();
-        for c in &self.connections {
-            if let Some((_, other)) = c.get_pin_first(pin) {
-                res.push(other);
-            }
-        }
-        res
+        self.circuit.connected_pins(pin)
     }
 
     pub fn connected_insntances(&self, id: InstanceId) -> Vec<InstanceId> {
-        let mut out = vec![id];
-        for c in &self.connections {
-            if c.a.ins == id {
-                out.push(c.b.ins);
-            } else if c.b.ins == id {
-                out.push(c.a.ins);
-            }
-        }
-        out
+        self.circuit.connected_insntances(id)
     }
 
     pub fn move_nonwires_and_resize_wires(&mut self, ids: &[InstanceId], delta: Vec2) {
@@ -570,6 +658,7 @@ impl DB {
                         // Check if this wire pin is connected to any pin of our moved instance
                         for moved_pin in self.pins_of(id) {
                             if self
+                                .circuit
                                 .connections
                                 .contains(&Connection::new(wire_pin, moved_pin))
                             {
@@ -645,17 +734,8 @@ impl GateKind {
 }
 
 impl Gate {
-    pub fn display(&self, db: &DB) -> String {
-        // Find the InstanceId for this gate in the database
-        for (id, gate) in &db.gates {
-            if gate.pos == self.pos && gate.kind == self.kind {
-                return format!("{:?} {}", self.kind, id);
-            }
-        }
-        format!(
-            "Gate {{ kind: {:?}, pos: ({:.1}, {:.1}) }} - not found in DB",
-            self.kind, self.pos.x, self.pos.y
-        )
+    pub fn display(&self, db: &DB, id: InstanceId) -> String {
+        format!("{:?} {}", self.kind, id)
     }
 }
 
@@ -671,17 +751,9 @@ pub struct Power {
 }
 
 impl Power {
-    pub fn display(&self, db: &DB) -> String {
+    pub fn display(&self, db: &DB, id: InstanceId) -> String {
         // Find the InstanceId for this power in the database
-        for (id, power) in &db.powers {
-            if power.pos == self.pos && power.on == self.on {
-                return format!("Power {{ id: {}, on: {}}}", id, self.on);
-            }
-        }
-        format!(
-            "Power {{ on: {}, pos: ({:.1}, {:.1}) }} - not found in DB",
-            self.on, self.pos.x, self.pos.y
-        )
+        format!("Power {{ id: {}, on: {}}}", id, self.on)
     }
 
     pub fn graphics(&self) -> assets::InstanceGraphics {
@@ -703,21 +775,12 @@ pub struct Lamp {
 }
 
 impl Lamp {
-    pub fn display(&self, db: &DB) -> String {
-        // Find the InstanceId for this lamp in the database
-        for (id, lamp) in &db.lamps {
-            if lamp.pos == self.pos {
-                return format!("Lamp {{ id: {id}}}");
-            }
-        }
-        format!(
-            "Lamp {{ pos: ({:.1}, {:.1}) }} - not found in DB",
-            self.pos.x, self.pos.y
-        )
-    }
-
     pub fn graphics(&self) -> assets::InstanceGraphics {
         assets::LAMP_GRAPHICS.clone()
+    }
+
+    pub fn display(&self, db: &DB, id: InstanceId) -> String {
+        format!("Lamp {id}")
     }
 }
 
@@ -728,24 +791,15 @@ impl Lamp {
 #[derive(serde::Deserialize, serde::Serialize, Copy, Debug, Clone)]
 pub struct Clock {
     pub pos: Pos2,
-    pub period: u32, // Placeholder for future use
 }
 
 impl Clock {
-    pub fn display(&self, db: &DB) -> String {
-        for (id, clock) in &db.clocks {
-            if clock.pos == self.pos {
-                return format!("Clock {{ id: {id}}}");
-            }
-        }
-        format!(
-            "Clock {{ pos: ({:.1}, {:.1}) }} - not found in DB",
-            self.pos.x, self.pos.y
-        )
-    }
-
     pub fn graphics(&self) -> assets::InstanceGraphics {
         assets::CLOCK_GRAPHICS.clone()
+    }
+
+    pub fn display(&self, db: &DB, id: InstanceId) -> String {
+        format!("Clock {id}")
     }
 }
 
@@ -781,19 +835,8 @@ pub struct Wire {
 }
 
 impl Wire {
-    pub fn display(&self, db: &DB) -> String {
-        for (id, wire) in &db.wires {
-            if wire.start == self.start
-                && wire.end == self.end
-                && wire.input_index == self.input_index
-            {
-                return format!("Wire {id}");
-            }
-        }
-        format!(
-            "Wire {{ start: ({:.1}, {:.1}), end: ({:.1}, {:.1}) }} - not found in DB",
-            self.start.x, self.start.y, self.end.x, self.end.y
-        )
+    pub fn display(&self, db: &DB, id: InstanceId) -> String {
+        format!("Wire {id}")
     }
 
     pub fn new_at(pos: Pos2) -> Self {
@@ -851,23 +894,23 @@ impl Pin {
         let instance_display = match db.ty(self.ins) {
             InstanceKind::Gate(_) => {
                 let gate = db.get_gate(self.ins);
-                gate.display(db)
+                gate.display(db, self.ins)
             }
             InstanceKind::Power => {
                 let power = db.get_power(self.ins);
-                power.display(db)
+                power.display(db, self.ins)
             }
             InstanceKind::Wire => {
                 let wire = db.get_wire(self.ins);
-                wire.display(db)
+                wire.display(db, self.ins)
             }
             InstanceKind::Lamp => {
                 let lamp = db.get_lamp(self.ins);
-                lamp.display(db)
+                lamp.display(db, self.ins)
             }
             InstanceKind::Clock => {
                 let clock = db.get_clock(self.ins);
-                clock.display(db)
+                clock.display(db, self.ins)
             }
             InstanceKind::Module(_) => db.get_module(self.ins).display(db, self.ins),
         };

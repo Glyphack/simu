@@ -5,12 +5,13 @@ use egui::Pos2;
 use crate::{
     app::App,
     assets::PinGraphics,
-    db::{DB, InstanceId, ModuleDefId, Pin},
+    db::{DB, InstanceId, ModuleDefId},
 };
 
 #[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
 pub struct ModuleDefinition {
     pub name: String,
+    // pub circuit: Circuit,
 }
 
 #[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
@@ -43,20 +44,6 @@ impl ModuleDefinition {
 }
 
 impl App {
-    pub fn find_free_pins(&self, instances: &HashSet<InstanceId>) -> Vec<Pin> {
-        let mut free_pins = Vec::new();
-
-        for &id in instances {
-            for pin in self.db.pins_of(id) {
-                if !self.is_pin_connected(pin) {
-                    free_pins.push(pin);
-                }
-            }
-        }
-
-        free_pins
-    }
-
     pub fn get_pins(&self, pins: Vec<PinGraphics>) -> &'static [PinGraphics] {
         Box::leak(pins.into_boxed_slice())
     }
@@ -76,16 +63,12 @@ impl App {
         }
 
         let mut internal_connections = Vec::new();
-        for connection in &self.db.connections {
+        for connection in &self.db.circuit.connections {
             if instances.contains(&connection.a.ins) && instances.contains(&connection.b.ins) {
                 internal_connections.push(*connection);
             }
         }
 
-        let free_pins = self.find_free_pins(instances);
-        if free_pins.is_empty() {
-            return Err("Selected components have no free pins to expose".to_owned());
-        }
         let definition = ModuleDefinition { name };
 
         self.db.module_definitions.insert(definition);

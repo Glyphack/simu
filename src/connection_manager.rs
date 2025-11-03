@@ -124,7 +124,7 @@ impl ConnectionManager {
         self.pin_position_cache.clear();
 
         // Index all pins by their grid cell
-        for (instance_id, _) in &db.types {
+        for (instance_id, _) in &db.circuit.types {
             for pin in db.pins_of(instance_id) {
                 let pos = db.pin_position(pin, &self.canvas_config);
                 let cell = GridCell::from_pos(pos);
@@ -292,7 +292,7 @@ impl ConnectionManager {
         pins_to_update.sort_unstable();
         pins_to_update.dedup();
 
-        if pins_to_update.len() > db.types.len() / 4 {
+        if pins_to_update.len() > db.circuit.types.len() / 4 {
             self.rebuild_spatial_index(db);
         } else {
             self.update_spatial_index_for_pins(db, &pins_to_update);
@@ -312,7 +312,7 @@ impl ConnectionManager {
         }
 
         let mut connections_to_keep = HashSet::new();
-        for connection in &db.connections {
+        for connection in &db.circuit.connections {
             let keep_connection = !self.dirty_instances.contains(&connection.a.ins)
                 && !self.dirty_instances.contains(&connection.b.ins);
 
@@ -331,9 +331,9 @@ impl ConnectionManager {
         }
 
         // Check if connections actually changed
-        let connections_changed = db.connections != connections_to_keep;
+        let connections_changed = db.circuit.connections != connections_to_keep;
 
-        db.connections = connections_to_keep;
+        db.circuit.connections = connections_to_keep;
 
         self.dirty_instances.clear();
 
