@@ -2,7 +2,7 @@
 use crate::app::SNAP_THRESHOLD;
 use crate::assets;
 use crate::config::CanvasConfig;
-use crate::db::{Circuit, InstanceId, InstanceKind, Pin};
+use crate::db::{Circuit, DB, InstanceId, InstanceKind, Pin};
 use egui::Pos2;
 use std::collections::{HashMap, HashSet};
 
@@ -99,14 +99,14 @@ pub struct ConnectionManager {
 }
 
 impl ConnectionManager {
-    pub fn new(circuit: &Circuit, canvas_config: &CanvasConfig) -> Self {
+    pub fn new(circuit: &Circuit, canvas_config: &CanvasConfig, db: &DB) -> Self {
         let mut new = Self {
             dirty_instances: Default::default(),
             spatial_index: Default::default(),
             pin_position_cache: Default::default(),
             canvas_config: canvas_config.clone(),
         };
-        new.rebuild_spatial_index(circuit);
+        new.rebuild_spatial_index(circuit, db);
         new
     }
 
@@ -123,14 +123,14 @@ impl ConnectionManager {
     }
 
     /// Update the spatial index for all pins in the database
-    pub fn rebuild_spatial_index(&mut self, circuit: &Circuit) {
+    pub fn rebuild_spatial_index(&mut self, circuit: &Circuit, db: &DB) {
         self.spatial_index.clear();
         self.pin_position_cache.clear();
 
         // Index all pins by their grid cell
         for (instance_id, _) in &circuit.types {
             for pin in circuit.pins_of(instance_id) {
-                let pos = circuit.pin_position(pin, &self.canvas_config);
+                let pos = circuit.pin_position(pin, &self.canvas_config, db);
                 let cell = GridCell::from_pos(pos);
 
                 self.spatial_index.entry(cell).or_default().push(pin);
@@ -141,9 +141,9 @@ impl ConnectionManager {
     }
 
     /// Update spatial index for specific pins that have moved
-    fn update_spatial_index_for_pins(&mut self, circuit: &Circuit, pins: &[Pin]) {
+    fn update_spatial_index_for_pins(&mut self, circuit: &Circuit, db: &DB, pins: &[Pin]) {
         for &pin in pins {
-            let new_pos = circuit.pin_position(pin, &self.canvas_config);
+            let new_pos = circuit.pin_position(pin, &self.canvas_config, db);
 
             // Remove from old cell if position changed
             if let Some(old_pos) = self.pin_position_cache.get(&pin)
@@ -165,10 +165,15 @@ impl ConnectionManager {
     }
 
     /// Find potential connections for a pin using spatial indexing
-    pub fn find_connections_for_pin(&self, circuit: &Circuit, pin: Pin) -> Vec<Connection> {
+    pub fn find_connections_for_pin(
+        &self,
+        circuit: &Circuit,
+        db: &DB,
+        pin: Pin,
+    ) -> Vec<Connection> {
         let mut wire_connections = Vec::new();
         let mut non_wire_connections = Vec::new();
-        let pin_pos = circuit.pin_position(pin, &self.canvas_config);
+        let pin_pos = circuit.pin_position(pin, &self.canvas_config, db);
         let cell = GridCell::from_pos(pin_pos);
 
         // Check this cell and neighboring cells
@@ -179,7 +184,7 @@ impl ConnectionManager {
                         continue;
                     }
 
-                    let other_pos = circuit.pin_position(other_pin, &self.canvas_config);
+                    let other_pos = circuit.pin_position(other_pin, &self.canvas_config, db);
                     let distance = (pin_pos - other_pos).length();
 
                     // First pin will move to attach
@@ -229,22 +234,23 @@ impl ConnectionManager {
     }
 
     /// Snap a pin to match the position of another pin
-    fn snap_pin_to_other(&self, db: &mut Circuit, src: Pin, dst: Pin) {
-        let target = db.pin_position(dst, &self.canvas_config);
-        match db.ty(src.ins) {
+    fn snap_pin_to_other(&self, db: &mut DB, src: Pin, dst: Pin) {
+        let circuit = &db.circuit;
+        let target = circuit.pin_position(dst, &self.canvas_config, db);
+        match circuit.ty(src.ins) {
             InstanceKind::Wire => {
                 if src.index == 0 {
-                    let w = db.get_wire_mut(src.ins);
+                    let w = db.circuit.get_wire_mut(src.ins);
                     w.start = target;
                 } else if src.index == 1 {
-                    let w = db.get_wire_mut(src.ins);
+                    let w = db.circuit.get_wire_mut(src.ins);
                     w.end = target;
                 } else {
                     unreachable!();
                 }
             }
             InstanceKind::Gate(gk) => {
-                let g = db.get_gate_mut(src.ins);
+                let g = db.circuit.get_gate_mut(src.ins);
                 let info = gk.graphics().pins[src.index as usize];
                 let pin_offset = info.offset;
                 let current = g.pos + pin_offset;
@@ -252,7 +258,7 @@ impl ConnectionManager {
                 db.move_instance_and_propagate(src.ins, desired, &self.canvas_config);
             }
             InstanceKind::Power => {
-                let p = db.get_power_mut(src.ins);
+                let p = db.circuit.get_power_mut(src.ins);
                 let info = assets::POWER_ON_GRAPHICS.pins[src.index as usize];
                 let pin_offset = info.offset;
                 let current = p.pos + pin_offset;
@@ -260,7 +266,7 @@ impl ConnectionManager {
                 db.move_instance_and_propagate(src.ins, desired, &self.canvas_config);
             }
             InstanceKind::Lamp => {
-                let l = db.get_lamp_mut(src.ins);
+                let l = db.circuit.get_lamp_mut(src.ins);
                 let info = assets::LAMP_GRAPHICS.pins[src.index as usize];
                 let pin_offset = info.offset;
                 let current = l.pos + pin_offset;
@@ -268,7 +274,7 @@ impl ConnectionManager {
                 db.move_instance_and_propagate(src.ins, desired, &self.canvas_config);
             }
             InstanceKind::Clock => {
-                let c = db.get_clock_mut(src.ins);
+                let c = db.circuit.get_clock_mut(src.ins);
                 let info = assets::CLOCK_GRAPHICS.pins[src.index as usize];
                 let pin_offset = info.offset;
                 let current = c.pos + pin_offset;
@@ -276,8 +282,8 @@ impl ConnectionManager {
                 db.move_instance_and_propagate(src.ins, desired, &self.canvas_config);
             }
             InstanceKind::Module(_) => {
-                let pin_offset = db.pin_offset(src, &self.canvas_config);
-                let cc = db.get_module_mut(src.ins);
+                let pin_offset = circuit.pin_offset(src, &self.canvas_config, db);
+                let cc = db.circuit.get_module_mut(src.ins);
                 let current = cc.pos + pin_offset;
                 let desired = target - current;
                 db.move_instance_and_propagate(src.ins, desired, &self.canvas_config);
@@ -285,7 +291,7 @@ impl ConnectionManager {
         }
     }
 
-    pub fn pins_to_update(&mut self, circuit: &Circuit) -> Vec<Pin> {
+    pub fn pins_to_update(&mut self, circuit: &Circuit, db: &DB) -> Vec<Pin> {
         let mut pins_to_update = Vec::new();
 
         for &instance_id in &self.dirty_instances {
@@ -297,32 +303,36 @@ impl ConnectionManager {
         pins_to_update.dedup();
 
         if pins_to_update.len() > circuit.types.len() / 4 {
-            self.rebuild_spatial_index(circuit);
+            self.rebuild_spatial_index(circuit, db);
         } else {
-            self.update_spatial_index_for_pins(circuit, &pins_to_update);
+            self.update_spatial_index_for_pins(circuit, db, &pins_to_update);
         }
         pins_to_update
     }
 
     /// Process all dirty entities and update connections
-    pub fn update_connections(&mut self, db: &mut Circuit) -> bool {
+    pub fn update_connections(&mut self, db: &mut DB) -> bool {
         if self.dirty_instances.is_empty() {
             return false;
         }
-        let pins_to_update = self.pins_to_update(db);
+        let pins_to_update = self.pins_to_update(&db.circuit, db);
         let mut new_connections = Vec::new();
         for &pin in &pins_to_update {
-            new_connections.extend(self.find_connections_for_pin(db, pin));
+            new_connections.extend(self.find_connections_for_pin(&db.circuit, db, pin));
         }
 
         let mut connections_to_keep = HashSet::new();
-        for connection in &db.connections {
+        for connection in &db.circuit.connections {
             let keep_connection = !self.dirty_instances.contains(&connection.a.ins)
                 && !self.dirty_instances.contains(&connection.b.ins);
 
             if keep_connection {
-                let p1 = db.pin_position(connection.a, &self.canvas_config);
-                let p2 = db.pin_position(connection.b, &self.canvas_config);
+                let p1 = db
+                    .circuit
+                    .pin_position(connection.a, &self.canvas_config, db);
+                let p2 = db
+                    .circuit
+                    .pin_position(connection.b, &self.canvas_config, db);
                 if (p1 - p2).length() <= SNAP_THRESHOLD {
                     connections_to_keep.insert(*connection);
                 }
@@ -335,9 +345,9 @@ impl ConnectionManager {
         }
 
         // Check if connections actually changed
-        let connections_changed = db.connections != connections_to_keep;
+        let connections_changed = db.circuit.connections != connections_to_keep;
 
-        db.connections = connections_to_keep;
+        db.circuit.connections = connections_to_keep;
 
         self.dirty_instances.clear();
 

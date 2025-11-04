@@ -169,7 +169,7 @@ impl Default for App {
     fn default() -> Self {
         let canvas_config = CanvasConfig::default();
         let db = DB::default();
-        let c = ConnectionManager::new(&db.circuit, &canvas_config);
+        let c = ConnectionManager::new(&db.circuit, &canvas_config, &db);
         Self {
             db,
             canvas_config,
@@ -447,7 +447,7 @@ impl App {
                     self.selected.clear();
                     self.drag = None;
                     self.connection_manager =
-                        ConnectionManager::new(self.circuit(), &self.canvas_config);
+                        ConnectionManager::new(self.circuit(), &self.canvas_config, &self.db);
                     self.simulator = Simulator::new();
                 }
             });
@@ -625,7 +625,7 @@ impl App {
         self.connection_manager.dirty_instances.remove(&id);
         self.db.circuit.remove(id);
         self.connection_manager
-            .rebuild_spatial_index(&self.db.circuit);
+            .rebuild_spatial_index(&self.db.circuit, &self.db);
         self.current_dirty = true;
     }
 
@@ -712,10 +712,7 @@ impl App {
                 if mouse_up && instance_dragging {
                     self.handle_drag_end(mouse);
 
-                    if self
-                        .connection_manager
-                        .update_connections(&mut self.db.circuit)
-                    {
+                    if self.connection_manager.update_connections(&mut self.db) {
                         // self.current_dirty = true;
                     }
                 }
@@ -784,7 +781,7 @@ impl App {
             let pin_to_highlight = c.b;
             let p = self
                 .circuit()
-                .pin_position(pin_to_highlight, &self.canvas_config);
+                .pin_position(pin_to_highlight, &self.canvas_config, &self.db);
             ui.painter().circle_filled(
                 p - self.viewport_offset,
                 SNAP_THRESHOLD,
@@ -1289,8 +1286,10 @@ impl App {
         match hovered {
             Hover::Pin(pin) => {
                 let color = COLOR_HOVER_PIN_TO_WIRE;
-                let pin_pos =
-                    self.circuit().pin_position(pin, &self.canvas_config) - self.viewport_offset;
+                let pin_pos = self
+                    .circuit()
+                    .pin_position(pin, &self.canvas_config, &self.db)
+                    - self.viewport_offset;
                 ui.painter()
                     .circle_filled(pin_pos, PIN_HOVER_THRESHOLD, color);
             }
@@ -1423,7 +1422,9 @@ impl App {
                 }
                 InstanceKind::Wire => {
                     for pin in self.circuit().pins_of(id) {
-                        let pos = self.circuit().pin_position(pin, &self.canvas_config);
+                        let pos = self
+                            .circuit()
+                            .pin_position(pin, &self.canvas_config, &self.db);
                         ui.painter().circle_filled(
                             pos - self.viewport_offset,
                             PIN_MOVE_HINT_D,
@@ -1674,7 +1675,7 @@ impl App {
             }
         }
         self.connection_manager
-            .rebuild_spatial_index(&self.db.circuit);
+            .rebuild_spatial_index(&self.db.circuit, &self.db);
         self.current_dirty = true;
     }
 
@@ -1687,7 +1688,9 @@ impl App {
         match self.db.circuit.ty(selected) {
             InstanceKind::Wire => {
                 for pin in self.circuit().pins_of(selected) {
-                    let pos = self.circuit().pin_position(pin, &self.canvas_config);
+                    let pos = self
+                        .circuit()
+                        .pin_position(pin, &self.canvas_config, &self.db);
                     ui.painter().circle_filled(
                         pos - self.viewport_offset,
                         PIN_MOVE_HINT_D,

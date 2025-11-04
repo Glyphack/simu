@@ -1,9 +1,11 @@
 use std::collections::HashSet;
 
-use egui::Pos2;
+use egui::{Pos2, Vec2};
 
 use crate::{
     app::App,
+    assets::PinKind,
+    config::CanvasConfig,
     db::{Circuit, DB, InstanceId, ModuleDefId, Pin},
 };
 
@@ -77,6 +79,67 @@ impl ModuleDefinition {
         }
 
         unconnected_pins
+    }
+
+    /// Calculates the offset of a pin from the module's center position.
+    /// This matches the layout logic used in rendering (app.rs `draw_module`).
+    /// Input pins are placed on the left side, outputs on the right.
+    /// Multiple pins of the same kind are evenly spaced vertically.
+    pub fn calculate_pin_offset(&self, pin_index: u32, canvas_config: &CanvasConfig) -> Vec2 {
+        let pins = self.get_unconnected_pins();
+
+        // Separate input and output indices
+        let mut input_indices = vec![];
+        let mut output_indices = vec![];
+        for (i, pin) in pins.iter().enumerate() {
+            match pin.kind {
+                PinKind::Input => input_indices.push(i),
+                PinKind::Output => output_indices.push(i),
+            }
+        }
+
+        // Base size for layout
+        let base_size = canvas_config.base_gate_size;
+        let left_x = -base_size.x / 2.0;
+        let right_x = base_size.x / 2.0;
+        let top_y = -base_size.y / 2.0;
+
+        // Find which pin we're calculating offset for
+        let pin_index_usize = pin_index as usize;
+        if pin_index_usize >= pins.len() {
+            return Vec2::ZERO;
+        }
+
+        let pin = &pins[pin_index_usize];
+        let (x, local_index, indices) = match pin.kind {
+            PinKind::Input => (
+                left_x,
+                input_indices
+                    .iter()
+                    .position(|&i| i == pin_index_usize)
+                    .unwrap_or(0),
+                &input_indices,
+            ),
+            PinKind::Output => (
+                right_x,
+                output_indices
+                    .iter()
+                    .position(|&i| i == pin_index_usize)
+                    .unwrap_or(0),
+                &output_indices,
+            ),
+        };
+
+        // Calculate y position based on number of pins of this kind
+        let num = indices.len();
+        let y = if num == 1 {
+            0.0 // Centered
+        } else {
+            let spacing = base_size.y / (num - 1) as f32;
+            top_y + local_index as f32 * spacing
+        };
+
+        Vec2::new(x, y)
     }
 }
 

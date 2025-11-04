@@ -449,7 +449,7 @@ impl Circuit {
         }
     }
 
-    pub fn pin_position(&self, pin: Pin, canvas_config: &CanvasConfig) -> Pos2 {
+    pub fn pin_position(&self, pin: Pin, canvas_config: &CanvasConfig, db: &DB) -> Pos2 {
         match self.ty(pin.ins) {
             InstanceKind::Gate(gk) => {
                 let g = self.get_gate(pin.ins);
@@ -477,12 +477,12 @@ impl Circuit {
             }
             InstanceKind::Module(_) => {
                 let cc = self.get_module(pin.ins);
-                cc.pos + self.pin_offset(pin, canvas_config)
+                cc.pos + self.pin_offset(pin, canvas_config, db)
             }
         }
     }
 
-    pub fn pin_offset(&self, pin: Pin, canvas_config: &CanvasConfig) -> Vec2 {
+    pub fn pin_offset(&self, pin: Pin, canvas_config: &CanvasConfig, db: &DB) -> Vec2 {
         match self.ty(pin.ins) {
             InstanceKind::Gate(gk) => {
                 let info = gk.graphics().pins[pin.index as usize];
@@ -512,9 +512,9 @@ impl Circuit {
                 let info = c.graphics().pins[pin.index as usize];
                 info.offset
             }
-            InstanceKind::Module(_) => {
-                // TODO: Modules
-                Vec2::ZERO
+            InstanceKind::Module(def_id) => {
+                let module_def = db.get_module_def(def_id);
+                module_def.calculate_pin_offset(pin.index, canvas_config)
             }
         }
     }
@@ -524,9 +524,10 @@ impl Circuit {
         id: InstanceId,
         delta: Vec2,
         canvas_config: &CanvasConfig,
+        db: &DB,
     ) {
         let mut visited = HashSet::new();
-        self.move_instance_and_propagate_recursive(id, delta, &mut visited, canvas_config);
+        self.move_instance_and_propagate_recursive(id, delta, &mut visited, canvas_config, db);
     }
 
     fn move_instance_and_propagate_recursive(
@@ -535,6 +536,7 @@ impl Circuit {
         delta: Vec2,
         visited: &mut HashSet<InstanceId>,
         canvas_config: &CanvasConfig,
+        db: &DB,
     ) {
         if !visited.insert(id) {
             return;
@@ -590,7 +592,7 @@ impl Circuit {
                                 .connections
                                 .contains(&Connection::new(wire_pin, moved_pin))
                             {
-                                let new_pin_pos = self.pin_position(moved_pin, canvas_config);
+                                let new_pin_pos = self.pin_position(moved_pin, canvas_config, db);
                                 let w = self.get_wire_mut(connected_id);
                                 if wire_pin.index == 0 {
                                     w.start = new_pin_pos;
@@ -614,6 +616,7 @@ impl Circuit {
                         delta,
                         visited,
                         canvas_config,
+                        db,
                     );
                 }
             }
@@ -753,7 +756,7 @@ impl DB {
                                 .contains(&Connection::new(wire_pin, moved_pin))
                             {
                                 let new_pin_pos =
-                                    self.circuit.pin_position(moved_pin, canvas_config);
+                                    self.circuit.pin_position(moved_pin, canvas_config, self);
                                 let w = self.circuit.get_wire_mut(connected_id);
                                 if wire_pin.index == 0 {
                                     w.start = new_pin_pos;

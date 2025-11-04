@@ -297,18 +297,21 @@ impl App {
             }
         }
         self.connection_manager
-            .rebuild_spatial_index(&self.db.circuit);
+            .rebuild_spatial_index(&self.db.circuit, &self.db);
         self.potential_connections.clear();
     }
 
     pub fn compute_potential_connections(&mut self) {
-        let pins_to_update = self.connection_manager.pins_to_update(&self.db.circuit);
+        let pins_to_update = self
+            .connection_manager
+            .pins_to_update(&self.db.circuit, &self.db);
         let mut new_connections = Vec::new();
         for &pin in &pins_to_update {
-            new_connections.extend(
-                self.connection_manager
-                    .find_connections_for_pin(self.circuit(), pin),
-            );
+            new_connections.extend(self.connection_manager.find_connections_for_pin(
+                self.circuit(),
+                &self.db,
+                pin,
+            ));
         }
 
         self.potential_connections = new_connections.into_iter().collect();
