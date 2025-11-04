@@ -92,14 +92,14 @@ impl App {
 
         let mut internal_components = Vec::new();
         for instance in instances {
-            internal_components.push(self.db.ty(*instance));
+            internal_components.push(self.db.circuit.ty(*instance));
         }
 
         let mut circuit = Circuit::default();
         let mut id_map = std::collections::HashMap::new();
 
         for &old_id in instances {
-            let new_id = match self.db.ty(old_id) {
+            let new_id = match self.db.circuit.ty(old_id) {
                 crate::db::InstanceKind::Gate(kind) => {
                     let gate = *self.db.circuit.get_gate(old_id);
                     circuit.new_gate(gate)
@@ -165,7 +165,7 @@ mod tests {
             pos: pos2(100.0, 100.0),
             kind: GateKind::And,
         };
-        let gate_id = app.db.new_gate(gate);
+        let gate_id = app.db.circuit.new_gate(gate);
 
         // Create a module from the AND gate
         let mut instances = HashSet::new();
@@ -219,13 +219,13 @@ mod tests {
             pos: pos2(100.0, 100.0),
             kind: GateKind::And,
         };
-        let gate1_id = app.db.new_gate(gate1);
+        let gate1_id = app.db.circuit.new_gate(gate1);
 
         let gate2 = Gate {
             pos: pos2(200.0, 100.0),
             kind: GateKind::Or,
         };
-        let gate2_id = app.db.new_gate(gate2);
+        let gate2_id = app.db.circuit.new_gate(gate2);
 
         // Create a connection between them
         use crate::connection_manager::Connection;

@@ -328,25 +328,25 @@ mod tests {
     }
 
     fn new_lamp(db: &mut DB) -> InstanceId {
-        db.new_lamp(Lamp { pos: Pos2::ZERO })
+        db.circuit.new_lamp(Lamp { pos: Pos2::ZERO })
     }
 
     fn new_power(db: &mut DB) -> InstanceId {
-        db.new_power(Power {
+        db.circuit.new_power(Power {
             pos: Pos2::ZERO,
             on: true,
         })
     }
 
     fn new_power_off(db: &mut DB) -> InstanceId {
-        db.new_power(Power {
+        db.circuit.new_power(Power {
             pos: Pos2::ZERO,
             on: false,
         })
     }
 
     fn new_gate(db: &mut DB, kind: GateKind) -> InstanceId {
-        db.new_gate(Gate {
+        db.circuit.new_gate(Gate {
             pos: Pos2::ZERO,
             kind,
         })
@@ -354,7 +354,7 @@ mod tests {
 
     #[expect(dead_code)]
     fn new_clock(db: &mut DB) -> InstanceId {
-        db.new_clock(Clock { pos: Pos2::ZERO })
+        db.circuit.new_clock(Clock { pos: Pos2::ZERO })
     }
 
     fn add_connection(db: &mut DB, pin_a: Pin, pin_b: Pin) {
@@ -374,11 +374,11 @@ mod tests {
     //            +---------v
     // S (Set) ---[NOR2]--- Q̄
     fn create_sr_latch(db: &mut DB) -> (InstanceId, InstanceId, InstanceId, InstanceId) {
-        let s_power = db.new_power(Power {
+        let s_power = db.circuit.new_power(Power {
             pos: Pos2::ZERO,
             on: false,
         });
-        let r_power = db.new_power(Power {
+        let r_power = db.circuit.new_power(Power {
             pos: pos2(0.0, 50.0),
             on: false,
         });
@@ -481,7 +481,7 @@ mod tests {
         let (s_power, _r_power, nor1, nor2) = create_sr_latch(&mut db);
 
         // Set S=1, R=0
-        db.get_power_mut(s_power).on = true;
+        db.circuit.get_power_mut(s_power).on = true;
 
         let mut sim = Simulator::new();
         let _result = sim.compute(&db.circuit);
@@ -510,7 +510,7 @@ mod tests {
         let (_s_power, r_power, nor1, nor2) = create_sr_latch(&mut db);
 
         // Set S=0, R=1
-        db.get_power_mut(r_power).on = true;
+        db.circuit.get_power_mut(r_power).on = true;
 
         let mut sim = Simulator::new();
         let _result = sim.compute(&db.circuit);
@@ -539,14 +539,14 @@ mod tests {
         let (s_power, _r_power, nor1, nor2) = create_sr_latch(&mut db);
 
         // First set the latch to SET state (S=1, R=0)
-        db.get_power_mut(s_power).on = true;
+        db.circuit.get_power_mut(s_power).on = true;
         let mut sim = Simulator::new();
         sim.compute(&db.circuit);
 
         assert_eq!(get_output(&db, &sim, nor1), Value::One);
         assert_eq!(get_output(&db, &sim, nor2), Value::Zero);
 
-        db.get_power_mut(s_power).on = false;
+        db.circuit.get_power_mut(s_power).on = false;
         let _result = sim.compute(&db.circuit);
 
         assert_eq!(
@@ -568,8 +568,8 @@ mod tests {
         let (s_power, r_power, nor1, nor2) = create_sr_latch(&mut db);
 
         // Set S=1, R=1 (forbidden state)
-        db.get_power_mut(s_power).on = true;
-        db.get_power_mut(r_power).on = true;
+        db.circuit.get_power_mut(s_power).on = true;
+        db.circuit.get_power_mut(r_power).on = true;
 
         let mut sim = Simulator::new();
         let _result = sim.compute(&db.circuit);
@@ -592,7 +592,7 @@ mod tests {
         let (s_power, r_power, nor1, nor2) = create_sr_latch(&mut db);
 
         // Start in SET state (S=1, R=0)
-        db.get_power_mut(s_power).on = true;
+        db.circuit.get_power_mut(s_power).on = true;
         let mut sim = Simulator::new();
         sim.compute(&db.circuit);
 
@@ -601,8 +601,8 @@ mod tests {
         assert_eq!(q_value, Value::One, "Q should be 1 after SET");
 
         // Transition to RESET state (S=0, R=1)
-        db.get_power_mut(s_power).on = false;
-        db.get_power_mut(r_power).on = true;
+        db.circuit.get_power_mut(s_power).on = false;
+        db.circuit.get_power_mut(r_power).on = true;
         let mut sim2 = Simulator::new();
         sim2.compute(&db.circuit);
 
@@ -620,7 +620,7 @@ mod tests {
         let (s_power, _r_power, _nor1, _nor2) = create_sr_latch(&mut db);
 
         // Set S=1, R=0
-        db.get_power_mut(s_power).on = true;
+        db.circuit.get_power_mut(s_power).on = true;
 
         let mut sim = Simulator::new();
         sim.compute(&db.circuit);

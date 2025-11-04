@@ -76,18 +76,18 @@ impl App {
             Some(Drag::Canvas(canvas_drag)) => match canvas_drag {
                 CanvasDrag::Single { id, offset } => {
                     let new_pos = mouse + offset;
-                    let moved = match self.db.ty(id) {
+                    let moved = match self.db.circuit.ty(id) {
                         InstanceKind::Gate(_)
                         | InstanceKind::Power
                         | InstanceKind::Lamp
                         | InstanceKind::Module(_)
                         | InstanceKind::Clock => {
-                            let current_pos = match self.db.ty(id) {
-                                InstanceKind::Gate(_) => self.db.get_gate(id).pos,
-                                InstanceKind::Power => self.db.get_power(id).pos,
-                                InstanceKind::Lamp => self.db.get_lamp(id).pos,
-                                InstanceKind::Clock => self.db.get_clock(id).pos,
-                                InstanceKind::Module(_) => self.db.get_module(id).pos,
+                            let current_pos = match self.db.circuit.ty(id) {
+                                InstanceKind::Gate(_) => self.db.circuit.get_gate(id).pos,
+                                InstanceKind::Power => self.db.circuit.get_power(id).pos,
+                                InstanceKind::Lamp => self.db.circuit.get_lamp(id).pos,
+                                InstanceKind::Clock => self.db.circuit.get_clock(id).pos,
+                                InstanceKind::Module(_) => self.db.circuit.get_module(id).pos,
                                 InstanceKind::Wire => unreachable!(),
                             };
                             let desired = new_pos - current_pos;
@@ -96,7 +96,7 @@ impl App {
                             desired.length_sq() > 0.0
                         }
                         InstanceKind::Wire => {
-                            let w = self.db.get_wire_mut(id);
+                            let w = self.db.circuit.get_wire_mut(id);
                             let center =
                                 pos2((w.start.x + w.end.x) * 0.5, (w.start.y + w.end.y) * 0.5);
                             let desired = new_pos - center;
@@ -125,7 +125,7 @@ impl App {
                 }
             },
             Some(Drag::Resize { id, start }) => {
-                let wire = self.db.get_wire_mut(id);
+                let wire = self.db.circuit.get_wire_mut(id);
                 let mut moved = false;
 
                 if start {
@@ -156,7 +156,7 @@ impl App {
 
                 if drag_distance >= MIN_WIRE_SIZE {
                     let wire = Wire::new(start_pos, mouse);
-                    let wire_id = self.db.new_wire(wire);
+                    let wire_id = self.db.circuit.new_wire(wire);
 
                     self.drag = Some(Drag::Resize {
                         id: wire_id,
@@ -184,7 +184,7 @@ impl App {
                 if drag_distance >= MIN_WIRE_SIZE {
                     self.split_wire_at_point(original_wire_id, split_point);
                     let branch_wire = Wire::new(split_point, mouse);
-                    let branch_wire_id = self.db.new_wire(branch_wire);
+                    let branch_wire_id = self.db.circuit.new_wire(branch_wire);
 
                     self.drag = Some(Drag::Resize {
                         id: branch_wire_id,
@@ -204,7 +204,7 @@ impl App {
             }
             Some(Drag::Label { id, offset }) => {
                 let new_pos = mouse + offset;
-                let label = self.db.get_label_mut(id);
+                let label = self.db.circuit.get_label_mut(id);
                 if label.pos != new_pos {
                     label.pos = new_pos;
                 }

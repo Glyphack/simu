@@ -501,12 +501,12 @@ impl App {
             && let Some(pos) = mouse_pos_world
         {
             let id = match kind {
-                InstanceKind::Gate(kind) => self.db.new_gate(Gate { pos, kind }),
-                InstanceKind::Power => self.db.new_power(Power { pos, on: true }),
-                InstanceKind::Wire => self.db.new_wire(Wire::new_at(pos)),
-                InstanceKind::Lamp => self.db.new_lamp(Lamp { pos }),
-                InstanceKind::Clock => self.db.new_clock(Clock { pos }),
-                InstanceKind::Module(c) => self.db.new_module(Module {
+                InstanceKind::Gate(kind) => self.db.circuit.new_gate(Gate { pos, kind }),
+                InstanceKind::Power => self.db.circuit.new_power(Power { pos, on: true }),
+                InstanceKind::Wire => self.db.circuit.new_wire(Wire::new_at(pos)),
+                InstanceKind::Lamp => self.db.circuit.new_lamp(Lamp { pos }),
+                InstanceKind::Clock => self.db.circuit.new_clock(Clock { pos }),
+                InstanceKind::Module(c) => self.db.circuit.new_module(Module {
                     pos,
                     definition_index: c,
                 }),
@@ -550,7 +550,7 @@ impl App {
         if resp.drag_started()
             && let Some(pos) = mouse
         {
-            let id = self.db.new_label(Label::new(pos));
+            let id = self.db.circuit.new_label(Label::new(pos));
             self.set_drag(Drag::Label {
                 id,
                 offset: Vec2::ZERO,
@@ -682,7 +682,7 @@ impl App {
             self.handle_deletion(ui);
 
             if let Some(editing_id) = self.editing_label {
-                let label = self.db.get_label_mut(editing_id);
+                let label = self.db.circuit.get_label_mut(editing_id);
                 label.text = self.label_edit_buffer.clone();
                 if mouse_up || enter_pressed || esc_pressed {
                     self.editing_label = None;
@@ -694,7 +694,7 @@ impl App {
                 && self.hovered.is_none()
                 && let Some(mouse) = mouse_pos_world
             {
-                let id = self.db.new_label(Label::new(mouse));
+                let id = self.db.circuit.new_label(Label::new(mouse));
                 self.editing_label = Some(id);
                 self.label_edit_buffer = String::from("Label");
             }
@@ -733,9 +733,9 @@ impl App {
 
             if right_clicked
                 && let Some(id) = self.hovered.as_ref().map(|i| i.instance())
-                && matches!(self.db.ty(id), InstanceKind::Power)
+                && matches!(self.db.circuit.ty(id), InstanceKind::Power)
             {
-                let p = self.db.get_power_mut(id);
+                let p = self.db.circuit.get_power_mut(id);
                 p.on = !p.on;
                 self.current_dirty = true;
             }
@@ -748,22 +748,22 @@ impl App {
 
         // Draw world
         self.hovered = None;
-        for id in self.db.gate_ids() {
+        for id in self.db.circuit.gate_ids() {
             self.draw_gate(ui, id);
         }
-        for id in self.db.power_ids() {
+        for id in self.db.circuit.power_ids() {
             self.draw_power(ui, id);
         }
-        for id in self.db.lamp_ids() {
+        for id in self.db.circuit.lamp_ids() {
             self.draw_lamp(ui, id);
         }
-        for id in self.db.clock_ids() {
+        for id in self.db.circuit.clock_ids() {
             self.draw_clock(ui, id);
         }
-        for id in self.db.module_ids() {
+        for id in self.db.circuit.module_ids() {
             self.draw_module(ui, id);
         }
-        for id in self.db.wire_ids() {
+        for id in self.db.circuit.wire_ids() {
             let has_current = self.is_on(wire_start(id));
             self.draw_wire(
                 ui,
@@ -775,7 +775,7 @@ impl App {
             );
         }
         // Collect labels to avoid borrowing issues
-        for id in self.db.label_ids() {
+        for id in self.db.circuit.label_ids() {
             self.draw_label(ui, id);
         }
 
@@ -908,7 +908,7 @@ impl App {
 
     fn draw_gate(&mut self, ui: &mut Ui, id: InstanceId) {
         let (pos, kind) = {
-            let gate = self.db.get_gate(id);
+            let gate = self.db.circuit.get_gate(id);
             (gate.pos, gate.kind)
         };
         self.draw_instance_graphics_new(ui, kind.graphics(), self.adjusted_pos(pos), id);
@@ -916,7 +916,7 @@ impl App {
 
     fn draw_power(&mut self, ui: &mut Ui, id: InstanceId) {
         let (pos, graphics) = {
-            let power = self.db.get_power(id);
+            let power = self.db.circuit.get_power(id);
             (power.pos, power.graphics())
         };
         self.draw_instance_graphics_new(ui, graphics, self.adjusted_pos(pos), id);
@@ -925,7 +925,7 @@ impl App {
     fn draw_lamp(&mut self, ui: &mut Ui, id: InstanceId) {
         let has_current = self.is_on(lamp_input(id));
         let (pos, graphics) = {
-            let lamp = self.db.get_lamp(id);
+            let lamp = self.db.circuit.get_lamp(id);
             (lamp.pos, lamp.graphics())
         };
         let pos = self.adjusted_pos(pos);
@@ -950,7 +950,7 @@ impl App {
 
     fn draw_clock(&mut self, ui: &mut Ui, id: InstanceId) {
         let (pos, graphics) = {
-            let clock = self.db.get_clock(id);
+            let clock = self.db.circuit.get_clock(id);
             (clock.pos, clock.graphics())
         };
         let pos = self.adjusted_pos(pos);
@@ -959,13 +959,13 @@ impl App {
 
     fn draw_module(&mut self, ui: &mut Ui, id: InstanceId) {
         let (pos, definition_index) = {
-            let module = self.db.get_module(id);
+            let module = self.db.circuit.get_module(id);
             (module.pos, module.definition_index)
         };
         let screen_center = pos - self.viewport_offset;
 
         {
-            let definition = self.db.get_module(id).definition(&self.db);
+            let definition = self.db.circuit.get_module(id).definition(&self.db);
             let name = definition.name.clone();
             let pins = definition.get_unconnected_pins();
 
@@ -1092,7 +1092,7 @@ impl App {
         if hovered {
             color = COLOR_WIRE_HOVER;
         }
-        let wire = *self.db.get_wire(id);
+        let wire = *self.db.circuit.get_wire(id);
         let mut pin_interact = false;
 
         for (i, pin_pos) in [wire.start, wire.end].iter().enumerate() {
@@ -1218,7 +1218,7 @@ impl App {
     }
     fn draw_label(&mut self, ui: &mut Ui, id: LabelId) {
         let (pos, text) = {
-            let label = self.db.get_label(id);
+            let label = self.db.circuit.get_label(id);
             (label.pos, label.text.clone())
         };
         let screen_pos = pos - self.viewport_offset;
@@ -1294,9 +1294,9 @@ impl App {
                 ui.painter()
                     .circle_filled(pin_pos, PIN_HOVER_THRESHOLD, color);
             }
-            Hover::Instance(hovered) => match self.db.ty(hovered) {
+            Hover::Instance(hovered) => match self.db.circuit.ty(hovered) {
                 InstanceKind::Gate(_) => {
-                    let gate = self.db.get_gate(hovered);
+                    let gate = self.db.circuit.get_gate(hovered);
                     let outer = Rect::from_center_size(
                         gate.pos - self.viewport_offset,
                         self.canvas_config.base_gate_size + INSTANEC_OUTLINE,
@@ -1309,7 +1309,7 @@ impl App {
                     );
                 }
                 InstanceKind::Power => {
-                    let power = self.db.get_power(hovered);
+                    let power = self.db.circuit.get_power(hovered);
                     let outer = Rect::from_center_size(
                         power.pos - self.viewport_offset,
                         self.canvas_config.base_gate_size + INSTANEC_OUTLINE,
@@ -1322,7 +1322,7 @@ impl App {
                     );
                 }
                 InstanceKind::Lamp => {
-                    let lamp = self.db.get_lamp(hovered);
+                    let lamp = self.db.circuit.get_lamp(hovered);
                     let outer = Rect::from_center_size(
                         lamp.pos - self.viewport_offset,
                         self.canvas_config.base_gate_size + INSTANEC_OUTLINE,
@@ -1335,7 +1335,7 @@ impl App {
                     );
                 }
                 InstanceKind::Clock => {
-                    let clock = self.db.get_clock(hovered);
+                    let clock = self.db.circuit.get_clock(hovered);
                     let outer = Rect::from_center_size(
                         clock.pos - self.viewport_offset,
                         self.canvas_config.base_gate_size + INSTANEC_OUTLINE,
@@ -1350,7 +1350,7 @@ impl App {
                 // Wire is highlighted when drawing
                 InstanceKind::Wire => {}
                 InstanceKind::Module(_) => {
-                    let cc = self.db.get_module(hovered);
+                    let cc = self.db.circuit.get_module(hovered);
                     let outer = Rect::from_center_size(
                         cc.pos - self.viewport_offset,
                         self.canvas_config.base_gate_size + INSTANEC_OUTLINE,
@@ -1368,9 +1368,9 @@ impl App {
 
     fn draw_selection_highlight(&self, ui: &Ui) {
         for &id in &self.selected {
-            match self.db.ty(id) {
+            match self.db.circuit.ty(id) {
                 InstanceKind::Gate(_) => {
-                    let g = self.db.get_gate(id);
+                    let g = self.db.circuit.get_gate(id);
                     let r = Rect::from_center_size(
                         g.pos - self.viewport_offset,
                         self.canvas_config.base_gate_size + INSTANEC_OUTLINE,
@@ -1383,7 +1383,7 @@ impl App {
                     );
                 }
                 InstanceKind::Power => {
-                    let p = self.db.get_power(id);
+                    let p = self.db.circuit.get_power(id);
                     let r = Rect::from_center_size(
                         p.pos - self.viewport_offset,
                         self.canvas_config.base_gate_size + INSTANEC_OUTLINE,
@@ -1396,7 +1396,7 @@ impl App {
                     );
                 }
                 InstanceKind::Lamp => {
-                    let l = self.db.get_lamp(id);
+                    let l = self.db.circuit.get_lamp(id);
                     let r = Rect::from_center_size(
                         l.pos - self.viewport_offset,
                         self.canvas_config.base_gate_size + INSTANEC_OUTLINE,
@@ -1409,7 +1409,7 @@ impl App {
                     );
                 }
                 InstanceKind::Clock => {
-                    let c = self.db.get_clock(id);
+                    let c = self.db.circuit.get_clock(id);
                     let r = Rect::from_center_size(
                         c.pos - self.viewport_offset,
                         self.canvas_config.base_gate_size + INSTANEC_OUTLINE,
@@ -1432,7 +1432,7 @@ impl App {
                     }
                 }
                 InstanceKind::Module(_) => {
-                    let cc = self.db.get_module(id);
+                    let cc = self.db.circuit.get_module(id);
                     let r = Rect::from_center_size(
                         cc.pos - self.viewport_offset,
                         self.canvas_config.base_gate_size + INSTANEC_OUTLINE,
@@ -1537,30 +1537,30 @@ impl App {
     ) -> (Rect, Vec<ClipBoardItem>) {
         let mut points = vec![];
         for &id in instances {
-            match self.db.ty(id) {
+            match self.db.circuit.ty(id) {
                 InstanceKind::Gate(_) => {
-                    let g = self.db.get_gate(id);
+                    let g = self.db.circuit.get_gate(id);
                     points.push(g.pos);
                 }
                 InstanceKind::Power => {
-                    let p = self.db.get_power(id);
+                    let p = self.db.circuit.get_power(id);
                     points.push(p.pos);
                 }
                 InstanceKind::Wire => {
-                    let w = self.db.get_wire(id);
+                    let w = self.db.circuit.get_wire(id);
                     points.push(w.start);
                     points.push(w.end);
                 }
                 InstanceKind::Lamp => {
-                    let l = self.db.get_lamp(id);
+                    let l = self.db.circuit.get_lamp(id);
                     points.push(l.pos);
                 }
                 InstanceKind::Clock => {
-                    let c = self.db.get_clock(id);
+                    let c = self.db.circuit.get_clock(id);
                     points.push(c.pos);
                 }
                 InstanceKind::Module(_) => {
-                    let cc = self.db.get_module(id);
+                    let cc = self.db.circuit.get_module(id);
                     points.push(cc.pos);
                 }
             }
@@ -1571,30 +1571,30 @@ impl App {
         let mut object_pos = vec![];
 
         for &id in instances {
-            let ty = self.db.ty(id);
+            let ty = self.db.circuit.ty(id);
             match ty {
                 InstanceKind::Gate(kind) => {
-                    let g = self.db.get_gate(id);
+                    let g = self.db.circuit.get_gate(id);
                     object_pos.push(ClipBoardItem::Gate(kind, center - g.pos));
                 }
                 InstanceKind::Power => {
-                    let p = self.db.get_power(id);
+                    let p = self.db.circuit.get_power(id);
                     object_pos.push(ClipBoardItem::Power(center - p.pos));
                 }
                 InstanceKind::Wire => {
-                    let w = self.db.get_wire(id);
+                    let w = self.db.circuit.get_wire(id);
                     object_pos.push(ClipBoardItem::Wire(center - w.start, center - w.end));
                 }
                 InstanceKind::Lamp => {
-                    let l = self.db.get_lamp(id);
+                    let l = self.db.circuit.get_lamp(id);
                     object_pos.push(ClipBoardItem::Lamp(center - l.pos));
                 }
                 InstanceKind::Clock => {
-                    let c = self.db.get_clock(id);
+                    let c = self.db.circuit.get_clock(id);
                     object_pos.push(ClipBoardItem::Clock(center - c.pos));
                 }
                 InstanceKind::Module(_) => {
-                    let cc = self.db.get_module(id);
+                    let cc = self.db.circuit.get_module(id);
                     object_pos.push(ClipBoardItem::Module(cc.definition_index, center - cc.pos));
                 }
             }
@@ -1625,7 +1625,7 @@ impl App {
         for to_paste in self.clipboard.clone() {
             match to_paste {
                 ClipBoardItem::Gate(gate_kind, offset) => {
-                    let id = self.db.new_gate(Gate {
+                    let id = self.db.circuit.new_gate(Gate {
                         kind: gate_kind,
                         pos: mouse - offset,
                     });
@@ -1633,7 +1633,7 @@ impl App {
                     self.selected.insert(id);
                 }
                 ClipBoardItem::Power(offset) => {
-                    let id = self.db.new_power(Power {
+                    let id = self.db.circuit.new_power(Power {
                         pos: mouse - offset,
                         on: false,
                     });
@@ -1641,12 +1641,12 @@ impl App {
                     self.selected.insert(id);
                 }
                 ClipBoardItem::Wire(s, e) => {
-                    let id = self.db.new_wire(Wire::new(mouse - s, mouse - e));
+                    let id = self.db.circuit.new_wire(Wire::new(mouse - s, mouse - e));
                     self.connection_manager.mark_instance_dirty(id);
                     self.selected.insert(id);
                 }
                 ClipBoardItem::Module(def_index, offset) => {
-                    let id = self.db.new_module(Module {
+                    let id = self.db.circuit.new_module(Module {
                         pos: mouse - offset,
                         definition_index: def_index,
                     });
@@ -1654,19 +1654,19 @@ impl App {
                     self.selected.insert(id);
                 }
                 ClipBoardItem::Lamp(offset) => {
-                    let id = self.db.new_lamp(Lamp {
+                    let id = self.db.circuit.new_lamp(Lamp {
                         pos: mouse - offset,
                     });
                     self.selected.insert(id);
                 }
                 ClipBoardItem::Clock(offset) => {
-                    let id = self.db.new_clock(Clock {
+                    let id = self.db.circuit.new_clock(Clock {
                         pos: mouse - offset,
                     });
                     self.selected.insert(id);
                 }
                 ClipBoardItem::Label(text, offset) => {
-                    let _id = self.db.new_label(Label {
+                    let _id = self.db.circuit.new_label(Label {
                         pos: mouse - offset,
                         text,
                     });
@@ -1684,7 +1684,7 @@ impl App {
         };
         let selected = *selected;
 
-        match self.db.ty(selected) {
+        match self.db.circuit.ty(selected) {
             InstanceKind::Wire => {
                 for pin in self.circuit().pins_of(selected) {
                     let pos = self.circuit().pin_position(pin, &self.canvas_config);
@@ -1714,12 +1714,12 @@ impl App {
     }
 
     pub fn split_wire_at_point(&mut self, wire_id: InstanceId, split_point: Pos2) {
-        let original_wire = *self.db.get_wire(wire_id);
+        let original_wire = *self.db.circuit.get_wire(wire_id);
 
         let new_wire = Wire::new(split_point, original_wire.end);
-        let new_wire_id = self.db.new_wire(new_wire);
+        let new_wire_id = self.db.circuit.new_wire(new_wire);
 
-        let original_wire_mut = self.db.get_wire_mut(wire_id);
+        let original_wire_mut = self.db.circuit.get_wire_mut(wire_id);
         original_wire_mut.end = split_point;
 
         self.connection_manager
@@ -1734,10 +1734,10 @@ impl App {
         if !self.selected.contains(&instance_id) || self.selected.len() != 1 {
             return None;
         }
-        if !matches!(self.db.ty(instance_id), InstanceKind::Wire) {
+        if !matches!(self.db.circuit.ty(instance_id), InstanceKind::Wire) {
             return None;
         }
-        let wire = self.db.get_wire(instance_id);
+        let wire = self.db.circuit.get_wire(instance_id);
 
         if wire.dist_to_closest_point_on_line(mouse) > NEW_PIN_ON_WIRE_THRESHOLD {
             return None;

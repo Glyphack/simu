@@ -629,122 +629,6 @@ pub struct DB {
 }
 
 impl DB {
-    pub fn new_gate(&mut self, g: Gate) -> InstanceId {
-        self.circuit.new_gate(g)
-    }
-
-    pub fn new_power(&mut self, p: Power) -> InstanceId {
-        self.circuit.new_power(p)
-    }
-
-    pub fn new_wire(&mut self, w: Wire) -> InstanceId {
-        self.circuit.new_wire(w)
-    }
-
-    pub fn new_lamp(&mut self, l: Lamp) -> InstanceId {
-        self.circuit.new_lamp(l)
-    }
-
-    pub fn new_clock(&mut self, c: Clock) -> InstanceId {
-        self.circuit.new_clock(c)
-    }
-
-    pub fn new_module(&mut self, c: crate::module::Module) -> InstanceId {
-        self.circuit.new_module(c)
-    }
-
-    pub fn ty(&self, id: InstanceId) -> InstanceKind {
-        self.circuit.ty(id)
-    }
-
-    pub fn get_gate(&self, id: InstanceId) -> &Gate {
-        self.circuit.get_gate(id)
-    }
-
-    pub fn get_gate_mut(&mut self, id: InstanceId) -> &mut Gate {
-        self.circuit.get_gate_mut(id)
-    }
-
-    pub fn get_power(&self, id: InstanceId) -> &Power {
-        self.circuit.get_power(id)
-    }
-
-    pub fn get_power_mut(&mut self, id: InstanceId) -> &mut Power {
-        self.circuit.get_power_mut(id)
-    }
-
-    pub fn get_wire(&self, id: InstanceId) -> &Wire {
-        self.circuit.get_wire(id)
-    }
-
-    pub fn get_wire_mut(&mut self, id: InstanceId) -> &mut Wire {
-        self.circuit.get_wire_mut(id)
-    }
-
-    pub fn get_lamp(&self, id: InstanceId) -> &Lamp {
-        self.circuit.get_lamp(id)
-    }
-
-    pub fn get_lamp_mut(&mut self, id: InstanceId) -> &mut Lamp {
-        self.circuit.get_lamp_mut(id)
-    }
-
-    pub fn get_clock(&self, id: InstanceId) -> &Clock {
-        self.circuit.get_clock(id)
-    }
-
-    pub fn get_clock_mut(&mut self, id: InstanceId) -> &mut Clock {
-        self.circuit.get_clock_mut(id)
-    }
-
-    pub fn get_module(&self, id: InstanceId) -> &Module {
-        self.circuit.get_module(id)
-    }
-
-    pub fn get_module_mut(&mut self, id: InstanceId) -> &mut Module {
-        self.circuit.get_module_mut(id)
-    }
-
-    pub fn new_label(&mut self, label: Label) -> LabelId {
-        self.circuit.new_label(label)
-    }
-
-    pub fn get_label(&self, id: LabelId) -> &Label {
-        self.circuit.get_label(id)
-    }
-
-    pub fn get_label_mut(&mut self, id: LabelId) -> &mut Label {
-        self.circuit.get_label_mut(id)
-    }
-
-    pub fn gate_ids(&self) -> Vec<InstanceId> {
-        self.circuit.gate_ids()
-    }
-
-    pub fn power_ids(&self) -> Vec<InstanceId> {
-        self.circuit.power_ids()
-    }
-
-    pub fn lamp_ids(&self) -> Vec<InstanceId> {
-        self.circuit.lamp_ids()
-    }
-
-    pub fn clock_ids(&self) -> Vec<InstanceId> {
-        self.circuit.clock_ids()
-    }
-
-    pub fn module_ids(&self) -> Vec<InstanceId> {
-        self.circuit.module_ids()
-    }
-
-    pub fn wire_ids(&self) -> Vec<InstanceId> {
-        self.circuit.wire_ids()
-    }
-
-    pub fn label_ids(&self) -> Vec<LabelId> {
-        self.circuit.label_ids()
-    }
-
     pub fn get_module_def(&self, def_index: ModuleDefId) -> &ModuleDefinition {
         self.module_definitions
             .get(def_index)
@@ -755,30 +639,30 @@ impl DB {
         let ids_set: HashSet<InstanceId> = ids.iter().copied().collect();
 
         for id in ids {
-            match self.ty(*id) {
+            match self.circuit.ty(*id) {
                 InstanceKind::Gate(_) => {
-                    let g = self.get_gate_mut(*id);
+                    let g = self.circuit.get_gate_mut(*id);
                     g.pos += delta;
                 }
                 InstanceKind::Power => {
-                    let p = self.get_power_mut(*id);
+                    let p = self.circuit.get_power_mut(*id);
                     p.pos += delta;
                 }
                 InstanceKind::Wire => {
-                    let w = self.get_wire_mut(*id);
+                    let w = self.circuit.get_wire_mut(*id);
                     w.start += delta;
                     w.end += delta;
                 }
                 InstanceKind::Lamp => {
-                    let l = self.get_lamp_mut(*id);
+                    let l = self.circuit.get_lamp_mut(*id);
                     l.pos += delta;
                 }
                 InstanceKind::Clock => {
-                    let c = self.get_clock_mut(*id);
+                    let c = self.circuit.get_clock_mut(*id);
                     c.pos += delta;
                 }
                 InstanceKind::Module(_) => {
-                    let cc = self.get_module_mut(*id);
+                    let cc = self.circuit.get_module_mut(*id);
                     cc.pos += delta;
                 }
             }
@@ -786,9 +670,11 @@ impl DB {
 
         for id in ids {
             for pin in self.circuit.connected_pins_of_instance(*id) {
-                if matches!(self.ty(pin.ins), InstanceKind::Wire) && !ids_set.contains(&pin.ins) {
+                if matches!(self.circuit.ty(pin.ins), InstanceKind::Wire)
+                    && !ids_set.contains(&pin.ins)
+                {
                     // Otherwise resize the wire
-                    let w = self.get_wire_mut(pin.ins);
+                    let w = self.circuit.get_wire_mut(pin.ins);
                     if pin.index == 0 {
                         w.start += delta;
                     } else {
@@ -821,30 +707,30 @@ impl DB {
         }
 
         // Move this instance
-        match self.ty(id) {
+        match self.circuit.ty(id) {
             InstanceKind::Gate(_) => {
-                let g = self.get_gate_mut(id);
+                let g = self.circuit.get_gate_mut(id);
                 g.pos += delta;
             }
             InstanceKind::Power => {
-                let p = self.get_power_mut(id);
+                let p = self.circuit.get_power_mut(id);
                 p.pos += delta;
             }
             InstanceKind::Wire => {
-                let w = self.get_wire_mut(id);
+                let w = self.circuit.get_wire_mut(id);
                 w.start += delta;
                 w.end += delta;
             }
             InstanceKind::Lamp => {
-                let l = self.get_lamp_mut(id);
+                let l = self.circuit.get_lamp_mut(id);
                 l.pos += delta;
             }
             InstanceKind::Clock => {
-                let c = self.get_clock_mut(id);
+                let c = self.circuit.get_clock_mut(id);
                 c.pos += delta;
             }
             InstanceKind::Module(_) => {
-                let cc = self.get_module_mut(id);
+                let cc = self.circuit.get_module_mut(id);
                 cc.pos += delta;
             }
         }
@@ -856,7 +742,7 @@ impl DB {
                 continue;
             }
 
-            match self.ty(connected_id) {
+            match self.circuit.ty(connected_id) {
                 InstanceKind::Wire => {
                     let wire_pins = self.circuit.pins_of(connected_id);
                     for wire_pin in wire_pins {
@@ -868,7 +754,7 @@ impl DB {
                             {
                                 let new_pin_pos =
                                     self.circuit.pin_position(moved_pin, canvas_config);
-                                let w = self.get_wire_mut(connected_id);
+                                let w = self.circuit.get_wire_mut(connected_id);
                                 if wire_pin.index == 0 {
                                     w.start = new_pin_pos;
                                 } else {
