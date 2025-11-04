@@ -458,7 +458,7 @@ impl App {
             InstanceKind::Gate(gate_kind) => {
                 let s = get_icon(ui, gate_kind.graphics().svg.clone())
                     .max_height(PANEL_BUTTON_MAX_HEIGHT);
-                ui.add(egui::ImageButton::new(s).sense(Sense::click_and_drag()))
+                ui.add(egui::Button::image(s).sense(Sense::click_and_drag()))
             }
             InstanceKind::Power => {
                 let s = get_icon(
@@ -472,17 +472,17 @@ impl App {
                     .clone(),
                 )
                 .max_height(PANEL_BUTTON_MAX_HEIGHT);
-                ui.add(egui::ImageButton::new(s).sense(Sense::click_and_drag()))
+                ui.add(egui::Button::image(s).sense(Sense::click_and_drag()))
             }
             InstanceKind::Lamp => {
                 let s = get_icon(ui, Lamp { pos: Pos2::ZERO }.graphics().svg.clone())
                     .max_height(PANEL_BUTTON_MAX_HEIGHT);
-                ui.add(egui::ImageButton::new(s).sense(Sense::click_and_drag()))
+                ui.add(egui::Button::image(s).sense(Sense::click_and_drag()))
             }
             InstanceKind::Clock => {
                 let s = get_icon(ui, Clock { pos: Pos2::ZERO }.graphics().svg.clone())
                     .max_height(PANEL_BUTTON_MAX_HEIGHT);
-                ui.add(egui::ImageButton::new(s).sense(Sense::click_and_drag()))
+                ui.add(egui::Button::image(s).sense(Sense::click_and_drag()))
             }
             InstanceKind::Wire => ui.add(
                 Button::new("Wire")
@@ -1447,19 +1447,6 @@ impl App {
 
     fn debug_string(&self, ui: &Ui) -> String {
         let mut out = String::new();
-        writeln!(
-            out,
-            "counts: gates={}, powers={}, lamps={}, clocks={}, wires={}, modules={}, conns={}, module defs={}",
-            self.circuit().gates.len(),
-            self.circuit().powers.len(),
-            self.circuit().lamps.len(),
-            self.circuit().clocks.len(),
-            self.circuit().wires.len(),
-            self.circuit().modules.len(),
-            self.circuit().connections.len(),
-            self.db.module_definitions.len(),
-        )
-        .ok();
         let mouse_pos_world = self.mouse_pos_world(ui);
         writeln!(out, "mouse: {mouse_pos_world:?}").ok();
 
@@ -1511,118 +1498,32 @@ impl App {
         .ok();
         writeln!(out, "Voltage: {}", self.clock_controller.voltage).ok();
 
-        writeln!(out, "\nGates:").ok();
-        for (id, g) in &self.circuit().gates {
-            writeln!(out, "  {}", g.display(&self.db, id)).ok();
-            // pins
-            if true {
-                for (i, pin) in g.kind.graphics().pins.iter().enumerate() {
-                    let pin_offset = pin.offset;
-                    let p = g.pos + pin_offset;
-                    let pin_instance = Pin::new(id, i as u32, pin.kind);
-                    writeln!(
-                        out,
-                        "    {} at ({:.1},{:.1})",
-                        pin_instance.display(&self.db),
-                        p.x,
-                        p.y
-                    )
-                    .ok();
-                }
-            }
-        }
-
-        writeln!(out, "\nPowers:").ok();
-        for (id, p) in &self.circuit().powers {
-            writeln!(out, "  {}", p.display(&self.db, id)).ok();
-            for (i, pin) in p.graphics().pins.iter().enumerate() {
-                let pin_offset = pin.offset;
-                let pp = p.pos + pin_offset;
-                let pin_instance = Pin::new(id, i as u32, pin.kind);
-                writeln!(
-                    out,
-                    "    {} at ({:.1},{:.1})",
-                    pin_instance.display(&self.db),
-                    pp.x,
-                    pp.y
-                )
-                .ok();
-            }
-        }
-
-        writeln!(out, "\nLamps:").ok();
-        for (id, lamp) in &self.circuit().lamps {
-            writeln!(out, "  {}", lamp.display(&self.db, id)).ok();
-            // Show pins
-            for (i, pin) in lamp.graphics().pins.iter().enumerate() {
-                let pin_offset = pin.offset;
-                let p = lamp.pos + pin_offset;
-                let pin_instance = Pin::new(id, i as u32, pin.kind);
-                writeln!(
-                    out,
-                    "    {} at ({:.1},{:.1})",
-                    pin_instance.display(&self.db),
-                    p.x,
-                    p.y
-                )
-                .ok();
-            }
-        }
-
-        writeln!(out, "\nClocks:").ok();
-        for (id, clock) in &self.circuit().clocks {
-            writeln!(out, "  {}", clock.display(&self.db, id)).ok();
-            // Show pins
-            for (i, pin) in clock.graphics().pins.iter().enumerate() {
-                let pin_offset = pin.offset;
-                let p = clock.pos + pin_offset;
-                let pin_instance = Pin::new(id, i as u32, pin.kind);
-                writeln!(
-                    out,
-                    "    {} at ({:.1},{:.1})",
-                    pin_instance.display(&self.db),
-                    p.x,
-                    p.y
-                )
-                .ok();
-            }
-        }
-
-        writeln!(out, "\nWires:").ok();
-        for (id, w) in &self.circuit().wires {
-            writeln!(out, "  {}", w.display(&self.db, id)).ok();
-            if true {
-                for pin in self.circuit().pins_of(id) {
-                    writeln!(out, "{}", pin.display_alone()).ok();
-                }
-            }
-        }
-
-        writeln!(out, "\nModules:").ok();
-        for (id, m) in &self.circuit().modules {
-            writeln!(out, "  {}", m.display(&self.db, id)).ok();
-        }
-
-        writeln!(out, "\nModule Def:").ok();
-        for (_id, m) in &self.db.module_definitions {
-            writeln!(out, "  {}", m.display_definition()).ok();
-        }
-
-        writeln!(out, "\nConnections:").ok();
-        for c in &self.circuit().connections {
-            writeln!(out, "  {}", c.display(&self.db)).ok();
-        }
-
         if self.potential_connections.is_empty() {
             writeln!(out, "\nPotential Connections: none").ok();
         } else {
             writeln!(out, "\nPotential Connections:").ok();
             for c in &self.potential_connections {
-                writeln!(out, "  {}", c.display(&self.db)).ok();
+                writeln!(out, "  {}", c.display(self.circuit())).ok();
             }
         }
 
         writeln!(out, "\n{}", self.connection_manager.debug_info()).ok();
+
+        writeln!(out, "\n").ok();
+
+        out.write_str(&self.circuit().display()).ok();
+
+        if !self.db.module_definitions.is_empty() {
+            writeln!(out, "\nModule Def:").ok();
+            let mut iter = self.db.module_definitions.iter();
+            if let Some((_id, first)) = iter.next() {
+                writeln!(out, "  {}", first.display_definition()).ok();
+            }
+            for (_id, m) in iter {
+                writeln!(out).ok(); // blank line
+                writeln!(out, "  {}", m.display_definition()).ok();
+            }
+        }
 
         out
     }

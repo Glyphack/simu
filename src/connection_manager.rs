@@ -2,7 +2,7 @@
 use crate::app::SNAP_THRESHOLD;
 use crate::assets;
 use crate::config::CanvasConfig;
-use crate::db::{Circuit, DB, InstanceId, InstanceKind, Pin};
+use crate::db::{Circuit, InstanceId, InstanceKind, Pin};
 use egui::Pos2;
 use std::collections::{HashMap, HashSet};
 
@@ -24,8 +24,12 @@ impl Connection {
         self.a.ins == id || self.b.ins == id
     }
 
-    pub fn display(&self, db: &DB) -> String {
-        format!("{} <-> {}", self.a.display(db), self.b.display(db))
+    pub fn display(&self, circuit: &Circuit) -> String {
+        format!(
+            "{} <-> {}",
+            self.a.display(circuit),
+            self.b.display(circuit)
+        )
     }
 
     pub fn get_pin_first(&self, pin: Pin) -> Option<(Pin, Pin)> {

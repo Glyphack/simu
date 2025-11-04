@@ -221,6 +221,129 @@ impl Circuit {
         self.labels.keys().collect()
     }
 
+    pub fn display(&self) -> String {
+        let mut out = String::new();
+        use std::fmt::Write as _;
+        writeln!(
+            out,
+            "counts: gates={}, powers={}, lamps={}, clocks={}, wires={}, modules={}, conns={}",
+            self.gates.len(),
+            self.powers.len(),
+            self.lamps.len(),
+            self.clocks.len(),
+            self.wires.len(),
+            self.modules.len(),
+            self.connections.len(),
+        )
+        .ok();
+
+        if !self.gates.is_empty() {
+            writeln!(out, "\nGates:").ok();
+            for (id, g) in &self.gates {
+                writeln!(out, "  {}", g.display(id)).ok();
+                for (i, pin) in g.kind.graphics().pins.iter().enumerate() {
+                    let pin_offset = pin.offset;
+                    let p = g.pos + pin_offset;
+                    let pin_instance = Pin::new(id, i as u32, pin.kind);
+                    writeln!(
+                        out,
+                        "    {} at ({:.1},{:.1})",
+                        pin_instance.display(self),
+                        p.x,
+                        p.y
+                    )
+                    .ok();
+                }
+            }
+        }
+
+        if !self.powers.is_empty() {
+            writeln!(out, "\nPowers:").ok();
+            for (id, p) in &self.powers {
+                writeln!(out, "  {}", p.display(id)).ok();
+                for (i, pin) in p.graphics().pins.iter().enumerate() {
+                    let pin_offset = pin.offset;
+                    let pp = p.pos + pin_offset;
+                    let pin_instance = Pin::new(id, i as u32, pin.kind);
+                    writeln!(
+                        out,
+                        "    {} at ({:.1},{:.1})",
+                        pin_instance.display(self),
+                        pp.x,
+                        pp.y
+                    )
+                    .ok();
+                }
+            }
+        }
+
+        if !self.lamps.is_empty() {
+            writeln!(out, "\nLamps:").ok();
+            for (id, lamp) in &self.lamps {
+                writeln!(out, "  {}", lamp.display(id)).ok();
+                for (i, pin) in lamp.graphics().pins.iter().enumerate() {
+                    let pin_offset = pin.offset;
+                    let p = lamp.pos + pin_offset;
+                    let pin_instance = Pin::new(id, i as u32, pin.kind);
+                    writeln!(
+                        out,
+                        "    {} at ({:.1},{:.1})",
+                        pin_instance.display(self),
+                        p.x,
+                        p.y
+                    )
+                    .ok();
+                }
+            }
+        }
+
+        if !self.clocks.is_empty() {
+            writeln!(out, "\nClocks:").ok();
+            for (id, clock) in &self.clocks {
+                writeln!(out, "  {}", clock.display(id)).ok();
+                for (i, pin) in clock.graphics().pins.iter().enumerate() {
+                    let pin_offset = pin.offset;
+                    let p = clock.pos + pin_offset;
+                    let pin_instance = Pin::new(id, i as u32, pin.kind);
+                    writeln!(
+                        out,
+                        "    {} at ({:.1},{:.1})",
+                        pin_instance.display(self),
+                        p.x,
+                        p.y
+                    )
+                    .ok();
+                }
+            }
+        }
+
+        if !self.wires.is_empty() {
+            writeln!(out, "\nWires:").ok();
+            for (id, w) in &self.wires {
+                writeln!(out, "  {}", w.display(id)).ok();
+                for pin in self.pins_of(id) {
+                    writeln!(out, "    {}", pin.display_alone()).ok();
+                }
+            }
+        }
+
+        if !self.modules.is_empty() {
+            writeln!(out, "\nModules:").ok();
+            for (id, m) in &self.modules {
+                writeln!(out, "  {id} (module instance)").ok();
+            }
+        }
+
+        if !self.connections.is_empty() {
+            writeln!(out, "\nConnections:").ok();
+            for c in &self.connections {
+                writeln!(out, "  {}", c.display(self)).ok();
+            }
+        }
+
+        out
+    }
+
     // Connections
 
     pub fn connected_pins_of_instance(&self, id: InstanceId) -> Vec<Pin> {
@@ -973,7 +1096,7 @@ impl GateKind {
 }
 
 impl Gate {
-    pub fn display(&self, db: &DB, id: InstanceId) -> String {
+    pub fn display(&self, id: InstanceId) -> String {
         format!("{:?} {}", self.kind, id)
     }
 }
@@ -990,8 +1113,7 @@ pub struct Power {
 }
 
 impl Power {
-    pub fn display(&self, db: &DB, id: InstanceId) -> String {
-        // Find the InstanceId for this power in the database
+    pub fn display(&self, id: InstanceId) -> String {
         format!("Power {{ id: {}, on: {}}}", id, self.on)
     }
 
@@ -1018,7 +1140,7 @@ impl Lamp {
         assets::LAMP_GRAPHICS.clone()
     }
 
-    pub fn display(&self, db: &DB, id: InstanceId) -> String {
+    pub fn display(&self, id: InstanceId) -> String {
         format!("Lamp {id}")
     }
 }
@@ -1037,7 +1159,7 @@ impl Clock {
         assets::CLOCK_GRAPHICS.clone()
     }
 
-    pub fn display(&self, db: &DB, id: InstanceId) -> String {
+    pub fn display(&self, id: InstanceId) -> String {
         format!("Clock {id}")
     }
 }
@@ -1074,7 +1196,7 @@ pub struct Wire {
 }
 
 impl Wire {
-    pub fn display(&self, db: &DB, id: InstanceId) -> String {
+    pub fn display(&self, id: InstanceId) -> String {
         format!("Wire {id}")
     }
 
@@ -1129,29 +1251,29 @@ pub struct Pin {
 }
 
 impl Pin {
-    pub fn display(&self, db: &DB) -> String {
-        let instance_display = match db.ty(self.ins) {
+    pub fn display(&self, circuit: &Circuit) -> String {
+        let instance_display = match circuit.ty(self.ins) {
             InstanceKind::Gate(_) => {
-                let gate = db.get_gate(self.ins);
-                gate.display(db, self.ins)
+                let gate = circuit.get_gate(self.ins);
+                gate.display(self.ins)
             }
             InstanceKind::Power => {
-                let power = db.get_power(self.ins);
-                power.display(db, self.ins)
+                let power = circuit.get_power(self.ins);
+                power.display(self.ins)
             }
             InstanceKind::Wire => {
-                let wire = db.get_wire(self.ins);
-                wire.display(db, self.ins)
+                let wire = circuit.get_wire(self.ins);
+                wire.display(self.ins)
             }
             InstanceKind::Lamp => {
-                let lamp = db.get_lamp(self.ins);
-                lamp.display(db, self.ins)
+                let lamp = circuit.get_lamp(self.ins);
+                lamp.display(self.ins)
             }
             InstanceKind::Clock => {
-                let clock = db.get_clock(self.ins);
-                clock.display(db, self.ins)
+                let clock = circuit.get_clock(self.ins);
+                clock.display(self.ins)
             }
-            InstanceKind::Module(_) => db.get_module(self.ins).display(db, self.ins),
+            InstanceKind::Module(_) => format!("Module {}", self.ins),
         };
         format!(
             "{:?} pin#{} in {} ",

@@ -11,8 +11,8 @@ all-features = true
 targets = ["x86_64-unknown-linux-gnu", "wasm32-unknown-unknown"]
 
 [dependencies]
-egui = "0.32"
-eframe = { version = "0.32", default-features = false, features = [
+egui = "0.33"
+eframe = { version = "0.33", default-features = false, features = [
   "accesskit",     # Make egui compatible with screen readers. NOTE: adds a lot of dependencies.
   "default_fonts", # Embed the default egui fonts.
   "glow",          # Use the glow rendering backend. Alternative: "wgpu".
@@ -25,9 +25,9 @@ log = "0.4.27"
 # You only need serde if you want app persistence:
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0"
-egui_extras = { version = "0.32.1", features = ["all_loaders"] }
+egui_extras = { version = "0.33", features = ["all_loaders"] }
 image = "0.25.6"
-egui_logger = "0.8.0"
+egui_logger = "0.9"
 slotmap = { version = "1.0.7", features = ["serde"] }
 rfd = "0.15"
 
