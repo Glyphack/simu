@@ -2,7 +2,7 @@
 use crate::app::SNAP_THRESHOLD;
 use crate::assets;
 use crate::config::CanvasConfig;
-use crate::db::{DB, InstanceId, InstanceKind, Pin};
+use crate::db::{Circuit, DB, InstanceId, InstanceKind, Pin};
 use egui::Pos2;
 use std::collections::{HashMap, HashSet};
 
@@ -95,7 +95,7 @@ pub struct ConnectionManager {
 }
 
 impl ConnectionManager {
-    pub fn new(db: &DB, canvas_config: &CanvasConfig) -> Self {
+    pub fn new(db: &Circuit, canvas_config: &CanvasConfig) -> Self {
         let mut new = Self {
             dirty_instances: Default::default(),
             spatial_index: Default::default(),
@@ -119,12 +119,12 @@ impl ConnectionManager {
     }
 
     /// Update the spatial index for all pins in the database
-    pub fn rebuild_spatial_index(&mut self, db: &DB) {
+    pub fn rebuild_spatial_index(&mut self, db: &Circuit) {
         self.spatial_index.clear();
         self.pin_position_cache.clear();
 
         // Index all pins by their grid cell
-        for (instance_id, _) in &db.circuit.types {
+        for (instance_id, _) in &db.types {
             for pin in db.pins_of(instance_id) {
                 let pos = db.pin_position(pin, &self.canvas_config);
                 let cell = GridCell::from_pos(pos);
@@ -137,7 +137,7 @@ impl ConnectionManager {
     }
 
     /// Update spatial index for specific pins that have moved
-    fn update_spatial_index_for_pins(&mut self, db: &DB, pins: &[Pin]) {
+    fn update_spatial_index_for_pins(&mut self, db: &Circuit, pins: &[Pin]) {
         for &pin in pins {
             let new_pos = db.pin_position(pin, &self.canvas_config);
 
@@ -161,7 +161,7 @@ impl ConnectionManager {
     }
 
     /// Find potential connections for a pin using spatial indexing
-    pub fn find_connections_for_pin(&self, db: &DB, pin: Pin) -> Vec<Connection> {
+    pub fn find_connections_for_pin(&self, db: &Circuit, pin: Pin) -> Vec<Connection> {
         let mut wire_connections = Vec::new();
         let mut non_wire_connections = Vec::new();
         let pin_pos = db.pin_position(pin, &self.canvas_config);
@@ -185,7 +185,7 @@ impl ConnectionManager {
                         Connection::new(pin, other_pin)
                     };
 
-                    if distance <= SNAP_THRESHOLD && self.validate_connection(db, connection) {
+                    if distance <= SNAP_THRESHOLD && self.validate_connection(connection) {
                         let is_wire = matches!(db.ty(other_pin.ins), InstanceKind::Wire);
                         if is_wire {
                             wire_connections.push(connection);
@@ -208,7 +208,7 @@ impl ConnectionManager {
     }
 
     /// Validate if a connection between two pins is allowed
-    fn validate_connection(&self, _db: &DB, c: Connection) -> bool {
+    fn validate_connection(&self, c: Connection) -> bool {
         if c.a == c.b {
             return false;
         }
@@ -225,7 +225,7 @@ impl ConnectionManager {
     }
 
     /// Snap a pin to match the position of another pin
-    fn snap_pin_to_other(&self, db: &mut DB, src: Pin, dst: Pin) {
+    fn snap_pin_to_other(&self, db: &mut Circuit, src: Pin, dst: Pin) {
         let target = db.pin_position(dst, &self.canvas_config);
         match db.ty(src.ins) {
             InstanceKind::Wire => {
@@ -281,7 +281,7 @@ impl ConnectionManager {
         }
     }
 
-    pub fn pins_to_update(&mut self, db: &DB) -> Vec<Pin> {
+    pub fn pins_to_update(&mut self, db: &Circuit) -> Vec<Pin> {
         let mut pins_to_update = Vec::new();
 
         for &instance_id in &self.dirty_instances {
@@ -292,7 +292,7 @@ impl ConnectionManager {
         pins_to_update.sort_unstable();
         pins_to_update.dedup();
 
-        if pins_to_update.len() > db.circuit.types.len() / 4 {
+        if pins_to_update.len() > db.types.len() / 4 {
             self.rebuild_spatial_index(db);
         } else {
             self.update_spatial_index_for_pins(db, &pins_to_update);
@@ -301,7 +301,7 @@ impl ConnectionManager {
     }
 
     /// Process all dirty entities and update connections
-    pub fn update_connections(&mut self, db: &mut DB) -> bool {
+    pub fn update_connections(&mut self, db: &mut Circuit) -> bool {
         if self.dirty_instances.is_empty() {
             return false;
         }
@@ -312,7 +312,7 @@ impl ConnectionManager {
         }
 
         let mut connections_to_keep = HashSet::new();
-        for connection in &db.circuit.connections {
+        for connection in &db.connections {
             let keep_connection = !self.dirty_instances.contains(&connection.a.ins)
                 && !self.dirty_instances.contains(&connection.b.ins);
 
@@ -331,9 +331,9 @@ impl ConnectionManager {
         }
 
         // Check if connections actually changed
-        let connections_changed = db.circuit.connections != connections_to_keep;
+        let connections_changed = db.connections != connections_to_keep;
 
-        db.circuit.connections = connections_to_keep;
+        db.connections = connections_to_keep;
 
         self.dirty_instances.clear();
 

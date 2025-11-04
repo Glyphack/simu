@@ -1,6 +1,6 @@
 use crate::db::{
-    Clock, DB, Gate, GateKind, InstanceId, InstanceKind, Label, LabelId, Lamp, ModuleDefId, Pin,
-    Power, Wire,
+    Circuit, Clock, DB, Gate, GateKind, InstanceId, InstanceKind, Label, LabelId, Lamp,
+    ModuleDefId, Pin, Power, Wire,
 };
 use std::collections::HashSet;
 use std::fmt::Write as _;
@@ -169,7 +169,7 @@ impl Default for App {
     fn default() -> Self {
         let canvas_config = CanvasConfig::default();
         let db = DB::default();
-        let c = ConnectionManager::new(&db, &canvas_config);
+        let c = ConnectionManager::new(&db.circuit, &canvas_config);
         Self {
             db,
             canvas_config,
@@ -304,6 +304,9 @@ impl eframe::App for App {
 }
 
 impl App {
+    pub fn circuit(&self) -> &Circuit {
+        &self.db.circuit
+    }
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         egui_extras::install_image_loaders(&cc.egui_ctx);
         if let Some(storage) = cc.storage {
@@ -442,7 +445,8 @@ impl App {
                     self.hovered = None;
                     self.selected.clear();
                     self.drag = None;
-                    self.connection_manager = ConnectionManager::new(&self.db, &self.canvas_config);
+                    self.connection_manager =
+                        ConnectionManager::new(self.circuit(), &self.canvas_config);
                     self.simulator = Simulator::new();
                 }
             });
@@ -518,7 +522,7 @@ impl App {
             && let InstanceKind::Module(i) = kind
         {
             let mut ids = Vec::new();
-            for (id, m) in &self.db.circuit.modules {
+            for (id, m) in &self.circuit().modules {
                 if m.definition_index == i {
                     ids.push(id);
                 }
@@ -619,7 +623,8 @@ impl App {
 
         self.connection_manager.dirty_instances.remove(&id);
         self.db.circuit.remove(id);
-        self.connection_manager.rebuild_spatial_index(&self.db);
+        self.connection_manager
+            .rebuild_spatial_index(&self.db.circuit);
         self.current_dirty = true;
     }
 
@@ -706,7 +711,10 @@ impl App {
                 if mouse_up && instance_dragging {
                     self.handle_drag_end(mouse);
 
-                    if self.connection_manager.update_connections(&mut self.db) {
+                    if self
+                        .connection_manager
+                        .update_connections(&mut self.db.circuit)
+                    {
                         // self.current_dirty = true;
                     }
                 }
@@ -1410,7 +1418,7 @@ impl App {
                     );
                 }
                 InstanceKind::Wire => {
-                    for pin in self.db.pins_of(id) {
+                    for pin in self.circuit().pins_of(id) {
                         let pos = self.db.pin_position(pin, &self.canvas_config);
                         ui.painter().circle_filled(
                             pos - self.viewport_offset,
@@ -1441,13 +1449,13 @@ impl App {
         writeln!(
             out,
             "counts: gates={}, powers={}, lamps={}, clocks={}, wires={}, modules={}, conns={}, module defs={}",
-            self.db.circuit.gates.len(),
-            self.db.circuit.powers.len(),
-            self.db.circuit.lamps.len(),
-            self.db.circuit.clocks.len(),
-            self.db.circuit.wires.len(),
-            self.db.circuit.modules.len(),
-            self.db.circuit.connections.len(),
+            self.circuit().gates.len(),
+            self.circuit().powers.len(),
+            self.circuit().lamps.len(),
+            self.circuit().clocks.len(),
+            self.circuit().wires.len(),
+            self.circuit().modules.len(),
+            self.circuit().connections.len(),
             self.db.module_definitions.len(),
         )
         .ok();
@@ -1503,7 +1511,7 @@ impl App {
         writeln!(out, "Voltage: {}", self.clock_controller.voltage).ok();
 
         writeln!(out, "\nGates:").ok();
-        for (id, g) in &self.db.circuit.gates {
+        for (id, g) in &self.circuit().gates {
             writeln!(out, "  {}", g.display(&self.db, id)).ok();
             // pins
             if true {
@@ -1524,7 +1532,7 @@ impl App {
         }
 
         writeln!(out, "\nPowers:").ok();
-        for (id, p) in &self.db.circuit.powers {
+        for (id, p) in &self.circuit().powers {
             writeln!(out, "  {}", p.display(&self.db, id)).ok();
             for (i, pin) in p.graphics().pins.iter().enumerate() {
                 let pin_offset = pin.offset;
@@ -1542,7 +1550,7 @@ impl App {
         }
 
         writeln!(out, "\nLamps:").ok();
-        for (id, lamp) in &self.db.circuit.lamps {
+        for (id, lamp) in &self.circuit().lamps {
             writeln!(out, "  {}", lamp.display(&self.db, id)).ok();
             // Show pins
             for (i, pin) in lamp.graphics().pins.iter().enumerate() {
@@ -1561,7 +1569,7 @@ impl App {
         }
 
         writeln!(out, "\nClocks:").ok();
-        for (id, clock) in &self.db.circuit.clocks {
+        for (id, clock) in &self.circuit().clocks {
             writeln!(out, "  {}", clock.display(&self.db, id)).ok();
             // Show pins
             for (i, pin) in clock.graphics().pins.iter().enumerate() {
@@ -1580,17 +1588,17 @@ impl App {
         }
 
         writeln!(out, "\nWires:").ok();
-        for (id, w) in &self.db.circuit.wires {
+        for (id, w) in &self.circuit().wires {
             writeln!(out, "  {}", w.display(&self.db, id)).ok();
             if true {
-                for pin in self.db.pins_of(id) {
+                for pin in self.circuit().pins_of(id) {
                     writeln!(out, "{}", pin.display_alone()).ok();
                 }
             }
         }
 
         writeln!(out, "\nModules:").ok();
-        for (id, m) in &self.db.circuit.modules {
+        for (id, m) in &self.circuit().modules {
             writeln!(out, "  {}", m.display(&self.db, id)).ok();
         }
 
@@ -1600,7 +1608,7 @@ impl App {
         }
 
         writeln!(out, "\nConnections:").ok();
-        for c in &self.db.circuit.connections {
+        for c in &self.circuit().connections {
             writeln!(out, "  {}", c.display(&self.db)).ok();
         }
 
@@ -1760,7 +1768,8 @@ impl App {
                 }
             }
         }
-        self.connection_manager.rebuild_spatial_index(&self.db);
+        self.connection_manager
+            .rebuild_spatial_index(&self.db.circuit);
         self.current_dirty = true;
     }
 
@@ -1772,7 +1781,7 @@ impl App {
 
         match self.db.ty(selected) {
             InstanceKind::Wire => {
-                for pin in self.db.pins_of(selected) {
+                for pin in self.circuit().pins_of(selected) {
                     let pos = self.db.pin_position(pin, &self.canvas_config);
                     ui.painter().circle_filled(
                         pos - self.viewport_offset,

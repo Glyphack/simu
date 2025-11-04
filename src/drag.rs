@@ -236,37 +236,37 @@ impl App {
                 let max = pos2(start.x.max(mouse_pos.x), start.y.max(mouse_pos.y));
                 let rect = Rect::from_min_max(min, max);
                 let mut sel: HashSet<InstanceId> = HashSet::new();
-                for (id, g) in &self.db.circuit.gates {
+                for (id, g) in &self.circuit().gates {
                     let r = Rect::from_center_size(g.pos, self.canvas_config.base_gate_size);
                     if rect.contains_rect(r) {
                         sel.insert(id);
                     }
                 }
-                for (id, p) in &self.db.circuit.powers {
+                for (id, p) in &self.circuit().powers {
                     let r = Rect::from_center_size(p.pos, self.canvas_config.base_gate_size);
                     if rect.contains_rect(r) {
                         sel.insert(id);
                     }
                 }
-                for (id, l) in &self.db.circuit.lamps {
+                for (id, l) in &self.circuit().lamps {
                     let r = Rect::from_center_size(l.pos, self.canvas_config.base_gate_size);
                     if rect.contains_rect(r) {
                         sel.insert(id);
                     }
                 }
-                for (id, c) in &self.db.circuit.clocks {
+                for (id, c) in &self.circuit().clocks {
                     let r = Rect::from_center_size(c.pos, self.canvas_config.base_gate_size);
                     if rect.contains_rect(r) {
                         sel.insert(id);
                     }
                 }
-                for (id, m) in &self.db.circuit.modules {
+                for (id, m) in &self.circuit().modules {
                     let r = Rect::from_center_size(m.pos, self.canvas_config.base_gate_size);
                     if rect.contains_rect(r) {
                         sel.insert(id);
                     }
                 }
-                for (id, w) in &self.db.circuit.wires {
+                for (id, w) in &self.circuit().wires {
                     if rect.contains(w.start) && rect.contains(w.end) {
                         sel.insert(id);
                     }
@@ -296,17 +296,18 @@ impl App {
                 self.current_dirty = true;
             }
         }
-        self.connection_manager.rebuild_spatial_index(&self.db);
+        self.connection_manager
+            .rebuild_spatial_index(&self.db.circuit);
         self.potential_connections.clear();
     }
 
     pub fn compute_potential_connections(&mut self) {
-        let pins_to_update = self.connection_manager.pins_to_update(&self.db);
+        let pins_to_update = self.connection_manager.pins_to_update(&self.db.circuit);
         let mut new_connections = Vec::new();
         for &pin in &pins_to_update {
             new_connections.extend(
                 self.connection_manager
-                    .find_connections_for_pin(&self.db, pin),
+                    .find_connections_for_pin(self.circuit(), pin),
             );
         }
 
