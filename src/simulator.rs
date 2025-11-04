@@ -97,8 +97,8 @@ impl Simulator {
         Self::default()
     }
 
-    fn rebuild_sorted_instances(&self, db: &Circuit) -> Vec<InstanceId> {
-        let mut ids: Vec<InstanceId> = db.types.keys().collect();
+    fn rebuild_sorted_instances(&self, circuit: &Circuit) -> Vec<InstanceId> {
+        let mut ids: Vec<InstanceId> = circuit.types.keys().collect();
         ids.sort_unstable();
         ids
     }
@@ -157,17 +157,17 @@ impl Simulator {
             .collect()
     }
 
-    fn evaluate(&mut self, db: &Circuit, id: InstanceId) {
+    fn evaluate(&mut self, circuit: &Circuit, id: InstanceId) {
         self.evaluated.insert(id);
-        match db.ty(id) {
+        match circuit.ty(id) {
             InstanceKind::Wire => {
-                self.evaluate_wire(db, id);
+                self.evaluate_wire(circuit, id);
             }
             InstanceKind::Gate(_) => {
-                self.evaluate_gate(db, id);
+                self.evaluate_gate(circuit, id);
             }
             InstanceKind::Lamp => {
-                self.evaluate_lamp(db, id);
+                self.evaluate_lamp(circuit, id);
             }
             InstanceKind::Power | InstanceKind::Module(_) => {}
             InstanceKind::Clock => {
@@ -180,14 +180,14 @@ impl Simulator {
         }
     }
 
-    fn evaluate_power(&mut self, db: &Circuit, id: InstanceId) {
-        let p = db.get_power(id);
+    fn evaluate_power(&mut self, circuit: &Circuit, id: InstanceId) {
+        let p = circuit.get_power(id);
         let out = power_output(id);
         let val = if p.on { Value::One } else { Value::Zero };
         self.current.insert(out, val);
     }
 
-    fn evaluate_wire(&mut self, db: &Circuit, id: InstanceId) {
+    fn evaluate_wire(&mut self, circuit: &Circuit, id: InstanceId) {
         let input = {
             let start = wire_start(id);
             let end = wire_end(id);
@@ -204,14 +204,14 @@ impl Simulator {
             wire_start(id)
         };
 
-        let result = self.get_pin_value(db, input);
+        let result = self.get_pin_value(circuit, input);
 
         self.current.insert(input, result);
         self.current.insert(other, result);
     }
 
-    fn evaluate_gate(&mut self, db: &Circuit, id: InstanceId) {
-        let InstanceKind::Gate(kind) = db.ty(id) else {
+    fn evaluate_gate(&mut self, circuit: &Circuit, id: InstanceId) {
+        let InstanceKind::Gate(kind) = circuit.ty(id) else {
             return;
         };
 
@@ -219,8 +219,8 @@ impl Simulator {
         let inp2 = gate_inp2(id);
         let out = gate_output(id);
 
-        let a = self.get_pin_value(db, inp1);
-        let b = self.get_pin_value(db, inp2);
+        let a = self.get_pin_value(circuit, inp1);
+        let b = self.get_pin_value(circuit, inp2);
 
         let out_val = match kind {
             GateKind::And => a.and(b),
@@ -234,14 +234,14 @@ impl Simulator {
         self.current.insert(out, out_val);
     }
 
-    fn evaluate_lamp(&mut self, db: &Circuit, id: InstanceId) {
+    fn evaluate_lamp(&mut self, circuit: &Circuit, id: InstanceId) {
         let inp = lamp_input(id);
-        let val = self.get_pin_value(db, inp);
+        let val = self.get_pin_value(circuit, inp);
         self.current.insert(inp, val);
     }
 
-    fn get_pin_value(&self, db: &Circuit, pin: Pin) -> Value {
-        let mut connected = db.connected_pins(pin);
+    fn get_pin_value(&self, circuit: &Circuit, pin: Pin) -> Value {
+        let mut connected = circuit.connected_pins(pin);
         connected.push(pin);
         connected.sort_unstable();
         connected.dedup();

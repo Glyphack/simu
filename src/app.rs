@@ -307,6 +307,7 @@ impl App {
     pub fn circuit(&self) -> &Circuit {
         &self.db.circuit
     }
+
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         egui_extras::install_image_loaders(&cc.egui_ctx);
         if let Some(storage) = cc.storage {

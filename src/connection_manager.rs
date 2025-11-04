@@ -95,14 +95,14 @@ pub struct ConnectionManager {
 }
 
 impl ConnectionManager {
-    pub fn new(db: &Circuit, canvas_config: &CanvasConfig) -> Self {
+    pub fn new(circuit: &Circuit, canvas_config: &CanvasConfig) -> Self {
         let mut new = Self {
             dirty_instances: Default::default(),
             spatial_index: Default::default(),
             pin_position_cache: Default::default(),
             canvas_config: canvas_config.clone(),
         };
-        new.rebuild_spatial_index(db);
+        new.rebuild_spatial_index(circuit);
         new
     }
 
@@ -119,14 +119,14 @@ impl ConnectionManager {
     }
 
     /// Update the spatial index for all pins in the database
-    pub fn rebuild_spatial_index(&mut self, db: &Circuit) {
+    pub fn rebuild_spatial_index(&mut self, circuit: &Circuit) {
         self.spatial_index.clear();
         self.pin_position_cache.clear();
 
         // Index all pins by their grid cell
-        for (instance_id, _) in &db.types {
-            for pin in db.pins_of(instance_id) {
-                let pos = db.pin_position(pin, &self.canvas_config);
+        for (instance_id, _) in &circuit.types {
+            for pin in circuit.pins_of(instance_id) {
+                let pos = circuit.pin_position(pin, &self.canvas_config);
                 let cell = GridCell::from_pos(pos);
 
                 self.spatial_index.entry(cell).or_default().push(pin);
@@ -137,9 +137,9 @@ impl ConnectionManager {
     }
 
     /// Update spatial index for specific pins that have moved
-    fn update_spatial_index_for_pins(&mut self, db: &Circuit, pins: &[Pin]) {
+    fn update_spatial_index_for_pins(&mut self, circuit: &Circuit, pins: &[Pin]) {
         for &pin in pins {
-            let new_pos = db.pin_position(pin, &self.canvas_config);
+            let new_pos = circuit.pin_position(pin, &self.canvas_config);
 
             // Remove from old cell if position changed
             if let Some(old_pos) = self.pin_position_cache.get(&pin)
@@ -161,10 +161,10 @@ impl ConnectionManager {
     }
 
     /// Find potential connections for a pin using spatial indexing
-    pub fn find_connections_for_pin(&self, db: &Circuit, pin: Pin) -> Vec<Connection> {
+    pub fn find_connections_for_pin(&self, circuit: &Circuit, pin: Pin) -> Vec<Connection> {
         let mut wire_connections = Vec::new();
         let mut non_wire_connections = Vec::new();
-        let pin_pos = db.pin_position(pin, &self.canvas_config);
+        let pin_pos = circuit.pin_position(pin, &self.canvas_config);
         let cell = GridCell::from_pos(pin_pos);
 
         // Check this cell and neighboring cells
@@ -175,7 +175,7 @@ impl ConnectionManager {
                         continue;
                     }
 
-                    let other_pos = db.pin_position(other_pin, &self.canvas_config);
+                    let other_pos = circuit.pin_position(other_pin, &self.canvas_config);
                     let distance = (pin_pos - other_pos).length();
 
                     // First pin will move to attach
@@ -186,7 +186,7 @@ impl ConnectionManager {
                     };
 
                     if distance <= SNAP_THRESHOLD && self.validate_connection(connection) {
-                        let is_wire = matches!(db.ty(other_pin.ins), InstanceKind::Wire);
+                        let is_wire = matches!(circuit.ty(other_pin.ins), InstanceKind::Wire);
                         if is_wire {
                             wire_connections.push(connection);
                         } else {
@@ -198,7 +198,7 @@ impl ConnectionManager {
         }
 
         // For wire pins, prefer non-wire connections over wire connections
-        if matches!(db.ty(pin.ins), InstanceKind::Wire) && !non_wire_connections.is_empty() {
+        if matches!(circuit.ty(pin.ins), InstanceKind::Wire) && !non_wire_connections.is_empty() {
             non_wire_connections
         } else {
             let mut all = non_wire_connections;
@@ -281,21 +281,21 @@ impl ConnectionManager {
         }
     }
 
-    pub fn pins_to_update(&mut self, db: &Circuit) -> Vec<Pin> {
+    pub fn pins_to_update(&mut self, circuit: &Circuit) -> Vec<Pin> {
         let mut pins_to_update = Vec::new();
 
         for &instance_id in &self.dirty_instances {
-            for pin in db.pins_of(instance_id) {
+            for pin in circuit.pins_of(instance_id) {
                 pins_to_update.push(pin);
             }
         }
         pins_to_update.sort_unstable();
         pins_to_update.dedup();
 
-        if pins_to_update.len() > db.types.len() / 4 {
-            self.rebuild_spatial_index(db);
+        if pins_to_update.len() > circuit.types.len() / 4 {
+            self.rebuild_spatial_index(circuit);
         } else {
-            self.update_spatial_index_for_pins(db, &pins_to_update);
+            self.update_spatial_index_for_pins(circuit, &pins_to_update);
         }
         pins_to_update
     }
