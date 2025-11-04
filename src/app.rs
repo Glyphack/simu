@@ -391,7 +391,7 @@ impl App {
 
             let panel_rect = ui
                 .vertical(|ui| {
-                    ui.heading("Logic Gates");
+                    ui.heading("Tools");
                     self.draw_panel(ui);
                 })
                 .response
@@ -437,8 +437,8 @@ impl App {
 
                 ui.add_space(8.0);
 
-                if Button::new("Clear Canvas")
-                    .min_size(vec2(48.0, 30.0))
+                if Button::new("Clear")
+                    .min_size(vec2(PANEL_BUTTON_MAX_HEIGHT, 30.0))
                     .ui(ui)
                     .clicked()
                 {
@@ -457,7 +457,7 @@ impl App {
         let resp = match kind {
             InstanceKind::Gate(gate_kind) => {
                 let s = get_icon(ui, gate_kind.graphics().svg.clone())
-                    .max_height(PANEL_BUTTON_MAX_HEIGHT);
+                    .fit_to_exact_size(vec2(PANEL_BUTTON_MAX_HEIGHT, PANEL_BUTTON_MAX_HEIGHT));
                 ui.add(egui::Button::image(s).sense(Sense::click_and_drag()))
             }
             InstanceKind::Power => {
@@ -471,28 +471,28 @@ impl App {
                     .svg
                     .clone(),
                 )
-                .max_height(PANEL_BUTTON_MAX_HEIGHT);
+                .fit_to_exact_size(vec2(PANEL_BUTTON_MAX_HEIGHT, PANEL_BUTTON_MAX_HEIGHT));
                 ui.add(egui::Button::image(s).sense(Sense::click_and_drag()))
             }
             InstanceKind::Lamp => {
                 let s = get_icon(ui, Lamp { pos: Pos2::ZERO }.graphics().svg.clone())
-                    .max_height(PANEL_BUTTON_MAX_HEIGHT);
+                    .fit_to_exact_size(vec2(PANEL_BUTTON_MAX_HEIGHT, PANEL_BUTTON_MAX_HEIGHT));
                 ui.add(egui::Button::image(s).sense(Sense::click_and_drag()))
             }
             InstanceKind::Clock => {
                 let s = get_icon(ui, Clock { pos: Pos2::ZERO }.graphics().svg.clone())
-                    .max_height(PANEL_BUTTON_MAX_HEIGHT);
+                    .fit_to_exact_size(vec2(PANEL_BUTTON_MAX_HEIGHT, PANEL_BUTTON_MAX_HEIGHT));
                 ui.add(egui::Button::image(s).sense(Sense::click_and_drag()))
             }
             InstanceKind::Wire => ui.add(
                 Button::new("Wire")
                     .sense(Sense::click_and_drag())
-                    .min_size(vec2(78.0, 30.0)),
+                    .min_size(vec2(PANEL_BUTTON_MAX_HEIGHT, 30.0)),
             ),
             InstanceKind::Module(i) => ui.add(
                 Button::new(self.db.get_module_def(i).name.clone())
                     .sense(Sense::click_and_drag())
-                    .min_size(vec2(78.0, 30.0)),
+                    .min_size(vec2(PANEL_BUTTON_MAX_HEIGHT, 30.0)),
             ),
         };
         let mouse_pos_world = self.mouse_pos_world(ui);
@@ -542,7 +542,7 @@ impl App {
         let resp = ui.add(
             Button::new("Label")
                 .sense(Sense::click_and_drag())
-                .min_size(vec2(78.0, 30.0)),
+                .min_size(vec2(PANEL_BUTTON_MAX_HEIGHT, 30.0)),
         );
 
         let mouse = self.mouse_pos_world(ui);
