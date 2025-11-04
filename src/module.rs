@@ -51,6 +51,36 @@ impl ModuleDefinition {
         }
         sb
     }
+
+    /// Returns unconnected pins from the module's circuit.
+    /// Returns a Vec of Pins that are not connected to anything within the circuit.
+    /// The Pin struct contains the kind field (Input or Output) to distinguish pin types.
+    pub fn get_unconnected_pins(&self) -> Vec<crate::db::Pin> {
+        use std::collections::HashSet;
+
+        let mut connected_pins = HashSet::new();
+
+        // Collect all pins that are part of a connection
+        for conn in &self.circuit.connections {
+            connected_pins.insert(conn.a);
+            connected_pins.insert(conn.b);
+        }
+
+        let mut unconnected_pins = Vec::new();
+
+        // Iterate through all instances and their pins
+        for (id, _) in &self.circuit.types {
+            let pins = self.circuit.pins_of(id);
+            for pin in pins {
+                // If pin is not in connected set, it's unconnected
+                if !connected_pins.contains(&pin) {
+                    unconnected_pins.push(pin);
+                }
+            }
+        }
+
+        unconnected_pins
+    }
 }
 
 impl App {
@@ -266,5 +296,192 @@ mod tests {
             result.expect_err("expected error for empty selection"),
             "No components selected"
         );
+    }
+
+    #[test]
+    fn test_get_unconnected_pins_empty_circuit() {
+        // Test that an empty circuit returns no unconnected pins
+        let definition = ModuleDefinition {
+            name: "Empty".to_owned(),
+            circuit: Circuit::default(),
+        };
+
+        let pins = definition.get_unconnected_pins();
+        assert_eq!(pins.len(), 0);
+    }
+
+    #[test]
+    fn test_get_unconnected_pins_single_gate_all_unconnected() {
+        // Test that a single AND gate with no connections returns all pins as unconnected
+        let mut circuit = Circuit::default();
+        let gate = Gate {
+            pos: pos2(100.0, 100.0),
+            kind: GateKind::And,
+        };
+        let gate_id = circuit.new_gate(gate);
+
+        let definition = ModuleDefinition {
+            name: "SingleGate".to_owned(),
+            circuit,
+        };
+
+        let pins = definition.get_unconnected_pins();
+
+        // AND gate has 2 inputs and 1 output
+        assert_eq!(pins.len(), 3);
+
+        let inputs: Vec<_> = pins
+            .iter()
+            .filter(|p| p.kind == crate::assets::PinKind::Input)
+            .collect();
+        let outputs: Vec<_> = pins
+            .iter()
+            .filter(|p| p.kind == crate::assets::PinKind::Output)
+            .collect();
+
+        assert_eq!(inputs.len(), 2);
+        assert_eq!(outputs.len(), 1);
+
+        // Verify they're from the correct instance
+        for pin in &pins {
+            assert_eq!(pin.ins, gate_id);
+        }
+    }
+
+    #[test]
+    fn test_get_unconnected_pins_with_internal_connection() {
+        // Test that internally connected pins are not returned
+        let mut circuit = Circuit::default();
+
+        let gate1 = Gate {
+            pos: pos2(100.0, 100.0),
+            kind: GateKind::And,
+        };
+        let gate1_id = circuit.new_gate(gate1);
+
+        let gate2 = Gate {
+            pos: pos2(200.0, 100.0),
+            kind: GateKind::Or,
+        };
+        let gate2_id = circuit.new_gate(gate2);
+
+        // Connect gate1 output to gate2 input
+        use crate::connection_manager::Connection;
+        use crate::db::Pin;
+        let pin1 = Pin::new(gate1_id, 1, crate::assets::PinKind::Output); // AND output
+        let pin2 = Pin::new(gate2_id, 0, crate::assets::PinKind::Input); // OR input
+        circuit.connections.insert(Connection::new(pin1, pin2));
+
+        let definition = ModuleDefinition {
+            name: "TwoGates".to_owned(),
+            circuit,
+        };
+
+        let pins = definition.get_unconnected_pins();
+
+        // gate1 has 2 inputs (unconnected)
+        // gate1 output is connected to gate2, so not unconnected
+        // gate2 has 2 inputs (1 connected, 1 unconnected)
+        // gate2 has 1 output (unconnected)
+        // Total: 3 inputs + 1 output = 4 unconnected pins
+        assert_eq!(pins.len(), 4);
+
+        let inputs: Vec<_> = pins
+            .iter()
+            .filter(|p| p.kind == crate::assets::PinKind::Input)
+            .collect();
+        let outputs: Vec<_> = pins
+            .iter()
+            .filter(|p| p.kind == crate::assets::PinKind::Output)
+            .collect();
+
+        assert_eq!(inputs.len(), 3); // 2 from gate1 + 1 from gate2
+        assert_eq!(outputs.len(), 1); // 1 from gate2
+    }
+
+    #[test]
+    fn test_get_unconnected_pins_with_power_and_lamp() {
+        // Test with different component types
+        let mut circuit = Circuit::default();
+
+        let power = crate::db::Power {
+            pos: pos2(50.0, 100.0),
+            on: true,
+        };
+        let power_id = circuit.new_power(power);
+
+        let lamp = crate::db::Lamp {
+            pos: pos2(150.0, 100.0),
+        };
+        let lamp_id = circuit.new_lamp(lamp);
+
+        // Connect power to lamp
+        use crate::connection_manager::Connection;
+        use crate::db::Pin;
+        let power_pin = Pin::new(power_id, 0, crate::assets::PinKind::Output);
+        let lamp_pin = Pin::new(lamp_id, 0, crate::assets::PinKind::Input);
+        circuit
+            .connections
+            .insert(Connection::new(power_pin, lamp_pin));
+
+        let definition = ModuleDefinition {
+            name: "PowerLamp".to_owned(),
+            circuit,
+        };
+
+        let pins = definition.get_unconnected_pins();
+
+        // Both pins are connected, so no unconnected pins
+        assert_eq!(pins.len(), 0);
+    }
+
+    #[test]
+    fn test_get_unconnected_pins_mixed_scenario() {
+        // Complex scenario with multiple components and mixed connections
+        let mut circuit = Circuit::default();
+
+        let gate1 = Gate {
+            pos: pos2(100.0, 100.0),
+            kind: GateKind::And,
+        };
+        let gate1_id = circuit.new_gate(gate1);
+
+        let lamp = crate::db::Lamp {
+            pos: pos2(200.0, 100.0),
+        };
+        let lamp_id = circuit.new_lamp(lamp);
+
+        // Connect gate1 output to lamp (lamp input is connected)
+        use crate::connection_manager::Connection;
+        use crate::db::Pin;
+        let gate_output = Pin::new(gate1_id, 1, crate::assets::PinKind::Output);
+        let lamp_input = Pin::new(lamp_id, 0, crate::assets::PinKind::Input);
+        circuit
+            .connections
+            .insert(Connection::new(gate_output, lamp_input));
+
+        let definition = ModuleDefinition {
+            name: "Mixed".to_owned(),
+            circuit,
+        };
+
+        let pins = definition.get_unconnected_pins();
+
+        // gate1 has 2 unconnected inputs
+        // gate1 output is connected
+        // lamp input is connected
+        assert_eq!(pins.len(), 2);
+
+        let inputs: Vec<_> = pins
+            .iter()
+            .filter(|p| p.kind == crate::assets::PinKind::Input)
+            .collect();
+        let outputs: Vec<_> = pins
+            .iter()
+            .filter(|p| p.kind == crate::assets::PinKind::Output)
+            .collect();
+
+        assert_eq!(inputs.len(), 2);
+        assert_eq!(outputs.len(), 0);
     }
 }
