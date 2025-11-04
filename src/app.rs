@@ -782,7 +782,9 @@ impl App {
         for c in &self.potential_connections {
             // Highlight the pin that it's going to attach. The stable pin.
             let pin_to_highlight = c.b;
-            let p = self.db.pin_position(pin_to_highlight, &self.canvas_config);
+            let p = self
+                .circuit()
+                .pin_position(pin_to_highlight, &self.canvas_config);
             ui.painter().circle_filled(
                 p - self.viewport_offset,
                 SNAP_THRESHOLD,
@@ -964,9 +966,8 @@ impl App {
 
         {
             let definition = self.db.get_module(id).definition(&self.db);
-            // TODO: Pins for modules
             let name = definition.name.clone();
-            let pins = [];
+            let pins = definition.get_unconnected_pins();
 
             let rect = Rect::from_center_size(screen_center, self.canvas_config.base_gate_size);
             ui.painter()
@@ -1002,10 +1003,10 @@ impl App {
             // Collect input and output pin indices
             let mut input_indices = vec![];
             let mut output_indices = vec![];
-            for (i, &kind) in pins.iter().enumerate() {
-                match kind {
-                    crate::assets::PinKind::Input => input_indices.push(i),
-                    crate::assets::PinKind::Output => output_indices.push(i),
+            for (i, &pin) in pins.iter().enumerate() {
+                match pin.kind {
+                    PinKind::Input => input_indices.push(i),
+                    PinKind::Output => output_indices.push(i),
                 }
             }
 
@@ -1036,9 +1037,9 @@ impl App {
                     let pin_pos_world = egui::Pos2::new(x, y);
                     let pin_screen_pos = self.adjusted_pos(pin_pos_world);
 
-                    let pin_color = match pins[pin_index] {
-                        crate::assets::PinKind::Input => egui::Color32::LIGHT_RED,
-                        crate::assets::PinKind::Output => egui::Color32::LIGHT_GREEN,
+                    let pin_color = match pins[pin_index].kind {
+                        PinKind::Input => egui::Color32::LIGHT_RED,
+                        PinKind::Output => egui::Color32::LIGHT_GREEN,
                     };
 
                     ui.painter().circle_filled(
@@ -1047,7 +1048,8 @@ impl App {
                         pin_color,
                     );
 
-                    let has_current = self.is_on(Pin::new(id, pin_index as u32, pins[pin_index]));
+                    let has_current =
+                        self.is_on(Pin::new(id, pin_index as u32, pins[pin_index].kind));
 
                     if has_current {
                         ui.painter().circle_stroke(
@@ -1062,7 +1064,7 @@ impl App {
                         Vec2::splat(self.canvas_config.base_pin_size + PIN_HOVER_THRESHOLD),
                     );
                     let pin_resp = ui.allocate_rect(pin_rect, Sense::drag());
-                    let pin = Pin::new(id, pin_index as u32, pins[pin_index]);
+                    let pin = Pin::new(id, pin_index as u32, pins[pin_index].kind);
                     if pin_resp.hovered() {
                         self.hovered = Some(Hover::Pin(pin));
                     }
@@ -1287,7 +1289,8 @@ impl App {
         match hovered {
             Hover::Pin(pin) => {
                 let color = COLOR_HOVER_PIN_TO_WIRE;
-                let pin_pos = self.db.pin_position(pin, &self.canvas_config) - self.viewport_offset;
+                let pin_pos =
+                    self.circuit().pin_position(pin, &self.canvas_config) - self.viewport_offset;
                 ui.painter()
                     .circle_filled(pin_pos, PIN_HOVER_THRESHOLD, color);
             }
@@ -1420,7 +1423,7 @@ impl App {
                 }
                 InstanceKind::Wire => {
                     for pin in self.circuit().pins_of(id) {
-                        let pos = self.db.pin_position(pin, &self.canvas_config);
+                        let pos = self.circuit().pin_position(pin, &self.canvas_config);
                         ui.painter().circle_filled(
                             pos - self.viewport_offset,
                             PIN_MOVE_HINT_D,
@@ -1684,7 +1687,7 @@ impl App {
         match self.db.ty(selected) {
             InstanceKind::Wire => {
                 for pin in self.circuit().pins_of(selected) {
-                    let pos = self.db.pin_position(pin, &self.canvas_config);
+                    let pos = self.circuit().pin_position(pin, &self.canvas_config);
                     ui.painter().circle_filled(
                         pos - self.viewport_offset,
                         PIN_MOVE_HINT_D,

@@ -751,159 +751,6 @@ impl DB {
             .expect("module def not found")
     }
 
-    // Pin helper methods with type checking
-
-    pub fn pins_of(&self, id: InstanceId) -> Vec<Pin> {
-        match self.ty(id) {
-            InstanceKind::Gate(gk) => {
-                let graphics = gk.graphics();
-                graphics
-                    .pins
-                    .iter()
-                    .enumerate()
-                    .map(|(i, p)| Pin::new(id, i as u32, p.kind))
-                    .collect()
-            }
-            InstanceKind::Power => {
-                let graphics = assets::POWER_OFF_GRAPHICS.clone();
-                graphics
-                    .pins
-                    .iter()
-                    .enumerate()
-                    .map(|(i, p)| Pin::new(id, i as u32, p.kind))
-                    .collect()
-            }
-            InstanceKind::Wire => {
-                let wire = self.get_wire(id);
-                vec![
-                    Pin::new(
-                        id,
-                        0,
-                        if wire.input_index == 0 {
-                            assets::PinKind::Input
-                        } else {
-                            assets::PinKind::Output
-                        },
-                    ),
-                    Pin::new(
-                        id,
-                        1,
-                        if wire.input_index == 1 {
-                            assets::PinKind::Input
-                        } else {
-                            assets::PinKind::Output
-                        },
-                    ),
-                ]
-            }
-            InstanceKind::Lamp => {
-                let graphics = assets::LAMP_GRAPHICS.clone();
-                graphics
-                    .pins
-                    .iter()
-                    .enumerate()
-                    .map(|(i, p)| Pin::new(id, i as u32, p.kind))
-                    .collect()
-            }
-            InstanceKind::Clock => {
-                let graphics = assets::CLOCK_GRAPHICS.clone();
-                graphics
-                    .pins
-                    .iter()
-                    .enumerate()
-                    .map(|(i, p)| Pin::new(id, i as u32, p.kind))
-                    .collect()
-            }
-            InstanceKind::Module(_) => {
-                // TODO: Modules
-                vec![]
-            }
-        }
-    }
-
-    pub fn pin_position(&self, pin: Pin, canvas_config: &CanvasConfig) -> Pos2 {
-        match self.ty(pin.ins) {
-            InstanceKind::Gate(gk) => {
-                let g = self.get_gate(pin.ins);
-                let info = gk.graphics().pins[pin.index as usize];
-                g.pos + info.offset
-            }
-            InstanceKind::Power => {
-                let p = self.get_power(pin.ins);
-                let info = p.graphics().pins[pin.index as usize];
-                p.pos + info.offset
-            }
-            InstanceKind::Wire => {
-                let w = self.get_wire(pin.ins);
-                if pin.index == 0 { w.start } else { w.end }
-            }
-            InstanceKind::Lamp => {
-                let l = self.get_lamp(pin.ins);
-                let info = l.graphics().pins[pin.index as usize];
-                l.pos + info.offset
-            }
-            InstanceKind::Clock => {
-                let c = self.get_clock(pin.ins);
-                let info = c.graphics().pins[pin.index as usize];
-                c.pos + info.offset
-            }
-            InstanceKind::Module(_) => {
-                let cc = self.get_module(pin.ins);
-                cc.pos + self.pin_offset(pin, canvas_config)
-            }
-        }
-    }
-
-    pub fn pin_offset(&self, pin: Pin, canvas_config: &CanvasConfig) -> Vec2 {
-        match self.ty(pin.ins) {
-            InstanceKind::Gate(gk) => {
-                let info = gk.graphics().pins[pin.index as usize];
-                info.offset
-            }
-            InstanceKind::Power => {
-                let p = self.get_power(pin.ins);
-                let info = p.graphics().pins[pin.index as usize];
-                info.offset
-            }
-            InstanceKind::Wire => {
-                let w = self.get_wire(pin.ins);
-                let center = w.center();
-                if pin.index == 0 {
-                    center - w.start
-                } else {
-                    center - w.end
-                }
-            }
-            InstanceKind::Lamp => {
-                let l = self.get_lamp(pin.ins);
-                let info = l.graphics().pins[pin.index as usize];
-                info.offset
-            }
-            InstanceKind::Clock => {
-                let c = self.get_clock(pin.ins);
-                let info = c.graphics().pins[pin.index as usize];
-                info.offset
-            }
-            InstanceKind::Module(_) => {
-                // TODO: Modules
-                Vec2::ZERO
-            }
-        }
-    }
-
-    pub fn connected_pins_of_instance(&self, id: InstanceId) -> Vec<Pin> {
-        self.circuit.connected_pins_of_instance(id)
-    }
-
-    // Connected pins to this pin
-    pub fn connected_pins(&self, pin: Pin) -> Vec<Pin> {
-        self.circuit.connected_pins(pin)
-    }
-
-    pub fn connected_insntances(&self, id: InstanceId) -> Vec<InstanceId> {
-        self.circuit.connected_insntances(id)
-    }
-
     pub fn move_nonwires_and_resize_wires(&mut self, ids: &[InstanceId], delta: Vec2) {
         let ids_set: HashSet<InstanceId> = ids.iter().copied().collect();
 
@@ -938,7 +785,7 @@ impl DB {
         }
 
         for id in ids {
-            for pin in self.connected_pins_of_instance(*id) {
+            for pin in self.circuit.connected_pins_of_instance(*id) {
                 if matches!(self.ty(pin.ins), InstanceKind::Wire) && !ids_set.contains(&pin.ins) {
                     // Otherwise resize the wire
                     let w = self.get_wire_mut(pin.ins);
@@ -1002,10 +849,8 @@ impl DB {
             }
         }
 
-        // Get connected instances before we recurse
-        let connected = self.connected_insntances(id);
+        let connected = self.circuit.connected_insntances(id);
 
-        // Process each connected instance
         for connected_id in connected {
             if connected_id == id || visited.contains(&connected_id) {
                 continue;
@@ -1013,18 +858,16 @@ impl DB {
 
             match self.ty(connected_id) {
                 InstanceKind::Wire => {
-                    // For wires, resize them to stay connected
-                    // Find which pin of the wire is connected to our moved instance
-                    let wire_pins = self.pins_of(connected_id);
+                    let wire_pins = self.circuit.pins_of(connected_id);
                     for wire_pin in wire_pins {
-                        // Check if this wire pin is connected to any pin of our moved instance
-                        for moved_pin in self.pins_of(id) {
+                        for moved_pin in self.circuit.pins_of(id) {
                             if self
                                 .circuit
                                 .connections
                                 .contains(&Connection::new(wire_pin, moved_pin))
                             {
-                                let new_pin_pos = self.pin_position(moved_pin, canvas_config);
+                                let new_pin_pos =
+                                    self.circuit.pin_position(moved_pin, canvas_config);
                                 let w = self.get_wire_mut(connected_id);
                                 if wire_pin.index == 0 {
                                     w.start = new_pin_pos;
@@ -1034,7 +877,6 @@ impl DB {
                             }
                         }
                     }
-                    // Mark as visited but don't propagate further (wires are endpoints)
                     visited.insert(connected_id);
                 }
                 InstanceKind::Gate(_)
@@ -1042,7 +884,6 @@ impl DB {
                 | InstanceKind::Lamp
                 | InstanceKind::Clock
                 | InstanceKind::Module(_) => {
-                    // For non-wires, propagate the same delta
                     self.move_instance_and_propagate_recursive(
                         connected_id,
                         delta,
@@ -1077,7 +918,6 @@ pub enum GateKind {
 
 #[derive(serde::Deserialize, serde::Serialize, Copy, Debug, Clone)]
 pub struct Gate {
-    // Center position
     pub pos: Pos2,
     pub kind: GateKind,
 }

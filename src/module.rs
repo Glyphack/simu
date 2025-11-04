@@ -4,8 +4,7 @@ use egui::Pos2;
 
 use crate::{
     app::App,
-    assets::PinGraphics,
-    db::{Circuit, DB, InstanceId, ModuleDefId},
+    db::{Circuit, DB, InstanceId, ModuleDefId, Pin},
 };
 
 #[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
@@ -60,7 +59,6 @@ impl ModuleDefinition {
 
         let mut connected_pins = HashSet::new();
 
-        // Collect all pins that are part of a connection
         for conn in &self.circuit.connections {
             connected_pins.insert(conn.a);
             connected_pins.insert(conn.b);
@@ -68,7 +66,6 @@ impl ModuleDefinition {
 
         let mut unconnected_pins = Vec::new();
 
-        // Iterate through all instances and their pins
         for (id, _) in &self.circuit.types {
             let pins = self.circuit.pins_of(id);
             for pin in pins {
@@ -84,10 +81,6 @@ impl ModuleDefinition {
 }
 
 impl App {
-    pub fn get_pins(&self, pins: Vec<PinGraphics>) -> &'static [PinGraphics] {
-        Box::leak(pins.into_boxed_slice())
-    }
-
     pub fn create_module_definition(
         &mut self,
         name: String,
@@ -140,8 +133,8 @@ impl App {
                 (id_map.get(&conn.a.ins), id_map.get(&conn.b.ins))
             {
                 let new_conn = crate::connection_manager::Connection::new(
-                    crate::db::Pin::new(new_a_id, conn.a.index, conn.a.kind),
-                    crate::db::Pin::new(new_b_id, conn.b.index, conn.b.kind),
+                    Pin::new(new_a_id, conn.a.index, conn.a.kind),
+                    Pin::new(new_b_id, conn.b.index, conn.b.kind),
                 );
                 circuit.connections.insert(new_conn);
             }
