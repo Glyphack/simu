@@ -129,7 +129,7 @@ impl ConnectionManager {
 
         // Index all pins by their grid cell
         for (instance_id, _) in &circuit.types {
-            for pin in circuit.pins_of(instance_id) {
+            for pin in circuit.pins_of(instance_id, db) {
                 let pos = circuit.pin_position(pin, &self.canvas_config, db);
                 let cell = GridCell::from_pos(pos);
 
@@ -295,7 +295,7 @@ impl ConnectionManager {
         let mut pins_to_update = Vec::new();
 
         for &instance_id in &self.dirty_instances {
-            for pin in circuit.pins_of(instance_id) {
+            for pin in circuit.pins_of(instance_id, db) {
                 pins_to_update.push(pin);
             }
         }

@@ -221,12 +221,16 @@ impl Circuit {
         self.labels.keys().collect()
     }
 
-    pub fn display(&self) -> String {
+    pub fn display(&self, db: &DB) -> String {
         let mut out = String::new();
         use std::fmt::Write as _;
+        writeln!(out, "circuit.types:").ok();
+        for (id, _) in &self.types {
+            writeln!(out, "  {}: {:?}", id, self.ty(id)).ok();
+        }
         writeln!(
             out,
-            "counts: gates={}, powers={}, lamps={}, clocks={}, wires={}, modules={}, conns={}",
+            "\ncounts: gates={}, powers={}, lamps={}, clocks={}, wires={}, modules={}, conns={}",
             self.gates.len(),
             self.powers.len(),
             self.lamps.len(),
@@ -321,7 +325,7 @@ impl Circuit {
             writeln!(out, "\nWires:").ok();
             for (id, w) in &self.wires {
                 writeln!(out, "  {}", w.display(id)).ok();
-                for pin in self.pins_of(id) {
+                for pin in self.pins_of(id, db) {
                     writeln!(out, "    {}", pin.display_alone()).ok();
                 }
             }
@@ -381,7 +385,7 @@ impl Circuit {
         out
     }
 
-    pub fn pins_of(&self, id: InstanceId) -> Vec<Pin> {
+    pub fn pins_of(&self, id: InstanceId, db: &DB) -> Vec<Pin> {
         match self.ty(id) {
             InstanceKind::Gate(gk) => {
                 let graphics = gk.graphics();
@@ -442,9 +446,9 @@ impl Circuit {
                     .map(|(i, p)| Pin::new(id, i as u32, p.kind))
                     .collect()
             }
-            InstanceKind::Module(_) => {
-                // TODO: Modules
-                vec![]
+            InstanceKind::Module(def_id) => {
+                let module_def = db.get_module_def(def_id);
+                module_def.get_unconnected_pins(db, id)
             }
         }
     }
@@ -514,7 +518,7 @@ impl Circuit {
             }
             InstanceKind::Module(def_id) => {
                 let module_def = db.get_module_def(def_id);
-                module_def.calculate_pin_offset(pin.index, canvas_config)
+                module_def.calculate_pin_offset(db, &pin, canvas_config)
             }
         }
     }
@@ -584,10 +588,10 @@ impl Circuit {
                 InstanceKind::Wire => {
                     // For wires, resize them to stay connected
                     // Find which pin of the wire is connected to our moved instance
-                    let wire_pins = self.pins_of(connected_id);
+                    let wire_pins = self.pins_of(connected_id, db);
                     for wire_pin in wire_pins {
                         // Check if this wire pin is connected to any pin of our moved instance
-                        for moved_pin in self.pins_of(id) {
+                        for moved_pin in self.pins_of(id, db) {
                             if self
                                 .connections
                                 .contains(&Connection::new(wire_pin, moved_pin))
@@ -747,9 +751,9 @@ impl DB {
 
             match self.circuit.ty(connected_id) {
                 InstanceKind::Wire => {
-                    let wire_pins = self.circuit.pins_of(connected_id);
+                    let wire_pins = self.circuit.pins_of(connected_id, self);
                     for wire_pin in wire_pins {
-                        for moved_pin in self.circuit.pins_of(id) {
+                        for moved_pin in self.circuit.pins_of(id, self) {
                             if self
                                 .circuit
                                 .connections

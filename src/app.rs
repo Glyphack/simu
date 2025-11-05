@@ -961,122 +961,88 @@ impl App {
         };
         let screen_center = pos - self.viewport_offset;
 
-        {
+        let (name, pins, pin_offsets) = {
             let definition = self.db.circuit.get_module(id).definition(&self.db);
             let name = definition.name.clone();
-            let pins = definition.get_unconnected_pins();
+            let pins = definition.get_unconnected_pins(&self.db, id);
 
-            let rect = Rect::from_center_size(screen_center, self.canvas_config.base_gate_size);
-            ui.painter()
-                .rect_filled(rect, CornerRadius::default(), egui::Color32::DARK_BLUE);
+            let pin_offsets: Vec<Vec2> = pins
+                .iter()
+                .map(|pin| definition.calculate_pin_offset(&self.db, pin, &self.canvas_config))
+                .collect();
 
-            ui.painter().text(
-                rect.center(),
-                egui::Align2::CENTER_CENTER,
-                &name,
-                egui::FontId::default(),
-                egui::Color32::WHITE,
-            );
+            (name, pins, pin_offsets)
+        };
 
-            let response = ui.allocate_rect(rect, Sense::click_and_drag());
+        let rect = Rect::from_center_size(screen_center, self.canvas_config.base_gate_size);
+        ui.painter()
+            .rect_filled(rect, CornerRadius::default(), egui::Color32::DARK_BLUE);
 
-            if response.clicked() {
-                self.selected.clear();
-                self.selected.insert(id);
-            }
-            if response.hovered() {
-                self.hovered = Some(Hover::Instance(id));
-            }
-            if response.dragged()
-                && let Some(mouse) = ui.ctx().pointer_interact_pos()
-            {
-                self.selected.clear();
-                self.set_drag(Drag::Canvas(CanvasDrag::Single {
-                    id,
-                    offset: screen_center - mouse,
-                }));
-            }
+        ui.painter().text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            &name,
+            egui::FontId::default(),
+            egui::Color32::WHITE,
+        );
 
-            // Collect input and output pin indices
-            let mut input_indices = vec![];
-            let mut output_indices = vec![];
-            for (i, &pin) in pins.iter().enumerate() {
-                match pin.kind {
-                    PinKind::Input => input_indices.push(i),
-                    PinKind::Output => output_indices.push(i),
-                }
-            }
+        let response = ui.allocate_rect(rect, Sense::click_and_drag());
 
-            // Base size for layout
-            let base_size = self.canvas_config.base_gate_size;
-            let left_x = screen_center.x - base_size.x / 2.0;
-            let right_x = screen_center.x + base_size.x / 2.0;
-            let top_y = screen_center.y - base_size.y / 2.0;
-            let _bottom_y = screen_center.y + base_size.y / 2.0;
+        if response.clicked() {
+            self.selected.clear();
+            self.selected.insert(id);
+        }
+        if response.hovered() {
+            self.hovered = Some(Hover::Instance(id));
+        }
+        if response.dragged()
+            && let Some(mouse) = ui.ctx().pointer_interact_pos()
+        {
+            self.selected.clear();
+            self.set_drag(Drag::Canvas(CanvasDrag::Single {
+                id,
+                offset: screen_center - mouse,
+            }));
+        }
 
-            // Helper function to place pins
-            let mut place_pins = |indices: &Vec<usize>, x: f32| {
-                if indices.is_empty() {
-                    return;
-                }
-                let num = indices.len();
-                let spacing = if num == 1 {
-                    0.0
-                } else {
-                    base_size.y / (num - 1) as f32
-                };
-                for (local_i, &pin_index) in indices.iter().enumerate() {
-                    let y = if num == 1 {
-                        screen_center.y
-                    } else {
-                        top_y + local_i as f32 * spacing
-                    };
-                    let pin_pos_world = egui::Pos2::new(x, y);
-                    let pin_screen_pos = self.adjusted_pos(pin_pos_world);
+        for (pin_index, (&pin, &pin_offset)) in pins.iter().zip(pin_offsets.iter()).enumerate() {
+            let pin_pos_world = pos + pin_offset;
+            let pin_screen_pos = self.adjusted_pos(pin_pos_world);
 
-                    let pin_color = match pins[pin_index].kind {
-                        PinKind::Input => egui::Color32::LIGHT_RED,
-                        PinKind::Output => egui::Color32::LIGHT_GREEN,
-                    };
-
-                    ui.painter().circle_filled(
-                        pin_screen_pos,
-                        self.canvas_config.base_pin_size,
-                        pin_color,
-                    );
-
-                    let has_current =
-                        self.is_on(Pin::new(id, pin_index as u32, pins[pin_index].kind));
-
-                    if has_current {
-                        ui.painter().circle_stroke(
-                            pin_screen_pos,
-                            self.canvas_config.base_pin_size + 3.0,
-                            egui::Stroke::new(2.0, COLOR_PIN_POWERED_OUTLINE),
-                        );
-                    }
-
-                    let pin_rect = Rect::from_center_size(
-                        pin_screen_pos,
-                        Vec2::splat(self.canvas_config.base_pin_size + PIN_HOVER_THRESHOLD),
-                    );
-                    let pin_resp = ui.allocate_rect(pin_rect, Sense::drag());
-                    let pin = Pin::new(id, pin_index as u32, pins[pin_index].kind);
-                    if pin_resp.hovered() {
-                        self.hovered = Some(Hover::Pin(pin));
-                    }
-                    if pin_resp.dragged() {
-                        self.selected.clear();
-                        self.set_drag(Drag::PinToWire {
-                            source_pin: pin,
-                            start_pos: pin_pos_world,
-                        });
-                    }
-                }
+            let pin_color = match pin.kind {
+                PinKind::Input => egui::Color32::LIGHT_RED,
+                PinKind::Output => egui::Color32::LIGHT_GREEN,
             };
 
-            place_pins(&input_indices, left_x);
-            place_pins(&output_indices, right_x);
+            ui.painter()
+                .circle_filled(pin_screen_pos, self.canvas_config.base_pin_size, pin_color);
+
+            let has_current = self.is_on(Pin::new(id, pin_index as u32, pin.kind));
+
+            if has_current {
+                ui.painter().circle_stroke(
+                    pin_screen_pos,
+                    self.canvas_config.base_pin_size + 3.0,
+                    egui::Stroke::new(2.0, COLOR_PIN_POWERED_OUTLINE),
+                );
+            }
+
+            let pin_rect = Rect::from_center_size(
+                pin_screen_pos,
+                Vec2::splat(self.canvas_config.base_pin_size + PIN_HOVER_THRESHOLD),
+            );
+            let pin_resp = ui.allocate_rect(pin_rect, Sense::drag());
+            let pin_obj = Pin::new(id, pin_index as u32, pin.kind);
+            if pin_resp.hovered() {
+                self.hovered = Some(Hover::Pin(pin_obj));
+            }
+            if pin_resp.dragged() {
+                self.selected.clear();
+                self.set_drag(Drag::PinToWire {
+                    source_pin: pin_obj,
+                    start_pos: pin_pos_world,
+                });
+            }
         }
     }
 
@@ -1421,7 +1387,7 @@ impl App {
                     );
                 }
                 InstanceKind::Wire => {
-                    for pin in self.circuit().pins_of(id) {
+                    for pin in self.circuit().pins_of(id, &self.db) {
                         let pos = self
                             .circuit()
                             .pin_position(pin, &self.canvas_config, &self.db);
@@ -1515,17 +1481,17 @@ impl App {
 
         writeln!(out, "\n").ok();
 
-        out.write_str(&self.circuit().display()).ok();
+        out.write_str(&self.circuit().display(&self.db)).ok();
 
         if !self.db.module_definitions.is_empty() {
             writeln!(out, "\nModule Def:").ok();
             let mut iter = self.db.module_definitions.iter();
-            if let Some((_id, first)) = iter.next() {
-                writeln!(out, "  {}", first.display_definition()).ok();
+            if let Some((id, first)) = iter.next() {
+                writeln!(out, "  {}", first.display_definition(&self.db, id)).ok();
             }
-            for (_id, m) in iter {
-                writeln!(out).ok(); // blank line
-                writeln!(out, "  {}", m.display_definition()).ok();
+            for (id, m) in iter {
+                writeln!(out).ok();
+                writeln!(out, "  {}", m.display_definition(&self.db, id)).ok();
             }
         }
 
@@ -1687,7 +1653,7 @@ impl App {
 
         match self.db.circuit.ty(selected) {
             InstanceKind::Wire => {
-                for pin in self.circuit().pins_of(selected) {
+                for pin in self.circuit().pins_of(selected, &self.db) {
                     let pos = self
                         .circuit()
                         .pin_position(pin, &self.canvas_config, &self.db);
