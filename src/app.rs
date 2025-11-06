@@ -501,7 +501,7 @@ impl App {
                 InstanceKind::Wire => self.db.circuit.new_wire(Wire::new_at(pos)),
                 InstanceKind::Lamp => self.db.circuit.new_lamp(Lamp { pos }),
                 InstanceKind::Clock => self.db.circuit.new_clock(Clock { pos }),
-                InstanceKind::Module(c) => self.db.circuit.new_module(Module {
+                InstanceKind::Module(c) => self.db.new_module_with_flattening(Module {
                     pos,
                     definition_index: c,
                 }),
@@ -739,33 +739,45 @@ impl App {
             self.current_dirty = false;
         }
 
-        // Draw world
+        // Draw world - only draw visible instances (not hidden module internals)
         self.hovered = None;
         for id in self.db.circuit.gate_ids() {
-            self.draw_gate(ui, id);
+            if !self.db.circuit.is_hidden(id) {
+                self.draw_gate(ui, id);
+            }
         }
         for id in self.db.circuit.power_ids() {
-            self.draw_power(ui, id);
+            if !self.db.circuit.is_hidden(id) {
+                self.draw_power(ui, id);
+            }
         }
         for id in self.db.circuit.lamp_ids() {
-            self.draw_lamp(ui, id);
+            if !self.db.circuit.is_hidden(id) {
+                self.draw_lamp(ui, id);
+            }
         }
         for id in self.db.circuit.clock_ids() {
-            self.draw_clock(ui, id);
+            if !self.db.circuit.is_hidden(id) {
+                self.draw_clock(ui, id);
+            }
         }
         for id in self.db.circuit.module_ids() {
-            self.draw_module(ui, id);
+            if !self.db.circuit.is_hidden(id) {
+                self.draw_module(ui, id);
+            }
         }
         for id in self.db.circuit.wire_ids() {
-            let has_current = self.is_on(wire_start(id));
-            self.draw_wire(
-                ui,
-                id,
-                self.hovered
-                    .as_ref()
-                    .is_some_and(|f| matches!(f, Hover::Instance(_)) && f.instance() == id),
-                has_current,
-            );
+            if !self.db.circuit.is_hidden(id) {
+                let has_current = self.is_on(wire_start(id));
+                self.draw_wire(
+                    ui,
+                    id,
+                    self.hovered
+                        .as_ref()
+                        .is_some_and(|f| matches!(f, Hover::Instance(_)) && f.instance() == id),
+                    has_current,
+                );
+            }
         }
         // Collect labels to avoid borrowing issues
         for id in self.db.circuit.label_ids() {
@@ -1251,6 +1263,17 @@ impl App {
             return;
         };
 
+        if let Hover::Instance(id) = hovered
+            && self.db.circuit.is_hidden(id)
+        {
+            return;
+        }
+        if let Hover::Pin(pin) = hovered
+            && self.db.circuit.is_hidden(pin.ins)
+        {
+            return;
+        }
+
         match hovered {
             Hover::Pin(pin) => {
                 let color = COLOR_HOVER_PIN_TO_WIRE;
@@ -1335,6 +1358,10 @@ impl App {
 
     fn draw_selection_highlight(&self, ui: &Ui) {
         for &id in &self.selected {
+            if self.db.circuit.is_hidden(id) {
+                continue;
+            }
+
             match self.db.circuit.ty(id) {
                 InstanceKind::Gate(_) => {
                     let g = self.db.circuit.get_gate(id);
@@ -1609,7 +1636,7 @@ impl App {
                     self.selected.insert(id);
                 }
                 ClipBoardItem::Module(def_index, offset) => {
-                    let id = self.db.circuit.new_module(Module {
+                    let id = self.db.new_module_with_flattening(Module {
                         pos: mouse - offset,
                         definition_index: def_index,
                     });

@@ -23,6 +23,7 @@
 - Naming: snake_case functions/variables, PascalCase types, SCREAMING_SNAKE_CASE constants
 - Error handling: Result/Option types preferred over panics
 - Run `./check.sh` after changes to ensure no warnings/errors
+- Use eprintln for adding debug prints to code and tests when debuggin
 
 
 Implement your code in TDD style

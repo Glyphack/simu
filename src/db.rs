@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::hash::Hash;
 
@@ -49,6 +49,15 @@ impl From<u32> for ModuleDefId {
     }
 }
 
+/// Metadata for instances that are hidden from UI (flattened module internals)
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone, Copy)]
+pub struct HiddenMetadata {
+    /// The module instance that owns this hidden instance
+    pub parent_module: InstanceId,
+    /// The module definition ID (for handling definition updates)
+    pub definition_id: ModuleDefId,
+}
+
 #[derive(Default, serde::Deserialize, serde::Serialize, Debug, Clone)]
 pub struct Circuit {
     // Type registry for each instance id
@@ -63,6 +72,11 @@ pub struct Circuit {
     pub connections: HashSet<Connection>,
     // Labels
     pub labels: SlotMap<LabelId, Label>,
+    // Hidden instances (module internals) - not rendered in UI but evaluated in simulation
+    pub hidden_instances: SecondaryMap<InstanceId, HiddenMetadata>,
+    // Pin mappings for modules: external pin -> internal pin
+    #[serde(skip)]
+    pub module_pin_mappings: SecondaryMap<InstanceId, HashMap<Pin, Pin>>,
 }
 impl Circuit {
     pub fn ty(&self, id: InstanceId) -> InstanceKind {
@@ -73,8 +87,21 @@ impl Circuit {
     }
 
     pub fn remove(&mut self, id: InstanceId) {
+        // If this is a module, cascade delete all hidden instances
+        if matches!(self.ty(id), InstanceKind::Module(_)) {
+            let hidden_children = self.get_hidden_instances_for_module(id);
+            for child_id in hidden_children {
+                self.remove_single_instance(child_id);
+            }
+        }
+
+        self.remove_single_instance(id);
+    }
+
+    /// Remove a single instance without cascade deletion
+    fn remove_single_instance(&mut self, id: InstanceId) {
         match self.ty(id) {
-            InstanceKind::Gate(gate_kind) => {
+            InstanceKind::Gate(_) => {
                 self.gates.remove(id);
             }
             InstanceKind::Power => {
@@ -89,12 +116,53 @@ impl Circuit {
             InstanceKind::Clock => {
                 self.clocks.remove(id);
             }
-            InstanceKind::Module(module_def_id) => {
+            InstanceKind::Module(_) => {
                 self.modules.remove(id);
             }
         };
+        self.hidden_instances.remove(id);
         self.types.remove(id);
         self.connections.retain(|c| !c.involves_instance(id));
+    }
+
+    /// Check if an instance is hidden from UI
+    pub fn is_hidden(&self, id: InstanceId) -> bool {
+        self.hidden_instances.contains_key(id)
+    }
+
+    /// Get all instances that are visible in UI (not hidden)
+    pub fn visible_instances(&self) -> impl Iterator<Item = InstanceId> + '_ {
+        self.types.keys().filter(|id| !self.is_hidden(*id))
+    }
+
+    /// Get all hidden instances that belong to a specific module
+    pub fn get_hidden_instances_for_module(&self, module_id: InstanceId) -> Vec<InstanceId> {
+        self.hidden_instances
+            .iter()
+            .filter_map(|(id, metadata)| {
+                if metadata.parent_module == module_id {
+                    Some(id)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// Mark an instance as hidden (internal to a module)
+    pub fn mark_as_hidden(
+        &mut self,
+        id: InstanceId,
+        parent_module: InstanceId,
+        definition_id: ModuleDefId,
+    ) {
+        self.hidden_instances.insert(
+            id,
+            HiddenMetadata {
+                parent_module,
+                definition_id,
+            },
+        );
     }
 
     pub fn new_gate(&mut self, g: Gate) -> InstanceId {
@@ -642,6 +710,41 @@ impl DB {
             .expect("module def not found")
     }
 
+    /// Create a new module instance and automatically flatten its internal components
+    /// Creates connections between module boundary pins and internal component pins
+    ///
+    /// Note: This requires temporarily cloning the definition to avoid borrow checker issues.
+    /// In the future, we could optimize this with better data structure design.
+    pub fn new_module_with_flattening(&mut self, module: crate::module::Module) -> InstanceId {
+        let definition_id = module.definition_index;
+
+        // Create the module instance first
+        let module_id = self.circuit.new_module(module);
+
+        // Clone the definition to avoid borrow conflicts
+        let definition = self.get_module_def(definition_id).clone();
+
+        // Clone module_definitions to avoid borrow conflict
+        let module_defs = self.module_definitions.clone();
+
+        // Create a temporary DB with only the definitions we need
+        let temp_db = Self {
+            circuit: Circuit::default(), // Not used
+            module_definitions: module_defs,
+        };
+
+        // Flatten it and store the pin mapping
+        let pin_mapping =
+            definition.flatten_into_circuit(&mut self.circuit, module_id, definition_id, &temp_db);
+
+        // Store the pin mapping
+        self.circuit
+            .module_pin_mappings
+            .insert(module_id, pin_mapping);
+
+        module_id
+    }
+
     pub fn move_nonwires_and_resize_wires(&mut self, ids: &[InstanceId], delta: Vec2) {
         let ids_set: HashSet<InstanceId> = ids.iter().copied().collect();
 
@@ -1020,5 +1123,210 @@ impl Pin {
 
     pub fn new(ins: InstanceId, index: u32, kind: PinKind) -> Self {
         Self { ins, index, kind }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui::Pos2;
+
+    #[test]
+    fn test_hidden_instance_tracking() {
+        let mut circuit = Circuit::default();
+
+        // Create a gate
+        let gate = Gate {
+            pos: Pos2::ZERO,
+            kind: GateKind::And,
+        };
+        let gate_id = circuit.new_gate(gate);
+
+        // Initially, gate should be visible
+        assert!(!circuit.is_hidden(gate_id));
+        assert_eq!(circuit.visible_instances().count(), 1);
+
+        // Mark gate as hidden (pretend it belongs to a module)
+        let fake_module_id = InstanceId::from(999);
+        let fake_def_id = ModuleDefId::from(1);
+        circuit.mark_as_hidden(gate_id, fake_module_id, fake_def_id);
+
+        // Now gate should be hidden
+        assert!(circuit.is_hidden(gate_id));
+        assert_eq!(circuit.visible_instances().count(), 0);
+
+        // Hidden metadata should be accessible
+        let hidden = circuit.get_hidden_instances_for_module(fake_module_id);
+        assert_eq!(hidden.len(), 1);
+        assert_eq!(hidden[0], gate_id);
+    }
+
+    #[test]
+    fn test_cascade_deletion() {
+        let mut circuit = Circuit::default();
+
+        // Create a module instance
+        let module = Module {
+            pos: Pos2::ZERO,
+            definition_index: ModuleDefId::from(1),
+        };
+        let module_id = circuit.new_module(module);
+
+        // Create some "internal" gates and mark them as hidden
+        let gate1 = Gate {
+            pos: Pos2::ZERO,
+            kind: GateKind::And,
+        };
+        let gate1_id = circuit.new_gate(gate1);
+        circuit.mark_as_hidden(gate1_id, module_id, ModuleDefId::from(1));
+
+        let gate2 = Gate {
+            pos: Pos2::ZERO,
+            kind: GateKind::Or,
+        };
+        let gate2_id = circuit.new_gate(gate2);
+        circuit.mark_as_hidden(gate2_id, module_id, ModuleDefId::from(1));
+
+        // Should have 3 total instances (1 module + 2 gates)
+        assert_eq!(circuit.types.len(), 3);
+        // But only 1 visible (the module)
+        assert_eq!(circuit.visible_instances().count(), 1);
+
+        // Remove the module - should cascade delete hidden instances
+        circuit.remove(module_id);
+
+        // All instances should be gone
+        assert_eq!(circuit.types.len(), 0);
+        assert_eq!(circuit.visible_instances().count(), 0);
+    }
+
+    #[test]
+    fn test_visible_instances_filter() {
+        let mut circuit = Circuit::default();
+
+        // Create mix of visible and hidden instances
+        let gate1 = Gate {
+            pos: Pos2::ZERO,
+            kind: GateKind::And,
+        };
+        let gate1_id = circuit.new_gate(gate1);
+
+        let gate2 = Gate {
+            pos: Pos2::ZERO,
+            kind: GateKind::Or,
+        };
+        let gate2_id = circuit.new_gate(gate2);
+
+        let power = Power {
+            pos: Pos2::ZERO,
+            on: true,
+        };
+        let power_id = circuit.new_power(power);
+
+        // Mark gate2 as hidden
+        let fake_module_id = InstanceId::from(999);
+        circuit.mark_as_hidden(gate2_id, fake_module_id, ModuleDefId::from(1));
+
+        // Should have 3 total, 2 visible
+        assert_eq!(circuit.types.len(), 3);
+        let visible: Vec<_> = circuit.visible_instances().collect();
+        assert_eq!(visible.len(), 2);
+        assert!(visible.contains(&gate1_id));
+        assert!(visible.contains(&power_id));
+        assert!(!visible.contains(&gate2_id));
+    }
+
+    #[test]
+    fn test_get_hidden_instances_for_module() {
+        let mut circuit = Circuit::default();
+
+        // Create two modules
+        let module1 = Module {
+            pos: Pos2::ZERO,
+            definition_index: ModuleDefId::from(1),
+        };
+        let module1_id = circuit.new_module(module1);
+
+        let module2 = Module {
+            pos: Pos2::ZERO,
+            definition_index: ModuleDefId::from(2),
+        };
+        let module2_id = circuit.new_module(module2);
+
+        // Create gates belonging to different modules
+        let gate1 = Gate {
+            pos: Pos2::ZERO,
+            kind: GateKind::And,
+        };
+        let gate1_id = circuit.new_gate(gate1);
+        circuit.mark_as_hidden(gate1_id, module1_id, ModuleDefId::from(1));
+
+        let gate2 = Gate {
+            pos: Pos2::ZERO,
+            kind: GateKind::Or,
+        };
+        let gate2_id = circuit.new_gate(gate2);
+        circuit.mark_as_hidden(gate2_id, module1_id, ModuleDefId::from(1));
+
+        let gate3 = Gate {
+            pos: Pos2::ZERO,
+            kind: GateKind::Xor,
+        };
+        let gate3_id = circuit.new_gate(gate3);
+        circuit.mark_as_hidden(gate3_id, module2_id, ModuleDefId::from(2));
+
+        // Check each module's hidden instances
+        let module1_hidden = circuit.get_hidden_instances_for_module(module1_id);
+        assert_eq!(module1_hidden.len(), 2);
+        assert!(module1_hidden.contains(&gate1_id));
+        assert!(module1_hidden.contains(&gate2_id));
+
+        let module2_hidden = circuit.get_hidden_instances_for_module(module2_id);
+        assert_eq!(module2_hidden.len(), 1);
+        assert!(module2_hidden.contains(&gate3_id));
+    }
+
+    #[test]
+    fn test_new_module_with_automatic_flattening() {
+        // Create a module definition
+        let mut definition_circuit = Circuit::default();
+        let gate = Gate {
+            pos: Pos2::ZERO,
+            kind: GateKind::And,
+        };
+        let _gate_id = definition_circuit.new_gate(gate);
+
+        let module_def = crate::module::ModuleDefinition {
+            name: "TestModule".to_owned(),
+            circuit: definition_circuit,
+        };
+
+        // Create DB and add definition
+        let mut db = DB::default();
+        let def_id = db.module_definitions.insert(module_def);
+
+        // Create module using new_module_with_flattening
+        let module = crate::module::Module {
+            pos: Pos2::ZERO,
+            definition_index: def_id,
+        };
+        let module_id = db.new_module_with_flattening(module);
+
+        // Check that flattening happened automatically
+        let hidden_instances = db.circuit.get_hidden_instances_for_module(module_id);
+        assert_eq!(
+            hidden_instances.len(),
+            1,
+            "Should have auto-flattened 1 instance"
+        );
+
+        // Pin mapping should be stored
+        assert!(db.circuit.module_pin_mappings.contains_key(module_id));
+        let pin_map = db
+            .circuit
+            .module_pin_mappings
+            .get(module_id)
+            .expect("module pin mappings should exist");
+        assert_eq!(pin_map.len(), 3, "AND gate has 3 pins");
     }
 }
