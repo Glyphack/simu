@@ -75,39 +75,64 @@ impl App {
             }
             Some(Drag::Canvas(canvas_drag)) => match canvas_drag {
                 CanvasDrag::Single { id, offset } => {
-                    let new_pos = mouse + offset;
-                    let moved = match self.db.circuit.ty(id) {
-                        InstanceKind::Gate(_)
-                        | InstanceKind::Power
-                        | InstanceKind::Lamp
-                        | InstanceKind::Module(_)
-                        | InstanceKind::Clock => {
-                            let current_pos = match self.db.circuit.ty(id) {
-                                InstanceKind::Gate(_) => self.db.circuit.get_gate(id).pos,
-                                InstanceKind::Power => self.db.circuit.get_power(id).pos,
-                                InstanceKind::Lamp => self.db.circuit.get_lamp(id).pos,
-                                InstanceKind::Clock => self.db.circuit.get_clock(id).pos,
-                                InstanceKind::Module(_) => self.db.circuit.get_module(id).pos,
-                                InstanceKind::Wire => unreachable!(),
-                            };
-                            let desired = new_pos - current_pos;
-                            let ids = [id];
-                            self.db.move_nonwires_and_resize_wires(&ids, desired);
-                            desired.length_sq() > 0.0
-                        }
-                        InstanceKind::Wire => {
-                            let w = self.db.circuit.get_wire_mut(id);
-                            let center =
-                                pos2((w.start.x + w.end.x) * 0.5, (w.start.y + w.end.y) * 0.5);
-                            let desired = new_pos - center;
-                            w.start += desired;
-                            w.end += desired;
-                            desired.length_sq() > 0.0
-                        }
-                    };
+                    // If the dragged item is part of a selection, move all selected items
+                    if self.selected.contains(&id) && self.selected.len() > 1 {
+                        let new_pos = mouse + offset;
+                        let current_pos = match self.db.circuit.ty(id) {
+                            InstanceKind::Gate(_) => self.db.circuit.get_gate(id).pos,
+                            InstanceKind::Power => self.db.circuit.get_power(id).pos,
+                            InstanceKind::Lamp => self.db.circuit.get_lamp(id).pos,
+                            InstanceKind::Clock => self.db.circuit.get_clock(id).pos,
+                            InstanceKind::Module(_) => self.db.circuit.get_module(id).pos,
+                            InstanceKind::Wire => {
+                                let w = self.db.circuit.get_wire(id);
+                                pos2((w.start.x + w.end.x) * 0.5, (w.start.y + w.end.y) * 0.5)
+                            }
+                        };
+                        let desired = new_pos - current_pos;
 
-                    if moved {
-                        self.connection_manager.mark_instance_dirty(id);
+                        let group: Vec<InstanceId> = self.selected.iter().copied().collect();
+                        self.db.move_nonwires_and_resize_wires(&group, desired);
+
+                        if desired.length_sq() > 0.0 {
+                            self.connection_manager.mark_instances_dirty(&group);
+                        }
+                    } else {
+                        // Move single item only
+                        let new_pos = mouse + offset;
+                        let moved = match self.db.circuit.ty(id) {
+                            InstanceKind::Gate(_)
+                            | InstanceKind::Power
+                            | InstanceKind::Lamp
+                            | InstanceKind::Module(_)
+                            | InstanceKind::Clock => {
+                                let current_pos = match self.db.circuit.ty(id) {
+                                    InstanceKind::Gate(_) => self.db.circuit.get_gate(id).pos,
+                                    InstanceKind::Power => self.db.circuit.get_power(id).pos,
+                                    InstanceKind::Lamp => self.db.circuit.get_lamp(id).pos,
+                                    InstanceKind::Clock => self.db.circuit.get_clock(id).pos,
+                                    InstanceKind::Module(_) => self.db.circuit.get_module(id).pos,
+                                    InstanceKind::Wire => unreachable!(),
+                                };
+                                let desired = new_pos - current_pos;
+                                let ids = [id];
+                                self.db.move_nonwires_and_resize_wires(&ids, desired);
+                                desired.length_sq() > 0.0
+                            }
+                            InstanceKind::Wire => {
+                                let w = self.db.circuit.get_wire_mut(id);
+                                let center =
+                                    pos2((w.start.x + w.end.x) * 0.5, (w.start.y + w.end.y) * 0.5);
+                                let desired = new_pos - center;
+                                w.start += desired;
+                                w.end += desired;
+                                desired.length_sq() > 0.0
+                            }
+                        };
+
+                        if moved {
+                            self.connection_manager.mark_instance_dirty(id);
+                        }
                     }
                 }
                 CanvasDrag::Selected { start } => {
@@ -222,7 +247,13 @@ impl App {
         match drag {
             Drag::Canvas(canvas_drag) => match canvas_drag {
                 CanvasDrag::Single { id, offset: _ } => {
-                    self.connection_manager.mark_instance_dirty(id);
+                    // If the item was part of a selection, mark all selected items as dirty
+                    if self.selected.contains(&id) && self.selected.len() > 1 {
+                        let selected: Vec<InstanceId> = self.selected.iter().copied().collect();
+                        self.connection_manager.mark_instances_dirty(&selected);
+                    } else {
+                        self.connection_manager.mark_instance_dirty(id);
+                    }
                     self.current_dirty = true;
                 }
                 CanvasDrag::Selected { start: _ } => {

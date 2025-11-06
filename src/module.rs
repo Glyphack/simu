@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use egui::{Pos2, Vec2};
 
@@ -53,31 +53,50 @@ impl ModuleDefinition {
         sb
     }
 
-    /// Returns unconnected pins from the module's circuit.
-    /// Returns a Vec of Pins that are not connected to anything within the circuit.
-    /// The Pin struct contains the kind field (Input or Output) to distinguish pin types.
-    pub fn get_unconnected_pins(&self, db: &DB, module_id: InstanceId) -> Vec<crate::db::Pin> {
-        use std::collections::HashSet;
+    /// Mapping of external pin to internal pin
+    pub fn pins_mapping(&self, db: &DB, id: InstanceId) -> HashMap<Pin, Pin> {
+        let mut m = HashMap::new();
 
-        let mut connected_pins = HashSet::new();
-
-        for conn in &self.circuit.connections {
-            connected_pins.insert(conn.a);
-            connected_pins.insert(conn.b);
+        for (last_pin_index, pin) in self
+            .get_unconnected_internal_pins(db)
+            .into_iter()
+            .enumerate()
+        {
+            let mut external_pin = pin;
+            external_pin.ins = id;
+            external_pin.index = last_pin_index as u32;
+            m.insert(external_pin, pin);
         }
 
+        m
+    }
+
+    pub fn get_unconnected_internal_pins(&self, db: &DB) -> Vec<Pin> {
         let mut unconnected_pins = Vec::new();
 
         for (id, _) in &self.circuit.types {
             let pins = self.circuit.pins_of(id, db);
-            for mut pin in pins {
-                if !connected_pins.contains(&pin) {
-                    pin.ins = module_id;
+            for pin in pins {
+                if self.circuit.connected_pins(pin).is_empty() {
                     unconnected_pins.push(pin);
                 }
             }
         }
 
+        unconnected_pins
+    }
+
+    pub fn get_unconnected_pins(&self, db: &DB, module_id: InstanceId) -> Vec<Pin> {
+        let mut unconnected_pins = Vec::new();
+        for (last_pin_index, mut pin) in self
+            .get_unconnected_internal_pins(db)
+            .into_iter()
+            .enumerate()
+        {
+            pin.ins = module_id;
+            pin.index = last_pin_index as u32;
+            unconnected_pins.push(pin);
+        }
         unconnected_pins
     }
 
@@ -104,9 +123,6 @@ impl ModuleDefinition {
         let top_y = -base_size.y / 2.0;
 
         let pin_index_usize = pin.index as usize;
-        if pin_index_usize >= pins.len() {
-            return Vec2::ZERO;
-        }
 
         let pin = &pins[pin_index_usize];
         let (x, local_index, indices) = match pin.kind {
@@ -115,7 +131,7 @@ impl ModuleDefinition {
                 input_indices
                     .iter()
                     .position(|&i| i == pin_index_usize)
-                    .unwrap_or(0),
+                    .expect("pin must exist"),
                 &input_indices,
             ),
             PinKind::Output => (
@@ -123,14 +139,14 @@ impl ModuleDefinition {
                 output_indices
                     .iter()
                     .position(|&i| i == pin_index_usize)
-                    .unwrap_or(0),
+                    .expect("pin must exist"),
                 &output_indices,
             ),
         };
 
         let num = indices.len();
         let y = if num == 1 {
-            0.0 // Centered
+            0.0
         } else {
             let spacing = base_size.y / (num - 1) as f32;
             top_y + local_index as f32 * spacing

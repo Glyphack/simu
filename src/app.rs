@@ -244,6 +244,7 @@ impl eframe::App for App {
                     self.clock_controller.state = ClockState::Stopped;
                 }
                 if ui.button("⏭ Step").clicked() {
+                    self.clock_controller.state = ClockState::Stopped;
                     self.clock_controller.voltage = !self.clock_controller.voltage;
                     self.current_dirty = true;
                 }
@@ -288,13 +289,7 @@ impl eframe::App for App {
 
         if should_tick {
             self.clock_controller.voltage = !self.clock_controller.voltage;
-            self.simulator.clocks_on = self.clock_controller.voltage;
             self.current_dirty = true;
-        }
-
-        // Request continuous repaint if clock is running
-        if self.clock_controller.state == ClockState::Running {
-            ctx.request_repaint();
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -713,7 +708,7 @@ impl App {
                     self.handle_drag_end(mouse);
 
                     if self.connection_manager.update_connections(&mut self.db) {
-                        // self.current_dirty = true;
+                        self.current_dirty = true;
                     }
                 }
             }
@@ -739,7 +734,8 @@ impl App {
         }
 
         if self.current_dirty {
-            self.simulator.compute(&self.db.circuit);
+            self.simulator.clocks_on = self.clock_controller.voltage;
+            self.simulator.compute(&self.db, &self.db.circuit);
             self.current_dirty = false;
         }
 
@@ -857,7 +853,10 @@ impl App {
         if response.dragged()
             && let Some(mouse) = ui.ctx().pointer_interact_pos()
         {
-            self.selected.clear();
+            // Only clear selection if dragging an unselected item
+            if !self.selected.contains(&id) {
+                self.selected.clear();
+            }
             self.set_drag(Drag::Canvas(CanvasDrag::Single {
                 id,
                 offset: pos - mouse,
@@ -981,7 +980,7 @@ impl App {
         ui.painter().text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
-            &name,
+            name,
             egui::FontId::default(),
             egui::Color32::WHITE,
         );
@@ -998,7 +997,10 @@ impl App {
         if response.dragged()
             && let Some(mouse) = ui.ctx().pointer_interact_pos()
         {
-            self.selected.clear();
+            // Only clear selection if dragging an unselected item
+            if !self.selected.contains(&id) {
+                self.selected.clear();
+            }
             self.set_drag(Drag::Canvas(CanvasDrag::Single {
                 id,
                 offset: screen_center - mouse,
@@ -1458,12 +1460,6 @@ impl App {
             out,
             "Tick interval: {:.2}s",
             self.clock_controller.tick_interval
-        )
-        .ok();
-        writeln!(
-            out,
-            "Tick accumulator: {:.3}s",
-            self.clock_controller.tick_accumulator
         )
         .ok();
         writeln!(out, "Voltage: {}", self.clock_controller.voltage).ok();
