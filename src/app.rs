@@ -238,7 +238,6 @@ impl eframe::App for App {
                 });
                 ui.add_space(16.0);
 
-                // Clock controls
                 ui.label("Clock:");
                 if ui.button("⏹ Stop").clicked() {
                     self.clock_controller.state = ClockState::Stopped;
@@ -295,6 +294,10 @@ impl eframe::App for App {
         egui::CentralPanel::default().show(ctx, |ui| {
             self.draw_main(ui);
         });
+
+        if self.clock_controller.state == ClockState::Running {
+            ctx.request_repaint();
+        }
     }
 }
 
