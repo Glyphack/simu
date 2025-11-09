@@ -35,7 +35,6 @@ pub enum Drag {
     },
     PinToWire {
         source_pin: Pin,
-        start_pos: Pos2,
     },
     BranchWire {
         original_wire_id: InstanceId,
@@ -173,14 +172,15 @@ impl App {
                     self.connection_manager.mark_instance_dirty(id);
                 }
             }
-            Some(Drag::PinToWire {
-                source_pin: _,
-                start_pos,
-            }) => {
-                let drag_distance = (mouse - start_pos).length();
+            // TODO: There is an issue with non zero viewport_offset. It causes the wire to start
+            // from wrong place and distance to calculate wrong
+            Some(Drag::PinToWire { source_pin }) => {
+                let start = self.adjusted_pos(source_pin.pos(&self.db, &self.canvas_config));
+                let end_abs = mouse;
+                let drag_distance = start.distance(end_abs);
 
                 if drag_distance >= MIN_WIRE_SIZE {
-                    let wire = Wire::new(start_pos, mouse);
+                    let wire = Wire::new(start, mouse);
                     let wire_id = self.db.circuit.new_wire(wire);
 
                     self.drag = Some(Drag::Resize {
@@ -189,14 +189,9 @@ impl App {
                     });
 
                     self.connection_manager.mark_instance_dirty(wire_id);
-                } else if drag_distance > 2.0 {
-                    ui.painter().line_segment(
-                        [
-                            start_pos - self.viewport_offset,
-                            mouse - self.viewport_offset,
-                        ],
-                        Stroke::new(2.0, COLOR_HOVER_PIN_TO_WIRE),
-                    );
+                } else {
+                    ui.painter()
+                        .line_segment([start, mouse], Stroke::new(2.0, COLOR_HOVER_PIN_TO_WIRE));
                 }
             }
             Some(Drag::BranchWire {
@@ -308,11 +303,7 @@ impl App {
                 self.connection_manager.mark_instance_dirty(id);
                 self.current_dirty = true;
             }
-            Drag::PinToWire {
-                source_pin: _,
-                start_pos: _,
-            }
-            | Drag::Label { id: _, offset: _ } => {
+            Drag::PinToWire { source_pin: _ } | Drag::Label { id: _, offset: _ } => {
                 // Wire was never created if drag distance was too short
                 // Label position already updated during dragging
                 // Nothing to clean up

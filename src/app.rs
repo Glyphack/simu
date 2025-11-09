@@ -116,6 +116,12 @@ impl Default for ClockController {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct ViewModule {
+    pub module_id: InstanceId,
+    pub viewport_offset: Vec2,
+}
+
 #[derive(serde::Deserialize, serde::Serialize)]
 pub struct App {
     pub canvas_config: CanvasConfig,
@@ -163,6 +169,8 @@ pub struct App {
     // Clock controller for managing clock ticking
     #[serde(skip, default = "ClockController::default")]
     pub clock_controller: ClockController,
+    #[serde(skip)]
+    pub viewing_module: Option<ViewModule>,
 }
 
 impl Default for App {
@@ -192,6 +200,7 @@ impl Default for App {
             module_creation_error: None,
             simulator: Simulator::default(),
             clock_controller: ClockController::default(),
+            viewing_module: None,
         }
     }
 }
@@ -377,6 +386,30 @@ impl App {
                     });
                 });
         }
+
+        if let Some(mut view_module) = self.viewing_module.take() {
+            let module_id = view_module.module_id;
+            let mut is_open = true;
+
+            let module_name = if let InstanceKind::Module(def_id) = self.circuit().ty(module_id) {
+                self.db.get_module_def(def_id).name.clone()
+            } else {
+                "Module View".to_owned()
+            };
+
+            egui::Window::new(format!("Module View: {module_name}"))
+                .open(&mut is_open)
+                .resizable(true)
+                .default_size([800.0, 600.0])
+                .show(ui.ctx(), |ui| {
+                    self.draw_module_view(ui, module_id, &mut view_module);
+                });
+
+            if is_open {
+                self.viewing_module = Some(view_module);
+            }
+        }
+
         ui.with_layout(Layout::left_to_right(Align::Min), |ui| {
             self.canvas_config = CanvasConfig::default();
             if self.show_debug {
@@ -447,6 +480,7 @@ impl App {
                     self.connection_manager =
                         ConnectionManager::new(self.circuit(), &self.canvas_config, &self.db);
                     self.simulator = Simulator::new();
+                    self.viewport_offset = Vec2::ZERO;
                 }
             });
     }
@@ -636,6 +670,56 @@ impl App {
         self.drag.take();
     }
 
+    fn draw_module_view(
+        &mut self,
+        ui: &mut Ui,
+        module_id: InstanceId,
+        view_module: &mut ViewModule,
+    ) {
+        // Get the module definition
+        let InstanceKind::Module(module_def_id) = self.circuit().ty(module_id) else {
+            return; // Not a module, shouldn't happen
+        };
+
+        // Allocate space for the canvas
+        let (resp, _painter) = ui.allocate_painter(ui.available_size(), Sense::click_and_drag());
+        let canvas_rect = resp.rect;
+
+        // Set clip rectangle to prevent drawing outside bounds
+        ui.set_clip_rect(canvas_rect);
+
+        // Draw grid with module's viewport offset
+        Self::draw_grid(ui, canvas_rect, view_module.viewport_offset);
+
+        // Handle panning with right-click drag
+        let right_down = ui.input(|i| i.pointer.secondary_down());
+        let right_released = ui.input(|i| i.pointer.secondary_released());
+        let mouse_is_visible = resp.contains_pointer();
+
+        // Simple panning for module view
+        if right_down && mouse_is_visible {
+            view_module.viewport_offset += ui.input(|i| i.pointer.delta());
+        }
+
+        // Temporarily swap viewport to render with module's viewport
+        let original_viewport = self.viewport_offset;
+        self.viewport_offset = view_module.viewport_offset;
+
+        // Get instances that belong to this module
+        let module_instances = self.db.get_instances_for_module(module_id);
+        let module_instance_set: std::collections::HashSet<_> =
+            module_instances.into_iter().collect();
+
+        // Draw only the instances that belong to this module
+        // Save original hovered state and set to None to prevent interactions
+        let original_hovered = self.hovered.take();
+        self.draw_circuit_components(ui, |id| module_instance_set.contains(&id));
+        self.hovered = original_hovered;
+
+        // Restore original viewport
+        self.viewport_offset = original_viewport;
+    }
+
     fn draw_canvas(&mut self, ui: &mut Ui) {
         let (resp, _painter) = ui.allocate_painter(ui.available_size(), Sense::click_and_drag());
         let canvas_rect = resp.rect;
@@ -734,6 +818,17 @@ impl App {
                 p.on = !p.on;
                 self.current_dirty = true;
             }
+
+            // Right-click context menu for modules
+            if right_clicked
+                && let Some(id) = self.hovered.as_ref().map(|i| i.instance())
+                && matches!(self.circuit().ty(id), InstanceKind::Module(_))
+            {
+                self.viewing_module = Some(ViewModule {
+                    module_id: id,
+                    viewport_offset: Vec2::ZERO,
+                });
+            }
         }
 
         if self.current_dirty {
@@ -742,50 +837,13 @@ impl App {
             self.current_dirty = false;
         }
 
-        // Draw world - only draw visible instances (not hidden module internals)
         self.hovered = None;
-        for id in self.db.circuit.gate_ids() {
-            if !self.db.is_hidden(id) {
-                self.draw_gate(ui, id);
-            }
-        }
-        for id in self.db.circuit.power_ids() {
-            if !self.db.is_hidden(id) {
-                self.draw_power(ui, id);
-            }
-        }
-        for id in self.db.circuit.lamp_ids() {
-            if !self.db.is_hidden(id) {
-                self.draw_lamp(ui, id);
-            }
-        }
-        for id in self.db.circuit.clock_ids() {
-            if !self.db.is_hidden(id) {
-                self.draw_clock(ui, id);
-            }
-        }
-        for id in self.db.circuit.module_ids() {
-            if !self.db.is_hidden(id) {
-                self.draw_module(ui, id);
-            }
-        }
-        for id in self.db.circuit.wire_ids() {
-            if !self.db.is_hidden(id) {
-                let has_current = self.is_on(wire_start(id));
-                self.draw_wire(
-                    ui,
-                    id,
-                    self.hovered
-                        .as_ref()
-                        .is_some_and(|f| matches!(f, Hover::Instance(_)) && f.instance() == id),
-                    has_current,
-                );
-            }
-        }
-        // Collect labels to avoid borrowing issues
-        for id in self.db.circuit.label_ids() {
-            self.draw_label(ui, id);
-        }
+        let all_ids: Vec<InstanceId> = self.db.circuit.types.keys().collect();
+        let hidden_instances: std::collections::HashSet<_> = all_ids
+            .into_iter()
+            .filter(|id| self.db.is_hidden(*id))
+            .collect();
+        self.draw_circuit_components(ui, |id| !hidden_instances.contains(&id));
 
         for c in &self.potential_connections {
             // Highlight the pin that it's going to attach. The stable pin.
@@ -804,6 +862,57 @@ impl App {
             self.highlight_hovered(ui);
         }
         self.draw_selection_highlight(ui);
+    }
+
+    /// Draw circuit components with an optional filter
+    /// If filter returns false for an instance, it won't be drawn
+    fn draw_circuit_components<F>(&mut self, ui: &mut Ui, mut filter: F)
+    where
+        F: FnMut(InstanceId) -> bool,
+    {
+        // Draw world - apply filter to determine which instances to draw
+        for id in self.db.circuit.gate_ids() {
+            if filter(id) {
+                self.draw_gate(ui, id);
+            }
+        }
+        for id in self.db.circuit.power_ids() {
+            if filter(id) {
+                self.draw_power(ui, id);
+            }
+        }
+        for id in self.db.circuit.lamp_ids() {
+            if filter(id) {
+                self.draw_lamp(ui, id);
+            }
+        }
+        for id in self.db.circuit.clock_ids() {
+            if filter(id) {
+                self.draw_clock(ui, id);
+            }
+        }
+        for id in self.db.circuit.module_ids() {
+            if filter(id) {
+                self.draw_module(ui, id);
+            }
+        }
+        for id in self.db.circuit.wire_ids() {
+            if filter(id) {
+                let has_current = self.is_on(wire_start(id));
+                self.draw_wire(
+                    ui,
+                    id,
+                    self.hovered
+                        .as_ref()
+                        .is_some_and(|f| matches!(f, Hover::Instance(_)) && f.instance() == id),
+                    has_current,
+                );
+            }
+        }
+        // Collect labels to avoid borrowing issues
+        for id in self.db.circuit.label_ids() {
+            self.draw_label(ui, id);
+        }
     }
 
     fn draw_grid(ui: &Ui, canvas_rect: Rect, viewport_offset: Vec2) {
@@ -900,10 +1009,7 @@ impl App {
 
             if pin_resp.dragged() {
                 self.selected.clear();
-                self.set_drag(Drag::PinToWire {
-                    source_pin: pin,
-                    start_pos: pin_pos,
-                });
+                self.set_drag(Drag::PinToWire { source_pin: pin });
             }
 
             if self.is_on(pin) {
@@ -1057,7 +1163,6 @@ impl App {
                 self.selected.clear();
                 self.set_drag(Drag::PinToWire {
                     source_pin: pin_obj,
-                    start_pos: pin_pos_world,
                 });
             }
         }
@@ -1104,10 +1209,7 @@ impl App {
                         start: pin.index != 1,
                     });
                 } else {
-                    self.set_drag(Drag::PinToWire {
-                        source_pin: pin,
-                        start_pos: pin_pos,
-                    });
+                    self.set_drag(Drag::PinToWire { source_pin: pin });
                 }
                 pin_interact = true;
             }
@@ -1460,6 +1562,7 @@ impl App {
         writeln!(out, "selected: {:?}", self.selected).ok();
         writeln!(out, "editing_label: {:?}", self.editing_label).ok();
         writeln!(out, "label_edit_buffer: {}", self.label_edit_buffer).ok();
+        writeln!(out, "viewing_module: {:?}", self.viewing_module).ok();
 
         // Simulation status
         writeln!(out, "\n=== Simulation Status ===").ok();
@@ -1779,7 +1882,7 @@ impl App {
     }
 
     // Adjust position of an object to this screen
-    fn adjusted_pos(&self, pos: Pos2) -> Pos2 {
+    pub fn adjusted_pos(&self, pos: Pos2) -> Pos2 {
         pos - self.viewport_offset
     }
 

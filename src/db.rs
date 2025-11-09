@@ -883,6 +883,10 @@ impl DB {
             }
         }
     }
+
+    fn circuit_of(&self, id: InstanceId) -> &Circuit {
+        &self.circuit
+    }
 }
 
 #[derive(serde::Deserialize, serde::Serialize, Copy, Debug, Clone)]
@@ -1108,6 +1112,11 @@ impl Pin {
             "{:?} pin#{} in {} ",
             self.kind, self.index, instance_display,
         )
+    }
+
+    pub fn pos(&self, db: &DB, canvas_config: &CanvasConfig) -> Pos2 {
+        let circuit = db.circuit_of(self.ins);
+        circuit.pin_position(*self, canvas_config, db)
     }
 
     pub fn display_alone(&self) -> String {
