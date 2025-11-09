@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::hash::Hash;
 
@@ -50,11 +50,7 @@ impl From<u32> for ModuleDefId {
 }
 
 #[derive(Default, serde::Deserialize, serde::Serialize, Debug, Clone)]
-pub struct Circuit {}
-
-#[derive(Default, serde::Deserialize, serde::Serialize, Debug, Clone)]
-pub struct DB {
-    pub circuit: Circuit,
+pub struct Circuit {
     // Type registry for each instance id
     pub types: SlotMap<InstanceId, InstanceKind>,
     // Per-kind payloads keyed off the primary key space
@@ -67,22 +63,47 @@ pub struct DB {
     pub connections: HashSet<Connection>,
     // Labels
     pub labels: SlotMap<LabelId, Label>,
-    // Definition of modules created by the user
-    pub module_definitions: SlotMap<ModuleDefId, ModuleDefinition>,
+    // Pin mappings for modules: external pin -> internal pin
+    #[serde(skip)]
+    pub module_pin_mappings: SecondaryMap<InstanceId, HashMap<Pin, Pin>>,
 }
-
-impl DB {
-    pub fn new() -> Self {
-        Self::default()
+impl Circuit {
+    pub fn ty(&self, id: InstanceId) -> InstanceKind {
+        self.types
+            .get(id)
+            .copied()
+            .unwrap_or_else(|| panic!("instance type missing for id: {id:?}"))
     }
+
+    /// Remove a single instance without cascade deletion
+    pub(crate) fn remove_single_instance(&mut self, id: InstanceId) {
+        match self.ty(id) {
+            InstanceKind::Gate(_) => {
+                self.gates.remove(id);
+            }
+            InstanceKind::Power => {
+                self.powers.remove(id);
+            }
+            InstanceKind::Wire => {
+                self.wires.remove(id);
+            }
+            InstanceKind::Lamp => {
+                self.lamps.remove(id);
+            }
+            InstanceKind::Clock => {
+                self.clocks.remove(id);
+            }
+            InstanceKind::Module(_) => {
+                self.modules.remove(id);
+            }
+        };
+        self.types.remove(id);
+        self.connections.retain(|c| !c.involves_instance(id));
+    }
+
     pub fn new_gate(&mut self, g: Gate) -> InstanceId {
         let k = self.types.insert(InstanceKind::Gate(g.kind));
         self.gates.insert(k, g);
-        let kind = self
-            .gates
-            .get(k)
-            .expect("gate must exist right after insertion")
-            .kind;
         k
     }
 
@@ -114,13 +135,6 @@ impl DB {
         let k = self.types.insert(InstanceKind::Module(c.definition_index));
         self.modules.insert(k, c);
         k
-    }
-
-    pub fn ty(&self, id: InstanceId) -> InstanceKind {
-        self.types
-            .get(id)
-            .copied()
-            .unwrap_or_else(|| panic!("instance type missing for id: {id:?}"))
     }
 
     pub fn get_gate(&self, id: InstanceId) -> &Gate {
@@ -171,76 +185,6 @@ impl DB {
         self.modules.get_mut(id).expect("modules not found (mut)")
     }
 
-    pub fn get_module_def(&self, def_index: ModuleDefId) -> &ModuleDefinition {
-        self.module_definitions
-            .get(def_index)
-            .expect("module def not found")
-    }
-
-    // Pin helper methods with type checking
-
-    // Gates - generic versions
-    pub fn gate_inp_n(&self, id: InstanceId, n: u32) -> Pin {
-        self.get_gate(id); // Type check
-        assert!(n < 2, "Gates only have 2 inputs (0 and 1)");
-        Pin::new(id, if n == 0 { 0 } else { 2 }, PinKind::Input)
-    }
-
-    pub fn gate_output_n(&self, id: InstanceId, n: u32) -> Pin {
-        self.get_gate(id); // Type check
-        assert!(n == 0, "Gates only have 1 output");
-        Pin::new(id, 1, PinKind::Output)
-    }
-
-    pub fn gate_inp1(&self, id: InstanceId) -> Pin {
-        self.gate_inp_n(id, 0)
-    }
-
-    pub fn gate_inp2(&self, id: InstanceId) -> Pin {
-        self.gate_inp_n(id, 1)
-    }
-
-    pub fn gate_output(&self, id: InstanceId) -> Pin {
-        self.gate_output_n(id, 0)
-    }
-
-    pub fn wire_pin_n(&self, id: InstanceId, n: u32) -> Pin {
-        self.get_wire(id); // Type check
-        assert!(n < 2, "Wires only have 2 pins (0 and 1)");
-        Pin::new(
-            id,
-            n,
-            if n == 0 {
-                PinKind::Input
-            } else {
-                PinKind::Output
-            },
-        )
-    }
-
-    pub fn wire_start(&self, id: InstanceId) -> Pin {
-        self.wire_pin_n(id, 0)
-    }
-
-    pub fn wire_end(&self, id: InstanceId) -> Pin {
-        self.wire_pin_n(id, 1)
-    }
-
-    pub fn power_output(&self, id: InstanceId) -> Pin {
-        self.get_power(id);
-        Pin::new(id, 0, PinKind::Output)
-    }
-
-    pub fn lamp_input(&self, id: InstanceId) -> Pin {
-        self.get_lamp(id);
-        Pin::new(id, 0, PinKind::Input)
-    }
-
-    pub fn clock_output(&self, id: InstanceId) -> Pin {
-        self.get_clock(id);
-        Pin::new(id, 0, PinKind::Output)
-    }
-
     pub fn new_label(&mut self, label: Label) -> LabelId {
         self.labels.insert(label)
     }
@@ -281,7 +225,171 @@ impl DB {
         self.labels.keys().collect()
     }
 
-    pub fn pins_of(&self, id: InstanceId) -> Vec<Pin> {
+    pub fn display(&self, db: &DB) -> String {
+        let mut out = String::new();
+        use std::fmt::Write as _;
+        writeln!(out, "circuit.types:").ok();
+        for (id, _) in &self.types {
+            writeln!(out, "  {}: {:?}", id, self.ty(id)).ok();
+        }
+        writeln!(
+            out,
+            "\ncounts: gates={}, powers={}, lamps={}, clocks={}, wires={}, modules={}, conns={}",
+            self.gates.len(),
+            self.powers.len(),
+            self.lamps.len(),
+            self.clocks.len(),
+            self.wires.len(),
+            self.modules.len(),
+            self.connections.len(),
+        )
+        .ok();
+
+        if !self.gates.is_empty() {
+            writeln!(out, "\nGates:").ok();
+            for (id, g) in &self.gates {
+                writeln!(out, "  {}", g.display(id)).ok();
+                for (i, pin) in g.kind.graphics().pins.iter().enumerate() {
+                    let pin_offset = pin.offset;
+                    let p = g.pos + pin_offset;
+                    let pin_instance = Pin::new(id, i as u32, pin.kind);
+                    writeln!(
+                        out,
+                        "    {} at ({:.1},{:.1})",
+                        pin_instance.display(self),
+                        p.x,
+                        p.y
+                    )
+                    .ok();
+                }
+            }
+        }
+
+        if !self.powers.is_empty() {
+            writeln!(out, "\nPowers:").ok();
+            for (id, p) in &self.powers {
+                writeln!(out, "  {}", p.display(id)).ok();
+                for (i, pin) in p.graphics().pins.iter().enumerate() {
+                    let pin_offset = pin.offset;
+                    let pp = p.pos + pin_offset;
+                    let pin_instance = Pin::new(id, i as u32, pin.kind);
+                    writeln!(
+                        out,
+                        "    {} at ({:.1},{:.1})",
+                        pin_instance.display(self),
+                        pp.x,
+                        pp.y
+                    )
+                    .ok();
+                }
+            }
+        }
+
+        if !self.lamps.is_empty() {
+            writeln!(out, "\nLamps:").ok();
+            for (id, lamp) in &self.lamps {
+                writeln!(out, "  {}", lamp.display(id)).ok();
+                for (i, pin) in lamp.graphics().pins.iter().enumerate() {
+                    let pin_offset = pin.offset;
+                    let p = lamp.pos + pin_offset;
+                    let pin_instance = Pin::new(id, i as u32, pin.kind);
+                    writeln!(
+                        out,
+                        "    {} at ({:.1},{:.1})",
+                        pin_instance.display(self),
+                        p.x,
+                        p.y
+                    )
+                    .ok();
+                }
+            }
+        }
+
+        if !self.clocks.is_empty() {
+            writeln!(out, "\nClocks:").ok();
+            for (id, clock) in &self.clocks {
+                writeln!(out, "  {}", clock.display(id)).ok();
+                for (i, pin) in clock.graphics().pins.iter().enumerate() {
+                    let pin_offset = pin.offset;
+                    let p = clock.pos + pin_offset;
+                    let pin_instance = Pin::new(id, i as u32, pin.kind);
+                    writeln!(
+                        out,
+                        "    {} at ({:.1},{:.1})",
+                        pin_instance.display(self),
+                        p.x,
+                        p.y
+                    )
+                    .ok();
+                }
+            }
+        }
+
+        if !self.wires.is_empty() {
+            writeln!(out, "\nWires:").ok();
+            for (id, w) in &self.wires {
+                writeln!(out, "  {}", w.display(id)).ok();
+                for pin in self.pins_of(id, db) {
+                    writeln!(out, "    {}", pin.display_alone()).ok();
+                }
+            }
+        }
+
+        if !self.modules.is_empty() {
+            writeln!(out, "\nModules:").ok();
+            for (id, m) in &self.modules {
+                writeln!(out, "  {id} (module instance)").ok();
+            }
+        }
+
+        if !self.connections.is_empty() {
+            writeln!(out, "\nConnections:").ok();
+            for c in &self.connections {
+                writeln!(out, "  {}", c.display(self)).ok();
+            }
+        }
+
+        out
+    }
+
+    // Connections
+
+    pub fn connected_pins_of_instance(&self, id: InstanceId) -> Vec<Pin> {
+        let mut out = Vec::new();
+        for c in &self.connections {
+            if c.a.ins == id {
+                out.push(c.b);
+            } else if c.b.ins == id {
+                out.push(c.a);
+            }
+        }
+        out
+    }
+
+    // Connected pins to this pin
+    pub fn connected_pins(&self, pin: Pin) -> Vec<Pin> {
+        let mut res = Vec::new();
+        for c in &self.connections {
+            if let Some((_, other)) = c.get_pin_first(pin) {
+                res.push(other);
+            }
+        }
+        res
+    }
+
+    pub fn connected_insntances(&self, id: InstanceId) -> Vec<InstanceId> {
+        let mut out = vec![id];
+        for c in &self.connections {
+            if c.a.ins == id {
+                out.push(c.b.ins);
+            } else if c.b.ins == id {
+                out.push(c.a.ins);
+            }
+        }
+        out
+    }
+
+    pub fn pins_of(&self, id: InstanceId, db: &DB) -> Vec<Pin> {
         match self.ty(id) {
             InstanceKind::Gate(gk) => {
                 let graphics = gk.graphics();
@@ -342,14 +450,14 @@ impl DB {
                     .map(|(i, p)| Pin::new(id, i as u32, p.kind))
                     .collect()
             }
-            InstanceKind::Module(_) => {
-                // TODO: Modules
-                vec![]
+            InstanceKind::Module(def_id) => {
+                let module_def = db.get_module_def(def_id);
+                module_def.get_unconnected_pins(db, id)
             }
         }
     }
 
-    pub fn pin_position(&self, pin: Pin, canvas_config: &CanvasConfig) -> Pos2 {
+    pub fn pin_position(&self, pin: Pin, canvas_config: &CanvasConfig, db: &DB) -> Pos2 {
         match self.ty(pin.ins) {
             InstanceKind::Gate(gk) => {
                 let g = self.get_gate(pin.ins);
@@ -377,12 +485,12 @@ impl DB {
             }
             InstanceKind::Module(_) => {
                 let cc = self.get_module(pin.ins);
-                cc.pos + self.pin_offset(pin, canvas_config)
+                cc.pos + self.pin_offset(pin, canvas_config, db)
             }
         }
     }
 
-    pub fn pin_offset(&self, pin: Pin, canvas_config: &CanvasConfig) -> Vec2 {
+    pub fn pin_offset(&self, pin: Pin, canvas_config: &CanvasConfig, db: &DB) -> Vec2 {
         match self.ty(pin.ins) {
             InstanceKind::Gate(gk) => {
                 let info = gk.graphics().pins[pin.index as usize];
@@ -412,92 +520,9 @@ impl DB {
                 let info = c.graphics().pins[pin.index as usize];
                 info.offset
             }
-            InstanceKind::Module(_) => {
-                // TODO: Modules
-                Vec2::ZERO
-            }
-        }
-    }
-
-    pub fn connected_pins_of_instance(&self, id: InstanceId) -> Vec<Pin> {
-        let mut out = Vec::new();
-        for c in &self.connections {
-            if c.a.ins == id {
-                out.push(c.b);
-            } else if c.b.ins == id {
-                out.push(c.a);
-            }
-        }
-        out
-    }
-
-    // Connected pins to this pin
-    pub fn connected_pins(&self, pin: Pin) -> Vec<Pin> {
-        let mut res = Vec::new();
-        for c in &self.connections {
-            if let Some((_, other)) = c.get_pin_first(pin) {
-                res.push(other);
-            }
-        }
-        res
-    }
-
-    pub fn connected_insntances(&self, id: InstanceId) -> Vec<InstanceId> {
-        let mut out = vec![id];
-        for c in &self.connections {
-            if c.a.ins == id {
-                out.push(c.b.ins);
-            } else if c.b.ins == id {
-                out.push(c.a.ins);
-            }
-        }
-        out
-    }
-
-    pub fn move_nonwires_and_resize_wires(&mut self, ids: &[InstanceId], delta: Vec2) {
-        let ids_set: HashSet<InstanceId> = ids.iter().copied().collect();
-
-        for id in ids {
-            match self.ty(*id) {
-                InstanceKind::Gate(_) => {
-                    let g = self.get_gate_mut(*id);
-                    g.pos += delta;
-                }
-                InstanceKind::Power => {
-                    let p = self.get_power_mut(*id);
-                    p.pos += delta;
-                }
-                InstanceKind::Wire => {
-                    let w = self.get_wire_mut(*id);
-                    w.start += delta;
-                    w.end += delta;
-                }
-                InstanceKind::Lamp => {
-                    let l = self.get_lamp_mut(*id);
-                    l.pos += delta;
-                }
-                InstanceKind::Clock => {
-                    let c = self.get_clock_mut(*id);
-                    c.pos += delta;
-                }
-                InstanceKind::Module(_) => {
-                    let cc = self.get_module_mut(*id);
-                    cc.pos += delta;
-                }
-            }
-        }
-
-        for id in ids {
-            for pin in self.connected_pins_of_instance(*id) {
-                if matches!(self.ty(pin.ins), InstanceKind::Wire) && !ids_set.contains(&pin.ins) {
-                    // Otherwise resize the wire
-                    let w = self.get_wire_mut(pin.ins);
-                    if pin.index == 0 {
-                        w.start += delta;
-                    } else {
-                        w.end += delta;
-                    }
-                }
+            InstanceKind::Module(def_id) => {
+                let module_def = db.get_module_def(def_id);
+                module_def.calculate_pin_offset(db, &pin, canvas_config)
             }
         }
     }
@@ -507,9 +532,10 @@ impl DB {
         id: InstanceId,
         delta: Vec2,
         canvas_config: &CanvasConfig,
+        db: &DB,
     ) {
         let mut visited = HashSet::new();
-        self.move_instance_and_propagate_recursive(id, delta, &mut visited, canvas_config);
+        self.move_instance_and_propagate_recursive(id, delta, &mut visited, canvas_config, db);
     }
 
     fn move_instance_and_propagate_recursive(
@@ -518,6 +544,7 @@ impl DB {
         delta: Vec2,
         visited: &mut HashSet<InstanceId>,
         canvas_config: &CanvasConfig,
+        db: &DB,
     ) {
         if !visited.insert(id) {
             return;
@@ -565,15 +592,15 @@ impl DB {
                 InstanceKind::Wire => {
                     // For wires, resize them to stay connected
                     // Find which pin of the wire is connected to our moved instance
-                    let wire_pins = self.pins_of(connected_id);
+                    let wire_pins = self.pins_of(connected_id, db);
                     for wire_pin in wire_pins {
                         // Check if this wire pin is connected to any pin of our moved instance
-                        for moved_pin in self.pins_of(id) {
+                        for moved_pin in self.pins_of(id, db) {
                             if self
                                 .connections
                                 .contains(&Connection::new(wire_pin, moved_pin))
                             {
-                                let new_pin_pos = self.pin_position(moved_pin, canvas_config);
+                                let new_pin_pos = self.pin_position(moved_pin, canvas_config, db);
                                 let w = self.get_wire_mut(connected_id);
                                 if wire_pin.index == 0 {
                                     w.start = new_pin_pos;
@@ -597,10 +624,268 @@ impl DB {
                         delta,
                         visited,
                         canvas_config,
+                        db,
                     );
                 }
             }
         }
+    }
+}
+
+#[derive(Default, serde::Deserialize, serde::Serialize, Debug, Clone)]
+pub struct DB {
+    pub circuit: Circuit,
+    // Definition of modules created by the user
+    pub module_definitions: SlotMap<ModuleDefId, ModuleDefinition>,
+    // Maps instances to their parent module (if they're part of a module)
+    // Key: instance ID, Value: parent module ID
+    pub module_instances: SecondaryMap<InstanceId, InstanceId>,
+}
+
+impl DB {
+    pub fn get_module_def(&self, def_index: ModuleDefId) -> &ModuleDefinition {
+        self.module_definitions
+            .get(def_index)
+            .expect("module def not found")
+    }
+
+    /// Returns the parent module ID if this instance is part of a module,
+    /// or None if it's a top-level instance.
+    pub fn get_module_owner(&self, id: InstanceId) -> Option<InstanceId> {
+        self.module_instances.get(id).copied()
+    }
+
+    /// Get all instances that belong to a specific module
+    pub fn get_instances_for_module(&self, module_id: InstanceId) -> Vec<InstanceId> {
+        self.module_instances
+            .iter()
+            .filter_map(
+                |(id, parent)| {
+                    if *parent == module_id { Some(id) } else { None }
+                },
+            )
+            .collect()
+    }
+
+    /// Check if an instance is hidden from UI (i.e., it's part of a module)
+    pub fn is_hidden(&self, id: InstanceId) -> bool {
+        self.module_instances.contains_key(id)
+    }
+
+    /// Get all instances that are visible in UI (not hidden)
+    pub fn visible_instances(&self) -> impl Iterator<Item = InstanceId> + '_ {
+        self.circuit.types.keys().filter(|id| !self.is_hidden(*id))
+    }
+
+    /// Remove an instance, with cascade deletion for modules
+    pub fn remove_instance(&mut self, id: InstanceId) {
+        if matches!(self.circuit.ty(id), InstanceKind::Module(_)) {
+            let internal_instances = self.get_instances_for_module(id);
+            for child_id in internal_instances {
+                self.remove_single_instance(child_id);
+            }
+        }
+
+        self.remove_single_instance(id);
+    }
+
+    /// Remove a single instance without cascade deletion
+    fn remove_single_instance(&mut self, id: InstanceId) {
+        // Remove from circuit
+        self.circuit.remove_single_instance(id);
+        // Remove from module_instances tracking
+        self.module_instances.remove(id);
+    }
+
+    /// Create a new module instance and automatically flatten its internal components
+    /// Creates connections between module boundary pins and internal component pins
+    ///
+    /// Note: This requires temporarily cloning the definition to avoid borrow checker issues.
+    /// In the future, we could optimize this with better data structure design.
+    pub fn new_module_with_flattening(&mut self, module: crate::module::Module) -> InstanceId {
+        let definition_id = module.definition_index;
+
+        // Create the module instance first
+        let module_id = self.circuit.new_module(module);
+
+        // Clone the definition to avoid borrow conflicts
+        let definition = self.get_module_def(definition_id).clone();
+
+        // Clone module_definitions to avoid borrow conflict
+        let module_defs = self.module_definitions.clone();
+
+        // Create a temporary DB with only the definitions we need
+        let temp_db = Self {
+            circuit: Circuit::default(), // Not used
+            module_definitions: module_defs,
+            module_instances: SecondaryMap::new(),
+        };
+
+        // Flatten it and store the pin mapping
+        let pin_mapping = definition.flatten_into_circuit(
+            &mut self.circuit,
+            module_id,
+            definition_id,
+            &temp_db,
+            &mut self.module_instances,
+        );
+
+        // Store the pin mapping
+        self.circuit
+            .module_pin_mappings
+            .insert(module_id, pin_mapping);
+
+        module_id
+    }
+
+    pub fn move_nonwires_and_resize_wires(&mut self, ids: &[InstanceId], delta: Vec2) {
+        let ids_set: HashSet<InstanceId> = ids.iter().copied().collect();
+
+        for id in ids {
+            match self.circuit.ty(*id) {
+                InstanceKind::Gate(_) => {
+                    let g = self.circuit.get_gate_mut(*id);
+                    g.pos += delta;
+                }
+                InstanceKind::Power => {
+                    let p = self.circuit.get_power_mut(*id);
+                    p.pos += delta;
+                }
+                InstanceKind::Wire => {
+                    let w = self.circuit.get_wire_mut(*id);
+                    w.start += delta;
+                    w.end += delta;
+                }
+                InstanceKind::Lamp => {
+                    let l = self.circuit.get_lamp_mut(*id);
+                    l.pos += delta;
+                }
+                InstanceKind::Clock => {
+                    let c = self.circuit.get_clock_mut(*id);
+                    c.pos += delta;
+                }
+                InstanceKind::Module(_) => {
+                    let cc = self.circuit.get_module_mut(*id);
+                    cc.pos += delta;
+                }
+            }
+        }
+
+        for id in ids {
+            for pin in self.circuit.connected_pins_of_instance(*id) {
+                if matches!(self.circuit.ty(pin.ins), InstanceKind::Wire)
+                    && !ids_set.contains(&pin.ins)
+                {
+                    // Otherwise resize the wire
+                    let w = self.circuit.get_wire_mut(pin.ins);
+                    if pin.index == 0 {
+                        w.start += delta;
+                    } else {
+                        w.end += delta;
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn move_instance_and_propagate(
+        &mut self,
+        id: InstanceId,
+        delta: Vec2,
+        canvas_config: &CanvasConfig,
+    ) {
+        let mut visited = HashSet::new();
+        self.move_instance_and_propagate_recursive(id, delta, &mut visited, canvas_config);
+    }
+
+    fn move_instance_and_propagate_recursive(
+        &mut self,
+        id: InstanceId,
+        delta: Vec2,
+        visited: &mut HashSet<InstanceId>,
+        canvas_config: &CanvasConfig,
+    ) {
+        if !visited.insert(id) {
+            return;
+        }
+
+        // Move this instance
+        match self.circuit.ty(id) {
+            InstanceKind::Gate(_) => {
+                let g = self.circuit.get_gate_mut(id);
+                g.pos += delta;
+            }
+            InstanceKind::Power => {
+                let p = self.circuit.get_power_mut(id);
+                p.pos += delta;
+            }
+            InstanceKind::Wire => {
+                let w = self.circuit.get_wire_mut(id);
+                w.start += delta;
+                w.end += delta;
+            }
+            InstanceKind::Lamp => {
+                let l = self.circuit.get_lamp_mut(id);
+                l.pos += delta;
+            }
+            InstanceKind::Clock => {
+                let c = self.circuit.get_clock_mut(id);
+                c.pos += delta;
+            }
+            InstanceKind::Module(_) => {
+                let cc = self.circuit.get_module_mut(id);
+                cc.pos += delta;
+            }
+        }
+
+        let connected = self.circuit.connected_insntances(id);
+
+        for connected_id in connected {
+            if connected_id == id || visited.contains(&connected_id) {
+                continue;
+            }
+
+            match self.circuit.ty(connected_id) {
+                InstanceKind::Wire => {
+                    let wire_pins = self.circuit.pins_of(connected_id, self);
+                    for wire_pin in wire_pins {
+                        for moved_pin in self.circuit.pins_of(id, self) {
+                            if self
+                                .circuit
+                                .connections
+                                .contains(&Connection::new(wire_pin, moved_pin))
+                            {
+                                let new_pin_pos =
+                                    self.circuit.pin_position(moved_pin, canvas_config, self);
+                                let w = self.circuit.get_wire_mut(connected_id);
+                                if wire_pin.index == 0 {
+                                    w.start = new_pin_pos;
+                                } else {
+                                    w.end = new_pin_pos;
+                                }
+                            }
+                        }
+                    }
+                    visited.insert(connected_id);
+                }
+                InstanceKind::Gate(_)
+                | InstanceKind::Power
+                | InstanceKind::Lamp
+                | InstanceKind::Clock
+                | InstanceKind::Module(_) => {
+                    self.move_instance_and_propagate_recursive(
+                        connected_id,
+                        delta,
+                        visited,
+                        canvas_config,
+                    );
+                }
+            }
+        }
+    }
+
+    fn circuit_of(&self, id: InstanceId) -> &Circuit {
+        &self.circuit
     }
 }
 
@@ -626,7 +911,6 @@ pub enum GateKind {
 
 #[derive(serde::Deserialize, serde::Serialize, Copy, Debug, Clone)]
 pub struct Gate {
-    // Center position
     pub pos: Pos2,
     pub kind: GateKind,
 }
@@ -645,17 +929,8 @@ impl GateKind {
 }
 
 impl Gate {
-    pub fn display(&self, db: &DB) -> String {
-        // Find the InstanceId for this gate in the database
-        for (id, gate) in &db.gates {
-            if gate.pos == self.pos && gate.kind == self.kind {
-                return format!("{:?} {}", self.kind, id);
-            }
-        }
-        format!(
-            "Gate {{ kind: {:?}, pos: ({:.1}, {:.1}) }} - not found in DB",
-            self.kind, self.pos.x, self.pos.y
-        )
+    pub fn display(&self, id: InstanceId) -> String {
+        format!("{:?} {}", self.kind, id)
     }
 }
 
@@ -671,17 +946,8 @@ pub struct Power {
 }
 
 impl Power {
-    pub fn display(&self, db: &DB) -> String {
-        // Find the InstanceId for this power in the database
-        for (id, power) in &db.powers {
-            if power.pos == self.pos && power.on == self.on {
-                return format!("Power {{ id: {}, on: {}}}", id, self.on);
-            }
-        }
-        format!(
-            "Power {{ on: {}, pos: ({:.1}, {:.1}) }} - not found in DB",
-            self.on, self.pos.x, self.pos.y
-        )
+    pub fn display(&self, id: InstanceId) -> String {
+        format!("Power {{ id: {}, on: {}}}", id, self.on)
     }
 
     pub fn graphics(&self) -> assets::InstanceGraphics {
@@ -703,21 +969,12 @@ pub struct Lamp {
 }
 
 impl Lamp {
-    pub fn display(&self, db: &DB) -> String {
-        // Find the InstanceId for this lamp in the database
-        for (id, lamp) in &db.lamps {
-            if lamp.pos == self.pos {
-                return format!("Lamp {{ id: {id}}}");
-            }
-        }
-        format!(
-            "Lamp {{ pos: ({:.1}, {:.1}) }} - not found in DB",
-            self.pos.x, self.pos.y
-        )
-    }
-
     pub fn graphics(&self) -> assets::InstanceGraphics {
         assets::LAMP_GRAPHICS.clone()
+    }
+
+    pub fn display(&self, id: InstanceId) -> String {
+        format!("Lamp {id}")
     }
 }
 
@@ -728,24 +985,15 @@ impl Lamp {
 #[derive(serde::Deserialize, serde::Serialize, Copy, Debug, Clone)]
 pub struct Clock {
     pub pos: Pos2,
-    pub period: u32, // Placeholder for future use
 }
 
 impl Clock {
-    pub fn display(&self, db: &DB) -> String {
-        for (id, clock) in &db.clocks {
-            if clock.pos == self.pos {
-                return format!("Clock {{ id: {id}}}");
-            }
-        }
-        format!(
-            "Clock {{ pos: ({:.1}, {:.1}) }} - not found in DB",
-            self.pos.x, self.pos.y
-        )
-    }
-
     pub fn graphics(&self) -> assets::InstanceGraphics {
         assets::CLOCK_GRAPHICS.clone()
+    }
+
+    pub fn display(&self, id: InstanceId) -> String {
+        format!("Clock {id}")
     }
 }
 
@@ -781,19 +1029,8 @@ pub struct Wire {
 }
 
 impl Wire {
-    pub fn display(&self, db: &DB) -> String {
-        for (id, wire) in &db.wires {
-            if wire.start == self.start
-                && wire.end == self.end
-                && wire.input_index == self.input_index
-            {
-                return format!("Wire {id}");
-            }
-        }
-        format!(
-            "Wire {{ start: ({:.1}, {:.1}), end: ({:.1}, {:.1}) }} - not found in DB",
-            self.start.x, self.start.y, self.end.x, self.end.y
-        )
+    pub fn display(&self, id: InstanceId) -> String {
+        format!("Wire {id}")
     }
 
     pub fn new_at(pos: Pos2) -> Self {
@@ -847,34 +1084,39 @@ pub struct Pin {
 }
 
 impl Pin {
-    pub fn display(&self, db: &DB) -> String {
-        let instance_display = match db.ty(self.ins) {
+    pub fn display(&self, circuit: &Circuit) -> String {
+        let instance_display = match circuit.ty(self.ins) {
             InstanceKind::Gate(_) => {
-                let gate = db.get_gate(self.ins);
-                gate.display(db)
+                let gate = circuit.get_gate(self.ins);
+                gate.display(self.ins)
             }
             InstanceKind::Power => {
-                let power = db.get_power(self.ins);
-                power.display(db)
+                let power = circuit.get_power(self.ins);
+                power.display(self.ins)
             }
             InstanceKind::Wire => {
-                let wire = db.get_wire(self.ins);
-                wire.display(db)
+                let wire = circuit.get_wire(self.ins);
+                wire.display(self.ins)
             }
             InstanceKind::Lamp => {
-                let lamp = db.get_lamp(self.ins);
-                lamp.display(db)
+                let lamp = circuit.get_lamp(self.ins);
+                lamp.display(self.ins)
             }
             InstanceKind::Clock => {
-                let clock = db.get_clock(self.ins);
-                clock.display(db)
+                let clock = circuit.get_clock(self.ins);
+                clock.display(self.ins)
             }
-            InstanceKind::Module(_) => db.get_module(self.ins).display(db, self.ins),
+            InstanceKind::Module(_) => format!("Module {}", self.ins),
         };
         format!(
             "{:?} pin#{} in {} ",
             self.kind, self.index, instance_display,
         )
+    }
+
+    pub fn pos(&self, db: &DB, canvas_config: &CanvasConfig) -> Pos2 {
+        let circuit = db.circuit_of(self.ins);
+        circuit.pin_position(*self, canvas_config, db)
     }
 
     pub fn display_alone(&self) -> String {
@@ -883,5 +1125,129 @@ impl Pin {
 
     pub fn new(ins: InstanceId, index: u32, kind: PinKind) -> Self {
         Self { ins, index, kind }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui::Pos2;
+
+    #[test]
+    fn test_new_module_with_automatic_flattening() {
+        // Create a module definition
+        let mut definition_circuit = Circuit::default();
+        let gate = Gate {
+            pos: Pos2::ZERO,
+            kind: GateKind::And,
+        };
+        let _gate_id = definition_circuit.new_gate(gate);
+
+        let module_def = crate::module::ModuleDefinition {
+            name: "TestModule".to_owned(),
+            circuit: definition_circuit,
+        };
+
+        // Create DB and add definition
+        let mut db = DB::default();
+        let def_id = db.module_definitions.insert(module_def);
+
+        // Create module using new_module_with_flattening
+        let module = crate::module::Module {
+            pos: Pos2::ZERO,
+            definition_index: def_id,
+        };
+        let module_id = db.new_module_with_flattening(module);
+
+        // Check that flattening happened automatically
+        let internal_instances = db.get_instances_for_module(module_id);
+        assert_eq!(
+            internal_instances.len(),
+            1,
+            "Should have auto-flattened 1 instance"
+        );
+
+        // Pin mapping should be stored
+        assert!(db.circuit.module_pin_mappings.contains_key(module_id));
+        let pin_map = db
+            .circuit
+            .module_pin_mappings
+            .get(module_id)
+            .expect("module pin mappings should exist");
+        assert_eq!(pin_map.len(), 3, "AND gate has 3 pins");
+    }
+
+    #[test]
+    fn test_module_instances_tracking() {
+        // Create DB with a regular AND gate and a Module containing an OR gate
+        let mut db = DB::default();
+
+        // Add a regular AND gate (top-level, not part of any module)
+        let and_gate = Gate {
+            pos: Pos2::new(100.0, 100.0),
+            kind: GateKind::And,
+        };
+        let and_gate_id = db.circuit.new_gate(and_gate);
+
+        // Create a module definition with an OR gate inside
+        let mut definition_circuit = Circuit::default();
+        let or_gate = Gate {
+            pos: Pos2::new(50.0, 50.0),
+            kind: GateKind::Or,
+        };
+        let _or_gate_def_id = definition_circuit.new_gate(or_gate);
+
+        let module_def = crate::module::ModuleDefinition {
+            name: "TestModule".to_owned(),
+            circuit: definition_circuit,
+        };
+
+        // Add module definition to DB
+        let def_id = db.module_definitions.insert(module_def);
+
+        // Create module instance (this will flatten the OR gate as a hidden instance)
+        let module = crate::module::Module {
+            pos: Pos2::new(200.0, 200.0),
+            definition_index: def_id,
+        };
+        let module_id = db.new_module_with_flattening(module);
+
+        // Get the internal OR gate's instance ID
+        let module_internal_instances = db.get_instances_for_module(module_id);
+        assert_eq!(
+            module_internal_instances.len(),
+            1,
+            "Module should contain 1 internal instance"
+        );
+        let internal_or_gate_id = module_internal_instances[0];
+
+        // Verify it's actually an OR gate
+        match db.circuit.ty(internal_or_gate_id) {
+            InstanceKind::Gate(GateKind::Or) => {} // Expected
+            other => panic!("Expected OR gate, got {other:?}"),
+        }
+
+        // Test the get_module_owner helper method
+
+        // Top-level AND gate should not have a module owner
+        assert_eq!(
+            db.get_module_owner(and_gate_id),
+            None,
+            "Regular AND gate should not belong to any module"
+        );
+
+        // The module instance itself should not have a module owner
+        assert_eq!(
+            db.get_module_owner(module_id),
+            None,
+            "Module instance should not belong to any module"
+        );
+
+        // The internal OR gate should have the module as its owner
+        assert_eq!(
+            db.get_module_owner(internal_or_gate_id),
+            Some(module_id),
+            "Internal OR gate should belong to the module"
+        );
     }
 }

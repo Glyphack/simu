@@ -1,6 +1,6 @@
 use crate::db::{
-    Clock, DB, Gate, GateKind, InstanceId, InstanceKind, Label, LabelId, Lamp, ModuleDefId, Pin,
-    Power, Wire,
+    Circuit, Clock, DB, Gate, GateKind, InstanceId, InstanceKind, Label, LabelId, Lamp,
+    ModuleDefId, Pin, Power, Wire,
 };
 use std::collections::HashSet;
 use std::fmt::Write as _;
@@ -12,7 +12,7 @@ use egui::{
 
 use crate::assets::PinKind;
 use crate::drag::CanvasDrag;
-use crate::simulator::{SimulationStatus, Simulator, Value};
+use crate::simulator::{SimulationStatus, Simulator, Value, lamp_input, wire_start};
 use crate::{
     assets::{self},
     config::CanvasConfig,
@@ -116,6 +116,12 @@ impl Default for ClockController {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct ViewModule {
+    pub module_id: InstanceId,
+    pub viewport_offset: Vec2,
+}
+
 #[derive(serde::Deserialize, serde::Serialize)]
 pub struct App {
     pub canvas_config: CanvasConfig,
@@ -163,13 +169,15 @@ pub struct App {
     // Clock controller for managing clock ticking
     #[serde(skip, default = "ClockController::default")]
     pub clock_controller: ClockController,
+    #[serde(skip)]
+    pub viewing_module: Option<ViewModule>,
 }
 
 impl Default for App {
     fn default() -> Self {
         let canvas_config = CanvasConfig::default();
         let db = DB::default();
-        let c = ConnectionManager::new(&db, &canvas_config);
+        let c = ConnectionManager::new(&db.circuit, &canvas_config, &db);
         Self {
             db,
             canvas_config,
@@ -192,6 +200,7 @@ impl Default for App {
             module_creation_error: None,
             simulator: Simulator::default(),
             clock_controller: ClockController::default(),
+            viewing_module: None,
         }
     }
 }
@@ -238,12 +247,12 @@ impl eframe::App for App {
                 });
                 ui.add_space(16.0);
 
-                // Clock controls
                 ui.label("Clock:");
                 if ui.button("⏹ Stop").clicked() {
                     self.clock_controller.state = ClockState::Stopped;
                 }
                 if ui.button("⏭ Step").clicked() {
+                    self.clock_controller.state = ClockState::Stopped;
                     self.clock_controller.voltage = !self.clock_controller.voltage;
                     self.current_dirty = true;
                 }
@@ -288,22 +297,24 @@ impl eframe::App for App {
 
         if should_tick {
             self.clock_controller.voltage = !self.clock_controller.voltage;
-            self.simulator.clocks_on = self.clock_controller.voltage;
             self.current_dirty = true;
-        }
-
-        // Request continuous repaint if clock is running
-        if self.clock_controller.state == ClockState::Running {
-            ctx.request_repaint();
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {
             self.draw_main(ui);
         });
+
+        if self.clock_controller.state == ClockState::Running {
+            ctx.request_repaint();
+        }
     }
 }
 
 impl App {
+    pub fn circuit(&self) -> &Circuit {
+        &self.db.circuit
+    }
+
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         egui_extras::install_image_loaders(&cc.egui_ctx);
         if let Some(storage) = cc.storage {
@@ -375,6 +386,30 @@ impl App {
                     });
                 });
         }
+
+        if let Some(mut view_module) = self.viewing_module.take() {
+            let module_id = view_module.module_id;
+            let mut is_open = true;
+
+            let module_name = if let InstanceKind::Module(def_id) = self.circuit().ty(module_id) {
+                self.db.get_module_def(def_id).name.clone()
+            } else {
+                "Module View".to_owned()
+            };
+
+            egui::Window::new(format!("Module View: {module_name}"))
+                .open(&mut is_open)
+                .resizable(true)
+                .default_size([800.0, 600.0])
+                .show(ui.ctx(), |ui| {
+                    self.draw_module_view(ui, module_id, &mut view_module);
+                });
+
+            if is_open {
+                self.viewing_module = Some(view_module);
+            }
+        }
+
         ui.with_layout(Layout::left_to_right(Align::Min), |ui| {
             self.canvas_config = CanvasConfig::default();
             if self.show_debug {
@@ -387,7 +422,7 @@ impl App {
 
             let panel_rect = ui
                 .vertical(|ui| {
-                    ui.heading("Logic Gates");
+                    ui.heading("Tools");
                     self.draw_panel(ui);
                 })
                 .response
@@ -433,8 +468,8 @@ impl App {
 
                 ui.add_space(8.0);
 
-                if Button::new("Clear Canvas")
-                    .min_size(vec2(48.0, 30.0))
+                if Button::new("Clear")
+                    .min_size(vec2(PANEL_BUTTON_MAX_HEIGHT, 30.0))
                     .ui(ui)
                     .clicked()
                 {
@@ -442,8 +477,10 @@ impl App {
                     self.hovered = None;
                     self.selected.clear();
                     self.drag = None;
-                    self.connection_manager = ConnectionManager::new(&self.db, &self.canvas_config);
+                    self.connection_manager =
+                        ConnectionManager::new(self.circuit(), &self.canvas_config, &self.db);
                     self.simulator = Simulator::new();
+                    self.viewport_offset = Vec2::ZERO;
                 }
             });
     }
@@ -452,8 +489,8 @@ impl App {
         let resp = match kind {
             InstanceKind::Gate(gate_kind) => {
                 let s = get_icon(ui, gate_kind.graphics().svg.clone())
-                    .max_height(PANEL_BUTTON_MAX_HEIGHT);
-                ui.add(egui::ImageButton::new(s).sense(Sense::click_and_drag()))
+                    .fit_to_exact_size(vec2(PANEL_BUTTON_MAX_HEIGHT, PANEL_BUTTON_MAX_HEIGHT));
+                ui.add(egui::Button::image(s).sense(Sense::click_and_drag()))
             }
             InstanceKind::Power => {
                 let s = get_icon(
@@ -466,37 +503,28 @@ impl App {
                     .svg
                     .clone(),
                 )
-                .max_height(PANEL_BUTTON_MAX_HEIGHT);
-                ui.add(egui::ImageButton::new(s).sense(Sense::click_and_drag()))
+                .fit_to_exact_size(vec2(PANEL_BUTTON_MAX_HEIGHT, PANEL_BUTTON_MAX_HEIGHT));
+                ui.add(egui::Button::image(s).sense(Sense::click_and_drag()))
             }
             InstanceKind::Lamp => {
                 let s = get_icon(ui, Lamp { pos: Pos2::ZERO }.graphics().svg.clone())
-                    .max_height(PANEL_BUTTON_MAX_HEIGHT);
-                ui.add(egui::ImageButton::new(s).sense(Sense::click_and_drag()))
+                    .fit_to_exact_size(vec2(PANEL_BUTTON_MAX_HEIGHT, PANEL_BUTTON_MAX_HEIGHT));
+                ui.add(egui::Button::image(s).sense(Sense::click_and_drag()))
             }
             InstanceKind::Clock => {
-                let s = get_icon(
-                    ui,
-                    Clock {
-                        pos: Pos2::ZERO,
-                        period: 1,
-                    }
-                    .graphics()
-                    .svg
-                    .clone(),
-                )
-                .max_height(PANEL_BUTTON_MAX_HEIGHT);
-                ui.add(egui::ImageButton::new(s).sense(Sense::click_and_drag()))
+                let s = get_icon(ui, Clock { pos: Pos2::ZERO }.graphics().svg.clone())
+                    .fit_to_exact_size(vec2(PANEL_BUTTON_MAX_HEIGHT, PANEL_BUTTON_MAX_HEIGHT));
+                ui.add(egui::Button::image(s).sense(Sense::click_and_drag()))
             }
             InstanceKind::Wire => ui.add(
                 Button::new("Wire")
                     .sense(Sense::click_and_drag())
-                    .min_size(vec2(78.0, 30.0)),
+                    .min_size(vec2(PANEL_BUTTON_MAX_HEIGHT, 30.0)),
             ),
             InstanceKind::Module(i) => ui.add(
                 Button::new(self.db.get_module_def(i).name.clone())
                     .sense(Sense::click_and_drag())
-                    .min_size(vec2(78.0, 30.0)),
+                    .min_size(vec2(PANEL_BUTTON_MAX_HEIGHT, 30.0)),
             ),
         };
         let mouse_pos_world = self.mouse_pos_world(ui);
@@ -505,12 +533,12 @@ impl App {
             && let Some(pos) = mouse_pos_world
         {
             let id = match kind {
-                InstanceKind::Gate(kind) => self.db.new_gate(Gate { pos, kind }),
-                InstanceKind::Power => self.db.new_power(Power { pos, on: true }),
-                InstanceKind::Wire => self.db.new_wire(Wire::new_at(pos)),
-                InstanceKind::Lamp => self.db.new_lamp(Lamp { pos }),
-                InstanceKind::Clock => self.db.new_clock(Clock { pos, period: 1 }),
-                InstanceKind::Module(c) => self.db.new_module(Module {
+                InstanceKind::Gate(kind) => self.db.circuit.new_gate(Gate { pos, kind }),
+                InstanceKind::Power => self.db.circuit.new_power(Power { pos, on: true }),
+                InstanceKind::Wire => self.db.circuit.new_wire(Wire::new_at(pos)),
+                InstanceKind::Lamp => self.db.circuit.new_lamp(Lamp { pos }),
+                InstanceKind::Clock => self.db.circuit.new_clock(Clock { pos }),
+                InstanceKind::Module(c) => self.db.new_module_with_flattening(Module {
                     pos,
                     definition_index: c,
                 }),
@@ -527,7 +555,7 @@ impl App {
             && let InstanceKind::Module(i) = kind
         {
             let mut ids = Vec::new();
-            for (id, m) in &self.db.modules {
+            for (id, m) in &self.circuit().modules {
                 if m.definition_index == i {
                     ids.push(id);
                 }
@@ -546,7 +574,7 @@ impl App {
         let resp = ui.add(
             Button::new("Label")
                 .sense(Sense::click_and_drag())
-                .min_size(vec2(78.0, 30.0)),
+                .min_size(vec2(PANEL_BUTTON_MAX_HEIGHT, 30.0)),
         );
 
         let mouse = self.mouse_pos_world(ui);
@@ -554,7 +582,7 @@ impl App {
         if resp.drag_started()
             && let Some(pos) = mouse
         {
-            let id = self.db.new_label(Label::new(pos));
+            let id = self.db.circuit.new_label(Label::new(pos));
             self.set_drag(Drag::Label {
                 id,
                 offset: Vec2::ZERO,
@@ -622,30 +650,74 @@ impl App {
     }
 
     pub fn delete_instance(&mut self, id: InstanceId) {
-        self.db.types.remove(id);
-        self.db.gates.remove(id);
-        self.db.powers.remove(id);
-        self.db.wires.remove(id);
-        self.db.lamps.remove(id);
-        self.db.clocks.remove(id);
-        self.db.modules.remove(id);
-        self.db.connections.retain(|c| !c.involves_instance(id));
         self.hovered.take();
         self.drag.take();
         self.selected.remove(&id);
 
         self.connection_manager.dirty_instances.remove(&id);
-        self.connection_manager.rebuild_spatial_index(&self.db);
+        self.db.remove_instance(id);
+        self.connection_manager
+            .rebuild_spatial_index(&self.db.circuit, &self.db);
         self.current_dirty = true;
     }
 
     pub fn delete_label(&mut self, id: LabelId) {
-        self.db.labels.remove(id);
+        self.db.circuit.labels.remove(id);
         if self.editing_label == Some(id) {
             self.editing_label = None;
         }
         self.hovered.take();
         self.drag.take();
+    }
+
+    fn draw_module_view(
+        &mut self,
+        ui: &mut Ui,
+        module_id: InstanceId,
+        view_module: &mut ViewModule,
+    ) {
+        // Get the module definition
+        let InstanceKind::Module(module_def_id) = self.circuit().ty(module_id) else {
+            return; // Not a module, shouldn't happen
+        };
+
+        // Allocate space for the canvas
+        let (resp, _painter) = ui.allocate_painter(ui.available_size(), Sense::click_and_drag());
+        let canvas_rect = resp.rect;
+
+        // Set clip rectangle to prevent drawing outside bounds
+        ui.set_clip_rect(canvas_rect);
+
+        // Draw grid with module's viewport offset
+        Self::draw_grid(ui, canvas_rect, view_module.viewport_offset);
+
+        // Handle panning with right-click drag
+        let right_down = ui.input(|i| i.pointer.secondary_down());
+        let right_released = ui.input(|i| i.pointer.secondary_released());
+        let mouse_is_visible = resp.contains_pointer();
+
+        // Simple panning for module view
+        if right_down && mouse_is_visible {
+            view_module.viewport_offset += ui.input(|i| i.pointer.delta());
+        }
+
+        // Temporarily swap viewport to render with module's viewport
+        let original_viewport = self.viewport_offset;
+        self.viewport_offset = view_module.viewport_offset;
+
+        // Get instances that belong to this module
+        let module_instances = self.db.get_instances_for_module(module_id);
+        let module_instance_set: std::collections::HashSet<_> =
+            module_instances.into_iter().collect();
+
+        // Draw only the instances that belong to this module
+        // Save original hovered state and set to None to prevent interactions
+        let original_hovered = self.hovered.take();
+        self.draw_circuit_components(ui, |id| module_instance_set.contains(&id));
+        self.hovered = original_hovered;
+
+        // Restore original viewport
+        self.viewport_offset = original_viewport;
     }
 
     fn draw_canvas(&mut self, ui: &mut Ui) {
@@ -692,7 +764,7 @@ impl App {
             self.handle_deletion(ui);
 
             if let Some(editing_id) = self.editing_label {
-                let label = self.db.get_label_mut(editing_id);
+                let label = self.db.circuit.get_label_mut(editing_id);
                 label.text = self.label_edit_buffer.clone();
                 if mouse_up || enter_pressed || esc_pressed {
                     self.editing_label = None;
@@ -704,7 +776,7 @@ impl App {
                 && self.hovered.is_none()
                 && let Some(mouse) = mouse_pos_world
             {
-                let id = self.db.new_label(Label::new(mouse));
+                let id = self.db.circuit.new_label(Label::new(mouse));
                 self.editing_label = Some(id);
                 self.label_edit_buffer = String::from("Label");
             }
@@ -723,7 +795,7 @@ impl App {
                     self.handle_drag_end(mouse);
 
                     if self.connection_manager.update_connections(&mut self.db) {
-                        // self.current_dirty = true;
+                        self.current_dirty = true;
                     }
                 }
             }
@@ -740,56 +812,45 @@ impl App {
 
             if right_clicked
                 && let Some(id) = self.hovered.as_ref().map(|i| i.instance())
-                && matches!(self.db.ty(id), InstanceKind::Power)
+                && matches!(self.circuit().ty(id), InstanceKind::Power)
             {
-                let p = self.db.get_power_mut(id);
+                let p = self.db.circuit.get_power_mut(id);
                 p.on = !p.on;
                 self.current_dirty = true;
+            }
+
+            // Right-click context menu for modules
+            if right_clicked
+                && let Some(id) = self.hovered.as_ref().map(|i| i.instance())
+                && matches!(self.circuit().ty(id), InstanceKind::Module(_))
+            {
+                self.viewing_module = Some(ViewModule {
+                    module_id: id,
+                    viewport_offset: Vec2::ZERO,
+                });
             }
         }
 
         if self.current_dirty {
-            self.simulator.compute(&self.db);
+            self.simulator.clocks_on = self.clock_controller.voltage;
+            self.simulator.compute(&self.db, &self.db.circuit);
             self.current_dirty = false;
         }
 
-        // Draw world
         self.hovered = None;
-        for id in self.db.gate_ids() {
-            self.draw_gate(ui, id);
-        }
-        for id in self.db.power_ids() {
-            self.draw_power(ui, id);
-        }
-        for id in self.db.lamp_ids() {
-            self.draw_lamp(ui, id);
-        }
-        for id in self.db.clock_ids() {
-            self.draw_clock(ui, id);
-        }
-        for id in self.db.module_ids() {
-            self.draw_module(ui, id);
-        }
-        for id in self.db.wire_ids() {
-            let has_current = self.is_on(self.db.wire_start(id));
-            self.draw_wire(
-                ui,
-                id,
-                self.hovered
-                    .as_ref()
-                    .is_some_and(|f| matches!(f, Hover::Instance(_)) && f.instance() == id),
-                has_current,
-            );
-        }
-        // Collect labels to avoid borrowing issues
-        for id in self.db.label_ids() {
-            self.draw_label(ui, id);
-        }
+        let all_ids: Vec<InstanceId> = self.db.circuit.types.keys().collect();
+        let hidden_instances: std::collections::HashSet<_> = all_ids
+            .into_iter()
+            .filter(|id| self.db.is_hidden(*id))
+            .collect();
+        self.draw_circuit_components(ui, |id| !hidden_instances.contains(&id));
 
         for c in &self.potential_connections {
             // Highlight the pin that it's going to attach. The stable pin.
             let pin_to_highlight = c.b;
-            let p = self.db.pin_position(pin_to_highlight, &self.canvas_config);
+            let p = self
+                .circuit()
+                .pin_position(pin_to_highlight, &self.canvas_config, &self.db);
             ui.painter().circle_filled(
                 p - self.viewport_offset,
                 SNAP_THRESHOLD,
@@ -801,6 +862,57 @@ impl App {
             self.highlight_hovered(ui);
         }
         self.draw_selection_highlight(ui);
+    }
+
+    /// Draw circuit components with an optional filter
+    /// If filter returns false for an instance, it won't be drawn
+    fn draw_circuit_components<F>(&mut self, ui: &mut Ui, mut filter: F)
+    where
+        F: FnMut(InstanceId) -> bool,
+    {
+        // Draw world - apply filter to determine which instances to draw
+        for id in self.db.circuit.gate_ids() {
+            if filter(id) {
+                self.draw_gate(ui, id);
+            }
+        }
+        for id in self.db.circuit.power_ids() {
+            if filter(id) {
+                self.draw_power(ui, id);
+            }
+        }
+        for id in self.db.circuit.lamp_ids() {
+            if filter(id) {
+                self.draw_lamp(ui, id);
+            }
+        }
+        for id in self.db.circuit.clock_ids() {
+            if filter(id) {
+                self.draw_clock(ui, id);
+            }
+        }
+        for id in self.db.circuit.module_ids() {
+            if filter(id) {
+                self.draw_module(ui, id);
+            }
+        }
+        for id in self.db.circuit.wire_ids() {
+            if filter(id) {
+                let has_current = self.is_on(wire_start(id));
+                self.draw_wire(
+                    ui,
+                    id,
+                    self.hovered
+                        .as_ref()
+                        .is_some_and(|f| matches!(f, Hover::Instance(_)) && f.instance() == id),
+                    has_current,
+                );
+            }
+        }
+        // Collect labels to avoid borrowing issues
+        for id in self.db.circuit.label_ids() {
+            self.draw_label(ui, id);
+        }
     }
 
     fn draw_grid(ui: &Ui, canvas_rect: Rect, viewport_offset: Vec2) {
@@ -865,7 +977,10 @@ impl App {
         if response.dragged()
             && let Some(mouse) = ui.ctx().pointer_interact_pos()
         {
-            self.selected.clear();
+            // Only clear selection if dragging an unselected item
+            if !self.selected.contains(&id) {
+                self.selected.clear();
+            }
             self.set_drag(Drag::Canvas(CanvasDrag::Single {
                 id,
                 offset: pos - mouse,
@@ -894,10 +1009,7 @@ impl App {
 
             if pin_resp.dragged() {
                 self.selected.clear();
-                self.set_drag(Drag::PinToWire {
-                    source_pin: pin,
-                    start_pos: pin_pos,
-                });
+                self.set_drag(Drag::PinToWire { source_pin: pin });
             }
 
             if self.is_on(pin) {
@@ -913,7 +1025,7 @@ impl App {
 
     fn draw_gate(&mut self, ui: &mut Ui, id: InstanceId) {
         let (pos, kind) = {
-            let gate = self.db.get_gate(id);
+            let gate = self.db.circuit.get_gate(id);
             (gate.pos, gate.kind)
         };
         self.draw_instance_graphics_new(ui, kind.graphics(), self.adjusted_pos(pos), id);
@@ -921,16 +1033,16 @@ impl App {
 
     fn draw_power(&mut self, ui: &mut Ui, id: InstanceId) {
         let (pos, graphics) = {
-            let power = self.db.get_power(id);
+            let power = self.db.circuit.get_power(id);
             (power.pos, power.graphics())
         };
         self.draw_instance_graphics_new(ui, graphics, self.adjusted_pos(pos), id);
     }
 
     fn draw_lamp(&mut self, ui: &mut Ui, id: InstanceId) {
-        let has_current = self.is_on(self.db.lamp_input(id));
+        let has_current = self.is_on(lamp_input(id));
         let (pos, graphics) = {
-            let lamp = self.db.get_lamp(id);
+            let lamp = self.db.circuit.get_lamp(id);
             (lamp.pos, lamp.graphics())
         };
         let pos = self.adjusted_pos(pos);
@@ -955,7 +1067,7 @@ impl App {
 
     fn draw_clock(&mut self, ui: &mut Ui, id: InstanceId) {
         let (pos, graphics) = {
-            let clock = self.db.get_clock(id);
+            let clock = self.db.circuit.get_clock(id);
             (clock.pos, clock.graphics())
         };
         let pos = self.adjusted_pos(pos);
@@ -964,127 +1076,95 @@ impl App {
 
     fn draw_module(&mut self, ui: &mut Ui, id: InstanceId) {
         let (pos, definition_index) = {
-            let module = self.db.get_module(id);
+            let module = self.db.circuit.get_module(id);
             (module.pos, module.definition_index)
         };
         let screen_center = pos - self.viewport_offset;
 
-        {
-            let definition = self.db.get_module(id).definition(&self.db);
-            // TODO: Pins for modules
+        let (name, pins, pin_offsets) = {
+            let definition = self.db.circuit.get_module(id).definition(&self.db);
             let name = definition.name.clone();
-            let pins = [];
+            let pins = definition.get_unconnected_pins(&self.db, id);
 
-            let rect = Rect::from_center_size(screen_center, self.canvas_config.base_gate_size);
-            ui.painter()
-                .rect_filled(rect, CornerRadius::default(), egui::Color32::DARK_BLUE);
+            let pin_offsets: Vec<Vec2> = pins
+                .iter()
+                .map(|pin| definition.calculate_pin_offset(&self.db, pin, &self.canvas_config))
+                .collect();
 
-            ui.painter().text(
-                rect.center(),
-                egui::Align2::CENTER_CENTER,
-                &name,
-                egui::FontId::default(),
-                egui::Color32::WHITE,
-            );
+            (name, pins, pin_offsets)
+        };
 
-            let response = ui.allocate_rect(rect, Sense::click_and_drag());
+        let rect = Rect::from_center_size(screen_center, self.canvas_config.base_gate_size);
+        ui.painter()
+            .rect_filled(rect, CornerRadius::default(), egui::Color32::DARK_BLUE);
 
-            if response.clicked() {
+        ui.painter().text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            name,
+            egui::FontId::default(),
+            egui::Color32::WHITE,
+        );
+
+        let response = ui.allocate_rect(rect, Sense::click_and_drag());
+
+        if response.clicked() {
+            self.selected.clear();
+            self.selected.insert(id);
+        }
+        if response.hovered() {
+            self.hovered = Some(Hover::Instance(id));
+        }
+        if response.dragged()
+            && let Some(mouse) = ui.ctx().pointer_interact_pos()
+        {
+            // Only clear selection if dragging an unselected item
+            if !self.selected.contains(&id) {
                 self.selected.clear();
-                self.selected.insert(id);
             }
-            if response.hovered() {
-                self.hovered = Some(Hover::Instance(id));
-            }
-            if response.dragged()
-                && let Some(mouse) = ui.ctx().pointer_interact_pos()
-            {
-                self.selected.clear();
-                self.set_drag(Drag::Canvas(CanvasDrag::Single {
-                    id,
-                    offset: screen_center - mouse,
-                }));
-            }
+            self.set_drag(Drag::Canvas(CanvasDrag::Single {
+                id,
+                offset: screen_center - mouse,
+            }));
+        }
 
-            // Collect input and output pin indices
-            let mut input_indices = vec![];
-            let mut output_indices = vec![];
-            for (i, &kind) in pins.iter().enumerate() {
-                match kind {
-                    crate::assets::PinKind::Input => input_indices.push(i),
-                    crate::assets::PinKind::Output => output_indices.push(i),
-                }
-            }
+        for (pin_index, (&pin, &pin_offset)) in pins.iter().zip(pin_offsets.iter()).enumerate() {
+            let pin_pos_world = pos + pin_offset;
+            let pin_screen_pos = self.adjusted_pos(pin_pos_world);
 
-            // Base size for layout
-            let base_size = self.canvas_config.base_gate_size;
-            let left_x = screen_center.x - base_size.x / 2.0;
-            let right_x = screen_center.x + base_size.x / 2.0;
-            let top_y = screen_center.y - base_size.y / 2.0;
-            let _bottom_y = screen_center.y + base_size.y / 2.0;
-
-            // Helper function to place pins
-            let mut place_pins = |indices: &Vec<usize>, x: f32| {
-                if indices.is_empty() {
-                    return;
-                }
-                let num = indices.len();
-                let spacing = if num == 1 {
-                    0.0
-                } else {
-                    base_size.y / (num - 1) as f32
-                };
-                for (local_i, &pin_index) in indices.iter().enumerate() {
-                    let y = if num == 1 {
-                        screen_center.y
-                    } else {
-                        top_y + local_i as f32 * spacing
-                    };
-                    let pin_pos_world = egui::Pos2::new(x, y);
-                    let pin_screen_pos = self.adjusted_pos(pin_pos_world);
-
-                    let pin_color = match pins[pin_index] {
-                        crate::assets::PinKind::Input => egui::Color32::LIGHT_RED,
-                        crate::assets::PinKind::Output => egui::Color32::LIGHT_GREEN,
-                    };
-
-                    ui.painter().circle_filled(
-                        pin_screen_pos,
-                        self.canvas_config.base_pin_size,
-                        pin_color,
-                    );
-
-                    let has_current = self.is_on(Pin::new(id, pin_index as u32, pins[pin_index]));
-
-                    if has_current {
-                        ui.painter().circle_stroke(
-                            pin_screen_pos,
-                            self.canvas_config.base_pin_size + 3.0,
-                            egui::Stroke::new(2.0, COLOR_PIN_POWERED_OUTLINE),
-                        );
-                    }
-
-                    let pin_rect = Rect::from_center_size(
-                        pin_screen_pos,
-                        Vec2::splat(self.canvas_config.base_pin_size + PIN_HOVER_THRESHOLD),
-                    );
-                    let pin_resp = ui.allocate_rect(pin_rect, Sense::drag());
-                    let pin = Pin::new(id, pin_index as u32, pins[pin_index]);
-                    if pin_resp.hovered() {
-                        self.hovered = Some(Hover::Pin(pin));
-                    }
-                    if pin_resp.dragged() {
-                        self.selected.clear();
-                        self.set_drag(Drag::PinToWire {
-                            source_pin: pin,
-                            start_pos: pin_pos_world,
-                        });
-                    }
-                }
+            let pin_color = match pin.kind {
+                PinKind::Input => egui::Color32::LIGHT_RED,
+                PinKind::Output => egui::Color32::LIGHT_GREEN,
             };
 
-            place_pins(&input_indices, left_x);
-            place_pins(&output_indices, right_x);
+            ui.painter()
+                .circle_filled(pin_screen_pos, self.canvas_config.base_pin_size, pin_color);
+
+            let has_current = self.is_on(Pin::new(id, pin_index as u32, pin.kind));
+
+            if has_current {
+                ui.painter().circle_stroke(
+                    pin_screen_pos,
+                    self.canvas_config.base_pin_size + 3.0,
+                    egui::Stroke::new(2.0, COLOR_PIN_POWERED_OUTLINE),
+                );
+            }
+
+            let pin_rect = Rect::from_center_size(
+                pin_screen_pos,
+                Vec2::splat(self.canvas_config.base_pin_size + PIN_HOVER_THRESHOLD),
+            );
+            let pin_resp = ui.allocate_rect(pin_rect, Sense::drag());
+            let pin_obj = Pin::new(id, pin_index as u32, pin.kind);
+            if pin_resp.hovered() {
+                self.hovered = Some(Hover::Pin(pin_obj));
+            }
+            if pin_resp.dragged() {
+                self.selected.clear();
+                self.set_drag(Drag::PinToWire {
+                    source_pin: pin_obj,
+                });
+            }
         }
     }
 
@@ -1097,7 +1177,7 @@ impl App {
         if hovered {
             color = COLOR_WIRE_HOVER;
         }
-        let wire = *self.db.get_wire(id);
+        let wire = *self.db.circuit.get_wire(id);
         let mut pin_interact = false;
 
         for (i, pin_pos) in [wire.start, wire.end].iter().enumerate() {
@@ -1129,10 +1209,7 @@ impl App {
                         start: pin.index != 1,
                     });
                 } else {
-                    self.set_drag(Drag::PinToWire {
-                        source_pin: pin,
-                        start_pos: pin_pos,
-                    });
+                    self.set_drag(Drag::PinToWire { source_pin: pin });
                 }
                 pin_interact = true;
             }
@@ -1144,6 +1221,7 @@ impl App {
             // Only show red/green if pin is not connected
             let is_connected = self
                 .db
+                .circuit
                 .connections
                 .iter()
                 .any(|conn| conn.a == pin || conn.b == pin);
@@ -1222,7 +1300,7 @@ impl App {
     }
     fn draw_label(&mut self, ui: &mut Ui, id: LabelId) {
         let (pos, text) = {
-            let label = self.db.get_label(id);
+            let label = self.db.circuit.get_label(id);
             (label.pos, label.text.clone())
         };
         let screen_pos = pos - self.viewport_offset;
@@ -1290,16 +1368,30 @@ impl App {
             return;
         };
 
+        if let Hover::Instance(id) = hovered
+            && self.db.is_hidden(id)
+        {
+            return;
+        }
+        if let Hover::Pin(pin) = hovered
+            && self.db.is_hidden(pin.ins)
+        {
+            return;
+        }
+
         match hovered {
             Hover::Pin(pin) => {
                 let color = COLOR_HOVER_PIN_TO_WIRE;
-                let pin_pos = self.db.pin_position(pin, &self.canvas_config) - self.viewport_offset;
+                let pin_pos = self
+                    .circuit()
+                    .pin_position(pin, &self.canvas_config, &self.db)
+                    - self.viewport_offset;
                 ui.painter()
                     .circle_filled(pin_pos, PIN_HOVER_THRESHOLD, color);
             }
-            Hover::Instance(hovered) => match self.db.ty(hovered) {
+            Hover::Instance(hovered) => match self.db.circuit.ty(hovered) {
                 InstanceKind::Gate(_) => {
-                    let gate = self.db.get_gate(hovered);
+                    let gate = self.db.circuit.get_gate(hovered);
                     let outer = Rect::from_center_size(
                         gate.pos - self.viewport_offset,
                         self.canvas_config.base_gate_size + INSTANEC_OUTLINE,
@@ -1312,7 +1404,7 @@ impl App {
                     );
                 }
                 InstanceKind::Power => {
-                    let power = self.db.get_power(hovered);
+                    let power = self.db.circuit.get_power(hovered);
                     let outer = Rect::from_center_size(
                         power.pos - self.viewport_offset,
                         self.canvas_config.base_gate_size + INSTANEC_OUTLINE,
@@ -1325,7 +1417,7 @@ impl App {
                     );
                 }
                 InstanceKind::Lamp => {
-                    let lamp = self.db.get_lamp(hovered);
+                    let lamp = self.db.circuit.get_lamp(hovered);
                     let outer = Rect::from_center_size(
                         lamp.pos - self.viewport_offset,
                         self.canvas_config.base_gate_size + INSTANEC_OUTLINE,
@@ -1338,7 +1430,7 @@ impl App {
                     );
                 }
                 InstanceKind::Clock => {
-                    let clock = self.db.get_clock(hovered);
+                    let clock = self.db.circuit.get_clock(hovered);
                     let outer = Rect::from_center_size(
                         clock.pos - self.viewport_offset,
                         self.canvas_config.base_gate_size + INSTANEC_OUTLINE,
@@ -1353,7 +1445,7 @@ impl App {
                 // Wire is highlighted when drawing
                 InstanceKind::Wire => {}
                 InstanceKind::Module(_) => {
-                    let cc = self.db.get_module(hovered);
+                    let cc = self.db.circuit.get_module(hovered);
                     let outer = Rect::from_center_size(
                         cc.pos - self.viewport_offset,
                         self.canvas_config.base_gate_size + INSTANEC_OUTLINE,
@@ -1369,15 +1461,15 @@ impl App {
         }
     }
 
-    pub fn is_pin_connected(&self, pin: Pin) -> bool {
-        self.db.connections.iter().any(|c| c.a == pin || c.b == pin)
-    }
-
     fn draw_selection_highlight(&self, ui: &Ui) {
         for &id in &self.selected {
-            match self.db.ty(id) {
+            if self.db.is_hidden(id) {
+                continue;
+            }
+
+            match self.db.circuit.ty(id) {
                 InstanceKind::Gate(_) => {
-                    let g = self.db.get_gate(id);
+                    let g = self.db.circuit.get_gate(id);
                     let r = Rect::from_center_size(
                         g.pos - self.viewport_offset,
                         self.canvas_config.base_gate_size + INSTANEC_OUTLINE,
@@ -1390,7 +1482,7 @@ impl App {
                     );
                 }
                 InstanceKind::Power => {
-                    let p = self.db.get_power(id);
+                    let p = self.db.circuit.get_power(id);
                     let r = Rect::from_center_size(
                         p.pos - self.viewport_offset,
                         self.canvas_config.base_gate_size + INSTANEC_OUTLINE,
@@ -1403,7 +1495,7 @@ impl App {
                     );
                 }
                 InstanceKind::Lamp => {
-                    let l = self.db.get_lamp(id);
+                    let l = self.db.circuit.get_lamp(id);
                     let r = Rect::from_center_size(
                         l.pos - self.viewport_offset,
                         self.canvas_config.base_gate_size + INSTANEC_OUTLINE,
@@ -1416,7 +1508,7 @@ impl App {
                     );
                 }
                 InstanceKind::Clock => {
-                    let c = self.db.get_clock(id);
+                    let c = self.db.circuit.get_clock(id);
                     let r = Rect::from_center_size(
                         c.pos - self.viewport_offset,
                         self.canvas_config.base_gate_size + INSTANEC_OUTLINE,
@@ -1429,8 +1521,10 @@ impl App {
                     );
                 }
                 InstanceKind::Wire => {
-                    for pin in self.db.pins_of(id) {
-                        let pos = self.db.pin_position(pin, &self.canvas_config);
+                    for pin in self.circuit().pins_of(id, &self.db) {
+                        let pos = self
+                            .circuit()
+                            .pin_position(pin, &self.canvas_config, &self.db);
                         ui.painter().circle_filled(
                             pos - self.viewport_offset,
                             PIN_MOVE_HINT_D,
@@ -1439,7 +1533,7 @@ impl App {
                     }
                 }
                 InstanceKind::Module(_) => {
-                    let cc = self.db.get_module(id);
+                    let cc = self.db.circuit.get_module(id);
                     let r = Rect::from_center_size(
                         cc.pos - self.viewport_offset,
                         self.canvas_config.base_gate_size + INSTANEC_OUTLINE,
@@ -1457,19 +1551,6 @@ impl App {
 
     fn debug_string(&self, ui: &Ui) -> String {
         let mut out = String::new();
-        writeln!(
-            out,
-            "counts: gates={}, powers={}, lamps={}, clocks={}, wires={}, modules={}, custom_defs={}, conns={}",
-            self.db.gates.len(),
-            self.db.powers.len(),
-            self.db.lamps.len(),
-            self.db.clocks.len(),
-            self.db.wires.len(),
-            self.db.modules.len(),
-            self.db.module_definitions.len(),
-            self.db.connections.len()
-        )
-        .ok();
         let mouse_pos_world = self.mouse_pos_world(ui);
         writeln!(out, "mouse: {mouse_pos_world:?}").ok();
 
@@ -1481,6 +1562,7 @@ impl App {
         writeln!(out, "selected: {:?}", self.selected).ok();
         writeln!(out, "editing_label: {:?}", self.editing_label).ok();
         writeln!(out, "label_edit_buffer: {}", self.label_edit_buffer).ok();
+        writeln!(out, "viewing_module: {:?}", self.viewing_module).ok();
 
         // Simulation status
         writeln!(out, "\n=== Simulation Status ===").ok();
@@ -1513,126 +1595,34 @@ impl App {
             self.clock_controller.tick_interval
         )
         .ok();
-        writeln!(
-            out,
-            "Tick accumulator: {:.3}s",
-            self.clock_controller.tick_accumulator
-        )
-        .ok();
         writeln!(out, "Voltage: {}", self.clock_controller.voltage).ok();
-
-        writeln!(out, "\nGates:").ok();
-        for (id, g) in &self.db.gates {
-            writeln!(out, "  {}", g.display(&self.db)).ok();
-            // pins
-            if true {
-                for (i, pin) in g.kind.graphics().pins.iter().enumerate() {
-                    let pin_offset = pin.offset;
-                    let p = g.pos + pin_offset;
-                    let pin_instance = Pin::new(id, i as u32, pin.kind);
-                    writeln!(
-                        out,
-                        "    {} at ({:.1},{:.1})",
-                        pin_instance.display(&self.db),
-                        p.x,
-                        p.y
-                    )
-                    .ok();
-                }
-            }
-        }
-
-        writeln!(out, "\nPowers:").ok();
-        for (id, p) in &self.db.powers {
-            writeln!(out, "  {}", p.display(&self.db)).ok();
-            for (i, pin) in p.graphics().pins.iter().enumerate() {
-                let pin_offset = pin.offset;
-                let pp = p.pos + pin_offset;
-                let pin_instance = Pin::new(id, i as u32, pin.kind);
-                writeln!(
-                    out,
-                    "    {} at ({:.1},{:.1})",
-                    pin_instance.display(&self.db),
-                    pp.x,
-                    pp.y
-                )
-                .ok();
-            }
-        }
-
-        writeln!(out, "\nLamps:").ok();
-        for (id, lamp) in &self.db.lamps {
-            writeln!(out, "  {}", lamp.display(&self.db)).ok();
-            // Show pins
-            for (i, pin) in lamp.graphics().pins.iter().enumerate() {
-                let pin_offset = pin.offset;
-                let p = lamp.pos + pin_offset;
-                let pin_instance = Pin::new(id, i as u32, pin.kind);
-                writeln!(
-                    out,
-                    "    {} at ({:.1},{:.1})",
-                    pin_instance.display(&self.db),
-                    p.x,
-                    p.y
-                )
-                .ok();
-            }
-        }
-
-        writeln!(out, "\nClocks:").ok();
-        for (id, clock) in &self.db.clocks {
-            writeln!(out, "  {}", clock.display(&self.db)).ok();
-            // Show pins
-            for (i, pin) in clock.graphics().pins.iter().enumerate() {
-                let pin_offset = pin.offset;
-                let p = clock.pos + pin_offset;
-                let pin_instance = Pin::new(id, i as u32, pin.kind);
-                writeln!(
-                    out,
-                    "    {} at ({:.1},{:.1})",
-                    pin_instance.display(&self.db),
-                    p.x,
-                    p.y
-                )
-                .ok();
-            }
-        }
-
-        writeln!(out, "\nWires:").ok();
-        for (id, w) in &self.db.wires {
-            writeln!(out, "  {}", w.display(&self.db)).ok();
-            if true {
-                for pin in self.db.pins_of(id) {
-                    writeln!(out, "{}", pin.display_alone()).ok();
-                }
-            }
-        }
-
-        writeln!(out, "\nModules:").ok();
-        for (id, m) in &self.db.modules {
-            writeln!(out, "  {}", m.display(&self.db, id)).ok();
-        }
-
-        writeln!(out, "\nModule Def:").ok();
-        for (_id, m) in &self.db.module_definitions {
-            writeln!(out, "  {}", m.display_definition()).ok();
-        }
-
-        writeln!(out, "\nConnections:").ok();
-        for c in &self.db.connections {
-            writeln!(out, "  {}", c.display(&self.db)).ok();
-        }
 
         if self.potential_connections.is_empty() {
             writeln!(out, "\nPotential Connections: none").ok();
         } else {
             writeln!(out, "\nPotential Connections:").ok();
             for c in &self.potential_connections {
-                writeln!(out, "  {}", c.display(&self.db)).ok();
+                writeln!(out, "  {}", c.display(self.circuit())).ok();
             }
         }
 
         writeln!(out, "\n{}", self.connection_manager.debug_info()).ok();
+
+        writeln!(out, "\n").ok();
+
+        out.write_str(&self.circuit().display(&self.db)).ok();
+
+        if !self.db.module_definitions.is_empty() {
+            writeln!(out, "\nModule Def:").ok();
+            let mut iter = self.db.module_definitions.iter();
+            if let Some((id, first)) = iter.next() {
+                writeln!(out, "  {}", first.display_definition(&self.db, id)).ok();
+            }
+            for (id, m) in iter {
+                writeln!(out).ok();
+                writeln!(out, "  {}", m.display_definition(&self.db, id)).ok();
+            }
+        }
 
         out
     }
@@ -1643,30 +1633,30 @@ impl App {
     ) -> (Rect, Vec<ClipBoardItem>) {
         let mut points = vec![];
         for &id in instances {
-            match self.db.ty(id) {
+            match self.db.circuit.ty(id) {
                 InstanceKind::Gate(_) => {
-                    let g = self.db.get_gate(id);
+                    let g = self.db.circuit.get_gate(id);
                     points.push(g.pos);
                 }
                 InstanceKind::Power => {
-                    let p = self.db.get_power(id);
+                    let p = self.db.circuit.get_power(id);
                     points.push(p.pos);
                 }
                 InstanceKind::Wire => {
-                    let w = self.db.get_wire(id);
+                    let w = self.db.circuit.get_wire(id);
                     points.push(w.start);
                     points.push(w.end);
                 }
                 InstanceKind::Lamp => {
-                    let l = self.db.get_lamp(id);
+                    let l = self.db.circuit.get_lamp(id);
                     points.push(l.pos);
                 }
                 InstanceKind::Clock => {
-                    let c = self.db.get_clock(id);
+                    let c = self.db.circuit.get_clock(id);
                     points.push(c.pos);
                 }
                 InstanceKind::Module(_) => {
-                    let cc = self.db.get_module(id);
+                    let cc = self.db.circuit.get_module(id);
                     points.push(cc.pos);
                 }
             }
@@ -1677,30 +1667,30 @@ impl App {
         let mut object_pos = vec![];
 
         for &id in instances {
-            let ty = self.db.ty(id);
+            let ty = self.db.circuit.ty(id);
             match ty {
                 InstanceKind::Gate(kind) => {
-                    let g = self.db.get_gate(id);
+                    let g = self.db.circuit.get_gate(id);
                     object_pos.push(ClipBoardItem::Gate(kind, center - g.pos));
                 }
                 InstanceKind::Power => {
-                    let p = self.db.get_power(id);
+                    let p = self.db.circuit.get_power(id);
                     object_pos.push(ClipBoardItem::Power(center - p.pos));
                 }
                 InstanceKind::Wire => {
-                    let w = self.db.get_wire(id);
+                    let w = self.db.circuit.get_wire(id);
                     object_pos.push(ClipBoardItem::Wire(center - w.start, center - w.end));
                 }
                 InstanceKind::Lamp => {
-                    let l = self.db.get_lamp(id);
+                    let l = self.db.circuit.get_lamp(id);
                     object_pos.push(ClipBoardItem::Lamp(center - l.pos));
                 }
                 InstanceKind::Clock => {
-                    let c = self.db.get_clock(id);
+                    let c = self.db.circuit.get_clock(id);
                     object_pos.push(ClipBoardItem::Clock(center - c.pos));
                 }
                 InstanceKind::Module(_) => {
-                    let cc = self.db.get_module(id);
+                    let cc = self.db.circuit.get_module(id);
                     object_pos.push(ClipBoardItem::Module(cc.definition_index, center - cc.pos));
                 }
             }
@@ -1731,7 +1721,7 @@ impl App {
         for to_paste in self.clipboard.clone() {
             match to_paste {
                 ClipBoardItem::Gate(gate_kind, offset) => {
-                    let id = self.db.new_gate(Gate {
+                    let id = self.db.circuit.new_gate(Gate {
                         kind: gate_kind,
                         pos: mouse - offset,
                     });
@@ -1739,7 +1729,7 @@ impl App {
                     self.selected.insert(id);
                 }
                 ClipBoardItem::Power(offset) => {
-                    let id = self.db.new_power(Power {
+                    let id = self.db.circuit.new_power(Power {
                         pos: mouse - offset,
                         on: false,
                     });
@@ -1747,12 +1737,12 @@ impl App {
                     self.selected.insert(id);
                 }
                 ClipBoardItem::Wire(s, e) => {
-                    let id = self.db.new_wire(Wire::new(mouse - s, mouse - e));
+                    let id = self.db.circuit.new_wire(Wire::new(mouse - s, mouse - e));
                     self.connection_manager.mark_instance_dirty(id);
                     self.selected.insert(id);
                 }
                 ClipBoardItem::Module(def_index, offset) => {
-                    let id = self.db.new_module(Module {
+                    let id = self.db.new_module_with_flattening(Module {
                         pos: mouse - offset,
                         definition_index: def_index,
                     });
@@ -1760,27 +1750,27 @@ impl App {
                     self.selected.insert(id);
                 }
                 ClipBoardItem::Lamp(offset) => {
-                    let id = self.db.new_lamp(Lamp {
+                    let id = self.db.circuit.new_lamp(Lamp {
                         pos: mouse - offset,
                     });
                     self.selected.insert(id);
                 }
                 ClipBoardItem::Clock(offset) => {
-                    let id = self.db.new_clock(Clock {
+                    let id = self.db.circuit.new_clock(Clock {
                         pos: mouse - offset,
-                        period: 1,
                     });
                     self.selected.insert(id);
                 }
                 ClipBoardItem::Label(text, offset) => {
-                    let _id = self.db.new_label(Label {
+                    let _id = self.db.circuit.new_label(Label {
                         pos: mouse - offset,
                         text,
                     });
                 }
             }
         }
-        self.connection_manager.rebuild_spatial_index(&self.db);
+        self.connection_manager
+            .rebuild_spatial_index(&self.db.circuit, &self.db);
         self.current_dirty = true;
     }
 
@@ -1790,10 +1780,12 @@ impl App {
         };
         let selected = *selected;
 
-        match self.db.ty(selected) {
+        match self.db.circuit.ty(selected) {
             InstanceKind::Wire => {
-                for pin in self.db.pins_of(selected) {
-                    let pos = self.db.pin_position(pin, &self.canvas_config);
+                for pin in self.circuit().pins_of(selected, &self.db) {
+                    let pos = self
+                        .circuit()
+                        .pin_position(pin, &self.canvas_config, &self.db);
                     ui.painter().circle_filled(
                         pos - self.viewport_offset,
                         PIN_MOVE_HINT_D,
@@ -1820,12 +1812,12 @@ impl App {
     }
 
     pub fn split_wire_at_point(&mut self, wire_id: InstanceId, split_point: Pos2) {
-        let original_wire = *self.db.get_wire(wire_id);
+        let original_wire = *self.db.circuit.get_wire(wire_id);
 
         let new_wire = Wire::new(split_point, original_wire.end);
-        let new_wire_id = self.db.new_wire(new_wire);
+        let new_wire_id = self.db.circuit.new_wire(new_wire);
 
-        let original_wire_mut = self.db.get_wire_mut(wire_id);
+        let original_wire_mut = self.db.circuit.get_wire_mut(wire_id);
         original_wire_mut.end = split_point;
 
         self.connection_manager
@@ -1840,10 +1832,10 @@ impl App {
         if !self.selected.contains(&instance_id) || self.selected.len() != 1 {
             return None;
         }
-        if !matches!(self.db.ty(instance_id), InstanceKind::Wire) {
+        if !matches!(self.db.circuit.ty(instance_id), InstanceKind::Wire) {
             return None;
         }
-        let wire = self.db.get_wire(instance_id);
+        let wire = self.db.circuit.get_wire(instance_id);
 
         if wire.dist_to_closest_point_on_line(mouse) > NEW_PIN_ON_WIRE_THRESHOLD {
             return None;
@@ -1890,7 +1882,7 @@ impl App {
     }
 
     // Adjust position of an object to this screen
-    fn adjusted_pos(&self, pos: Pos2) -> Pos2 {
+    pub fn adjusted_pos(&self, pos: Pos2) -> Pos2 {
         pos - self.viewport_offset
     }
 

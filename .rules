@@ -9,7 +9,7 @@
 
 **Architecture:**
 
-- Rust 2024 edition with egui/eframe GUI framework
+- egui GUI framework
 - Cross-platform (native + WASM web builds)
 - Core modules: app.rs (main logic), connection_manager, custom_circuit, drag, save_load
 - Uses slotmap for entity management, serde for persistence
@@ -22,15 +22,11 @@
 - Imports: std first, then external crates, then local modules
 - Naming: snake_case functions/variables, PascalCase types, SCREAMING_SNAKE_CASE constants
 - Error handling: Result/Option types preferred over panics
-- Run `./check.sh` after changes to ensure no warnings/errors
+- Run `./fix.sh and ./check.sh` after changes to ensure no warnings/errors
+- Use eprintln for adding debug prints to code and tests when debuggin
 
 
-Implement your code in TDD style
+**Guidelines:**
 
-**TDD Principles**
-
- - Write tests FIRST, watch them fail
- - Implement minimal code to pass
- - Refactor only after tests pass
- - Each test validates one specific behavior
- - Tests serve as documentation and specification
+- Write tests first.
+- When adding new structs, information to program think how to provide a way to view it's internal status. Similar to how debug_string is working.

@@ -1,0 +1,100 @@
+name: PR Preview Deploy
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches:
+      - main
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  build-and-deploy-preview:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup toolchain for wasm
+        run: |
+          rustup update stable
+          rustup default stable
+          rustup set profile minimal
+          rustup target add wasm32-unknown-unknown
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Download and install Trunk binary
+        run: wget -qO- https://github.com/thedodd/trunk/releases/latest/download/trunk-x86_64-unknown-linux-gnu.tar.gz | tar -xzf-
+
+      - name: Get branch name
+        id: branch
+        run: |
+          # Extract branch name from PR head ref and sanitize it for URL
+          BRANCH_NAME="${{ github.head_ref }}"
+          SANITIZED_BRANCH=$(echo "$BRANCH_NAME" | sed 's/[^a-zA-Z0-9-]/-/g' | tr '[:upper:]' '[:lower:]')
+          echo "name=$SANITIZED_BRANCH" >> $GITHUB_OUTPUT
+
+      - name: Build for PR preview
+        run: ./trunk build --release --public-url $public_url
+        env:
+          public_url: "https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/${{ steps.branch.outputs.name }}"
+
+      - name: Deploy PR Preview
+        uses: JamesIves/github-pages-deploy-action@v4
+        with:
+          folder: dist
+          target-folder: ${{ steps.branch.outputs.name }}
+          clean: false
+          single-commit: false
+
+      - name: Comment PR with preview URL
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prNumber = context.payload.pull_request.number;
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const branchName = '${{ steps.branch.outputs.name }}';
+            const previewUrl = `https://${owner}.github.io/${repo}/${branchName}/`;
+
+            // Find existing comment
+            const { data: comments } = await github.rest.issues.listComments({
+              owner,
+              repo,
+              issue_number: prNumber,
+            });
+
+            const botComment = comments.find(comment =>
+              comment.user.type === 'Bot' &&
+              comment.body.includes('Preview deployment')
+            );
+
+            const commentBody = `## 🚀 Preview deployment ready!
+
+            Your PR preview has been deployed to:
+            **${previewUrl}**
+
+            Branch: \`${branchName}\`
+
+            The preview will be updated automatically when you push new commits to this PR.`;
+
+            if (botComment) {
+              // Update existing comment
+              await github.rest.issues.updateComment({
+                owner,
+                repo,
+                comment_id: botComment.id,
+                body: commentBody
+              });
+            } else {
+              // Create new comment
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number: prNumber,
+                body: commentBody
+              });
+            }

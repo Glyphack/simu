@@ -35,7 +35,6 @@ pub enum Drag {
     },
     PinToWire {
         source_pin: Pin,
-        start_pos: Pos2,
     },
     BranchWire {
         original_wire_id: InstanceId,
@@ -75,39 +74,64 @@ impl App {
             }
             Some(Drag::Canvas(canvas_drag)) => match canvas_drag {
                 CanvasDrag::Single { id, offset } => {
-                    let new_pos = mouse + offset;
-                    let moved = match self.db.ty(id) {
-                        InstanceKind::Gate(_)
-                        | InstanceKind::Power
-                        | InstanceKind::Lamp
-                        | InstanceKind::Module(_)
-                        | InstanceKind::Clock => {
-                            let current_pos = match self.db.ty(id) {
-                                InstanceKind::Gate(_) => self.db.get_gate(id).pos,
-                                InstanceKind::Power => self.db.get_power(id).pos,
-                                InstanceKind::Lamp => self.db.get_lamp(id).pos,
-                                InstanceKind::Clock => self.db.get_clock(id).pos,
-                                InstanceKind::Module(_) => self.db.get_module(id).pos,
-                                InstanceKind::Wire => unreachable!(),
-                            };
-                            let desired = new_pos - current_pos;
-                            let ids = [id];
-                            self.db.move_nonwires_and_resize_wires(&ids, desired);
-                            desired.length_sq() > 0.0
-                        }
-                        InstanceKind::Wire => {
-                            let w = self.db.get_wire_mut(id);
-                            let center =
-                                pos2((w.start.x + w.end.x) * 0.5, (w.start.y + w.end.y) * 0.5);
-                            let desired = new_pos - center;
-                            w.start += desired;
-                            w.end += desired;
-                            desired.length_sq() > 0.0
-                        }
-                    };
+                    // If the dragged item is part of a selection, move all selected items
+                    if self.selected.contains(&id) && self.selected.len() > 1 {
+                        let new_pos = mouse + offset;
+                        let current_pos = match self.db.circuit.ty(id) {
+                            InstanceKind::Gate(_) => self.db.circuit.get_gate(id).pos,
+                            InstanceKind::Power => self.db.circuit.get_power(id).pos,
+                            InstanceKind::Lamp => self.db.circuit.get_lamp(id).pos,
+                            InstanceKind::Clock => self.db.circuit.get_clock(id).pos,
+                            InstanceKind::Module(_) => self.db.circuit.get_module(id).pos,
+                            InstanceKind::Wire => {
+                                let w = self.db.circuit.get_wire(id);
+                                pos2((w.start.x + w.end.x) * 0.5, (w.start.y + w.end.y) * 0.5)
+                            }
+                        };
+                        let desired = new_pos - current_pos;
 
-                    if moved {
-                        self.connection_manager.mark_instance_dirty(id);
+                        let group: Vec<InstanceId> = self.selected.iter().copied().collect();
+                        self.db.move_nonwires_and_resize_wires(&group, desired);
+
+                        if desired.length_sq() > 0.0 {
+                            self.connection_manager.mark_instances_dirty(&group);
+                        }
+                    } else {
+                        // Move single item only
+                        let new_pos = mouse + offset;
+                        let moved = match self.db.circuit.ty(id) {
+                            InstanceKind::Gate(_)
+                            | InstanceKind::Power
+                            | InstanceKind::Lamp
+                            | InstanceKind::Module(_)
+                            | InstanceKind::Clock => {
+                                let current_pos = match self.db.circuit.ty(id) {
+                                    InstanceKind::Gate(_) => self.db.circuit.get_gate(id).pos,
+                                    InstanceKind::Power => self.db.circuit.get_power(id).pos,
+                                    InstanceKind::Lamp => self.db.circuit.get_lamp(id).pos,
+                                    InstanceKind::Clock => self.db.circuit.get_clock(id).pos,
+                                    InstanceKind::Module(_) => self.db.circuit.get_module(id).pos,
+                                    InstanceKind::Wire => unreachable!(),
+                                };
+                                let desired = new_pos - current_pos;
+                                let ids = [id];
+                                self.db.move_nonwires_and_resize_wires(&ids, desired);
+                                desired.length_sq() > 0.0
+                            }
+                            InstanceKind::Wire => {
+                                let w = self.db.circuit.get_wire_mut(id);
+                                let center =
+                                    pos2((w.start.x + w.end.x) * 0.5, (w.start.y + w.end.y) * 0.5);
+                                let desired = new_pos - center;
+                                w.start += desired;
+                                w.end += desired;
+                                desired.length_sq() > 0.0
+                            }
+                        };
+
+                        if moved {
+                            self.connection_manager.mark_instance_dirty(id);
+                        }
                     }
                 }
                 CanvasDrag::Selected { start } => {
@@ -125,7 +149,7 @@ impl App {
                 }
             },
             Some(Drag::Resize { id, start }) => {
-                let wire = self.db.get_wire_mut(id);
+                let wire = self.db.circuit.get_wire_mut(id);
                 let mut moved = false;
 
                 if start {
@@ -148,15 +172,16 @@ impl App {
                     self.connection_manager.mark_instance_dirty(id);
                 }
             }
-            Some(Drag::PinToWire {
-                source_pin: _,
-                start_pos,
-            }) => {
-                let drag_distance = (mouse - start_pos).length();
+            // TODO: There is an issue with non zero viewport_offset. It causes the wire to start
+            // from wrong place and distance to calculate wrong
+            Some(Drag::PinToWire { source_pin }) => {
+                let start = self.adjusted_pos(source_pin.pos(&self.db, &self.canvas_config));
+                let end_abs = mouse;
+                let drag_distance = start.distance(end_abs);
 
                 if drag_distance >= MIN_WIRE_SIZE {
-                    let wire = Wire::new(start_pos, mouse);
-                    let wire_id = self.db.new_wire(wire);
+                    let wire = Wire::new(start, mouse);
+                    let wire_id = self.db.circuit.new_wire(wire);
 
                     self.drag = Some(Drag::Resize {
                         id: wire_id,
@@ -164,14 +189,9 @@ impl App {
                     });
 
                     self.connection_manager.mark_instance_dirty(wire_id);
-                } else if drag_distance > 2.0 {
-                    ui.painter().line_segment(
-                        [
-                            start_pos - self.viewport_offset,
-                            mouse - self.viewport_offset,
-                        ],
-                        Stroke::new(2.0, COLOR_HOVER_PIN_TO_WIRE),
-                    );
+                } else {
+                    ui.painter()
+                        .line_segment([start, mouse], Stroke::new(2.0, COLOR_HOVER_PIN_TO_WIRE));
                 }
             }
             Some(Drag::BranchWire {
@@ -184,7 +204,7 @@ impl App {
                 if drag_distance >= MIN_WIRE_SIZE {
                     self.split_wire_at_point(original_wire_id, split_point);
                     let branch_wire = Wire::new(split_point, mouse);
-                    let branch_wire_id = self.db.new_wire(branch_wire);
+                    let branch_wire_id = self.db.circuit.new_wire(branch_wire);
 
                     self.drag = Some(Drag::Resize {
                         id: branch_wire_id,
@@ -204,7 +224,7 @@ impl App {
             }
             Some(Drag::Label { id, offset }) => {
                 let new_pos = mouse + offset;
-                let label = self.db.get_label_mut(id);
+                let label = self.db.circuit.get_label_mut(id);
                 if label.pos != new_pos {
                     label.pos = new_pos;
                 }
@@ -222,7 +242,13 @@ impl App {
         match drag {
             Drag::Canvas(canvas_drag) => match canvas_drag {
                 CanvasDrag::Single { id, offset: _ } => {
-                    self.connection_manager.mark_instance_dirty(id);
+                    // If the item was part of a selection, mark all selected items as dirty
+                    if self.selected.contains(&id) && self.selected.len() > 1 {
+                        let selected: Vec<InstanceId> = self.selected.iter().copied().collect();
+                        self.connection_manager.mark_instances_dirty(&selected);
+                    } else {
+                        self.connection_manager.mark_instance_dirty(id);
+                    }
                     self.current_dirty = true;
                 }
                 CanvasDrag::Selected { start: _ } => {
@@ -236,37 +262,37 @@ impl App {
                 let max = pos2(start.x.max(mouse_pos.x), start.y.max(mouse_pos.y));
                 let rect = Rect::from_min_max(min, max);
                 let mut sel: HashSet<InstanceId> = HashSet::new();
-                for (id, g) in &self.db.gates {
+                for (id, g) in &self.circuit().gates {
                     let r = Rect::from_center_size(g.pos, self.canvas_config.base_gate_size);
                     if rect.contains_rect(r) {
                         sel.insert(id);
                     }
                 }
-                for (id, p) in &self.db.powers {
+                for (id, p) in &self.circuit().powers {
                     let r = Rect::from_center_size(p.pos, self.canvas_config.base_gate_size);
                     if rect.contains_rect(r) {
                         sel.insert(id);
                     }
                 }
-                for (id, l) in &self.db.lamps {
+                for (id, l) in &self.circuit().lamps {
                     let r = Rect::from_center_size(l.pos, self.canvas_config.base_gate_size);
                     if rect.contains_rect(r) {
                         sel.insert(id);
                     }
                 }
-                for (id, c) in &self.db.clocks {
+                for (id, c) in &self.circuit().clocks {
                     let r = Rect::from_center_size(c.pos, self.canvas_config.base_gate_size);
                     if rect.contains_rect(r) {
                         sel.insert(id);
                     }
                 }
-                for (id, m) in &self.db.modules {
+                for (id, m) in &self.circuit().modules {
                     let r = Rect::from_center_size(m.pos, self.canvas_config.base_gate_size);
                     if rect.contains_rect(r) {
                         sel.insert(id);
                     }
                 }
-                for (id, w) in &self.db.wires {
+                for (id, w) in &self.circuit().wires {
                     if rect.contains(w.start) && rect.contains(w.end) {
                         sel.insert(id);
                     }
@@ -277,11 +303,7 @@ impl App {
                 self.connection_manager.mark_instance_dirty(id);
                 self.current_dirty = true;
             }
-            Drag::PinToWire {
-                source_pin: _,
-                start_pos: _,
-            }
-            | Drag::Label { id: _, offset: _ } => {
+            Drag::PinToWire { source_pin: _ } | Drag::Label { id: _, offset: _ } => {
                 // Wire was never created if drag distance was too short
                 // Label position already updated during dragging
                 // Nothing to clean up
@@ -296,18 +318,22 @@ impl App {
                 self.current_dirty = true;
             }
         }
-        self.connection_manager.rebuild_spatial_index(&self.db);
+        self.connection_manager
+            .rebuild_spatial_index(&self.db.circuit, &self.db);
         self.potential_connections.clear();
     }
 
     pub fn compute_potential_connections(&mut self) {
-        let pins_to_update = self.connection_manager.pins_to_update(&self.db);
+        let pins_to_update = self
+            .connection_manager
+            .pins_to_update(&self.db.circuit, &self.db);
         let mut new_connections = Vec::new();
         for &pin in &pins_to_update {
-            new_connections.extend(
-                self.connection_manager
-                    .find_connections_for_pin(&self.db, pin),
-            );
+            new_connections.extend(self.connection_manager.find_connections_for_pin(
+                self.circuit(),
+                &self.db,
+                pin,
+            ));
         }
 
         self.potential_connections = new_connections.into_iter().collect();
