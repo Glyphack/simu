@@ -1,2 +1,0 @@
-- Test for <https://www.geeksforgeeks.org/digital-logic/what-is-jk-flip-flop/>
-- Label editing is not good
