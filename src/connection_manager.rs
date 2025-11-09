@@ -128,7 +128,7 @@ impl ConnectionManager {
         self.pin_position_cache.clear();
 
         for (instance_id, _) in &circuit.types {
-            if circuit.is_hidden(instance_id) {
+            if db.is_hidden(instance_id) {
                 continue;
             }
 

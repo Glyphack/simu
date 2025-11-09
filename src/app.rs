@@ -621,7 +621,7 @@ impl App {
         self.selected.remove(&id);
 
         self.connection_manager.dirty_instances.remove(&id);
-        self.db.circuit.remove(id);
+        self.db.remove_instance(id);
         self.connection_manager
             .rebuild_spatial_index(&self.db.circuit, &self.db);
         self.current_dirty = true;
@@ -728,7 +728,7 @@ impl App {
 
             if right_clicked
                 && let Some(id) = self.hovered.as_ref().map(|i| i.instance())
-                && matches!(self.db.circuit.ty(id), InstanceKind::Power)
+                && matches!(self.circuit().ty(id), InstanceKind::Power)
             {
                 let p = self.db.circuit.get_power_mut(id);
                 p.on = !p.on;
@@ -745,32 +745,32 @@ impl App {
         // Draw world - only draw visible instances (not hidden module internals)
         self.hovered = None;
         for id in self.db.circuit.gate_ids() {
-            if !self.db.circuit.is_hidden(id) {
+            if !self.db.is_hidden(id) {
                 self.draw_gate(ui, id);
             }
         }
         for id in self.db.circuit.power_ids() {
-            if !self.db.circuit.is_hidden(id) {
+            if !self.db.is_hidden(id) {
                 self.draw_power(ui, id);
             }
         }
         for id in self.db.circuit.lamp_ids() {
-            if !self.db.circuit.is_hidden(id) {
+            if !self.db.is_hidden(id) {
                 self.draw_lamp(ui, id);
             }
         }
         for id in self.db.circuit.clock_ids() {
-            if !self.db.circuit.is_hidden(id) {
+            if !self.db.is_hidden(id) {
                 self.draw_clock(ui, id);
             }
         }
         for id in self.db.circuit.module_ids() {
-            if !self.db.circuit.is_hidden(id) {
+            if !self.db.is_hidden(id) {
                 self.draw_module(ui, id);
             }
         }
         for id in self.db.circuit.wire_ids() {
-            if !self.db.circuit.is_hidden(id) {
+            if !self.db.is_hidden(id) {
                 let has_current = self.is_on(wire_start(id));
                 self.draw_wire(
                     ui,
@@ -1267,12 +1267,12 @@ impl App {
         };
 
         if let Hover::Instance(id) = hovered
-            && self.db.circuit.is_hidden(id)
+            && self.db.is_hidden(id)
         {
             return;
         }
         if let Hover::Pin(pin) = hovered
-            && self.db.circuit.is_hidden(pin.ins)
+            && self.db.is_hidden(pin.ins)
         {
             return;
         }
@@ -1361,7 +1361,7 @@ impl App {
 
     fn draw_selection_highlight(&self, ui: &Ui) {
         for &id in &self.selected {
-            if self.db.circuit.is_hidden(id) {
+            if self.db.is_hidden(id) {
                 continue;
             }
 

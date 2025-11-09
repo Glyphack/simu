@@ -163,7 +163,7 @@ impl Simulator {
         self.evaluated.insert(id);
 
         // Debug: log evaluation of hidden instances
-        if circuit.is_hidden(id) {
+        if db.is_hidden(id) {
             log::debug!(
                 "Evaluating hidden instance: {:?}, type: {:?}",
                 id,
@@ -173,13 +173,13 @@ impl Simulator {
 
         match circuit.ty(id) {
             InstanceKind::Wire => {
-                self.evaluate_wire(circuit, id);
+                self.evaluate_wire(db, circuit, id);
             }
             InstanceKind::Gate(_) => {
-                self.evaluate_gate(circuit, id);
+                self.evaluate_gate(db, circuit, id);
             }
             InstanceKind::Lamp => {
-                self.evaluate_lamp(circuit, id);
+                self.evaluate_lamp(db, circuit, id);
             }
             InstanceKind::Power => {}
             InstanceKind::Clock => {
@@ -199,7 +199,7 @@ impl Simulator {
                         match external_pin.kind {
                             crate::assets::PinKind::Input => {
                                 // Input: external -> internal
-                                let external_value = self.get_pin_value(circuit, *external_pin);
+                                let external_value = self.get_pin_value(db, circuit, *external_pin);
                                 self.current.insert(*internal_pin, external_value);
                             }
                             crate::assets::PinKind::Output => {
@@ -226,7 +226,7 @@ impl Simulator {
         self.current.insert(out, val);
     }
 
-    fn evaluate_wire(&mut self, circuit: &Circuit, id: InstanceId) {
+    fn evaluate_wire(&mut self, db: &DB, circuit: &Circuit, id: InstanceId) {
         let input = {
             let start = wire_start(id);
             let end = wire_end(id);
@@ -243,13 +243,13 @@ impl Simulator {
             wire_start(id)
         };
 
-        let result = self.get_pin_value(circuit, input);
+        let result = self.get_pin_value(db, circuit, input);
 
         self.current.insert(input, result);
         self.current.insert(other, result);
     }
 
-    fn evaluate_gate(&mut self, circuit: &Circuit, id: InstanceId) {
+    fn evaluate_gate(&mut self, db: &DB, circuit: &Circuit, id: InstanceId) {
         let InstanceKind::Gate(kind) = circuit.ty(id) else {
             return;
         };
@@ -258,8 +258,8 @@ impl Simulator {
         let inp2 = gate_inp2(id);
         let out = gate_output(id);
 
-        let a = self.get_pin_value(circuit, inp1);
-        let b = self.get_pin_value(circuit, inp2);
+        let a = self.get_pin_value(db, circuit, inp1);
+        let b = self.get_pin_value(db, circuit, inp2);
 
         let out_val = match kind {
             GateKind::And => a.and(b),
@@ -273,15 +273,15 @@ impl Simulator {
         self.current.insert(out, out_val);
     }
 
-    fn evaluate_lamp(&mut self, circuit: &Circuit, id: InstanceId) {
+    fn evaluate_lamp(&mut self, db: &DB, circuit: &Circuit, id: InstanceId) {
         let inp = lamp_input(id);
-        let val = self.get_pin_value(circuit, inp);
+        let val = self.get_pin_value(db, circuit, inp);
         self.current.insert(inp, val);
     }
 
-    fn get_pin_value(&self, circuit: &Circuit, pin: Pin) -> Value {
+    fn get_pin_value(&self, db: &DB, circuit: &Circuit, pin: Pin) -> Value {
         // Check if this is an internal hidden pin that maps to a module boundary
-        let lookup_pin = if circuit.is_hidden(pin.ins) {
+        let lookup_pin = if db.is_hidden(pin.ins) {
             // Find if there's a module that has this as an internal pin
             // Look through all module_pin_mappings to find reverse mapping
             circuit
@@ -493,10 +493,10 @@ mod tests {
         let module_id = db.new_module_with_flattening(module);
         eprintln!("Module ID: {module_id:?}");
 
-        // Check hidden instances
-        let hidden = db.circuit.get_hidden_instances_for_module(module_id);
-        eprintln!("Hidden instances for module: {hidden:?}");
-        for &hid in &hidden {
+        // Check internal instances
+        let internal_instances = db.get_instances_for_module(module_id);
+        eprintln!("Internal instances for module: {internal_instances:?}");
+        for &hid in &internal_instances {
             let ty = db.circuit.ty(hid);
             eprintln!("  Hidden instance {hid:?} is type {ty:?}");
         }

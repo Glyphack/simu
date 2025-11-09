@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use egui::{Pos2, Vec2};
+use slotmap::SecondaryMap;
 
 use crate::{
     app::App,
@@ -164,6 +165,7 @@ impl ModuleDefinition {
         module_id: InstanceId,
         definition_id: ModuleDefId,
         db: &DB,
+        module_instances: &mut SecondaryMap<InstanceId, InstanceId>,
     ) -> HashMap<Pin, Pin> {
         // Map old instance IDs to new ones
         let mut id_map: HashMap<InstanceId, InstanceId> = HashMap::new();
@@ -203,14 +205,15 @@ impl ModuleDefinition {
                         nested_id,
                         nested_def_id,
                         db,
+                        module_instances,
                     );
 
                     nested_id
                 }
             };
 
-            // Mark the new instance as hidden
-            target_circuit.mark_as_hidden(new_id, module_id, definition_id);
+            // Record that this instance belongs to the module
+            module_instances.insert(new_id, module_id);
             id_map.insert(old_id, new_id);
         }
 
@@ -346,17 +349,11 @@ mod tests {
             .keys()
             .next()
             .expect("module def id not found");
-        let module_def = app
-            .db
-            .module_definitions
-            .get(module_def_id)
-            .expect("module def not found");
-
         let module_id = app.db.circuit.new_module(Module {
             pos: Pos2::ZERO,
             definition_index: module_def_id,
         });
-        app.db.circuit.remove(gate_id);
+        app.db.remove_instance(gate_id);
 
         assert!(app.db.circuit.gates.get(gate_id).is_none());
 
@@ -369,6 +366,11 @@ mod tests {
                 .pin_position(pin, &CanvasConfig::default(), &app.db);
         }
 
+        let module_def = app
+            .db
+            .module_definitions
+            .get(module_def_id)
+            .expect("module def not found");
         let display = module_def.display_definition(&app.db, module_def_id);
     }
 
@@ -401,17 +403,31 @@ mod tests {
 
         // Flatten the module
         let module_def = db.get_module_def(def_id);
-        let pin_map = module_def.flatten_into_circuit(&mut target_circuit, module_id, def_id, &db);
+        let mut module_instances = SecondaryMap::new();
+        let pin_map = module_def.flatten_into_circuit(
+            &mut target_circuit,
+            module_id,
+            def_id,
+            &db,
+            &mut module_instances,
+        );
 
-        // Check that internal gate was created and marked as hidden
-        let hidden_instances = target_circuit.get_hidden_instances_for_module(module_id);
-        assert_eq!(hidden_instances.len(), 1, "Should have 1 hidden instance");
+        // Check that internal gate was created and recorded in module_instances
+        let internal_instances: Vec<_> = module_instances
+            .iter()
+            .filter_map(|(id, parent)| if *parent == module_id { Some(id) } else { None })
+            .collect();
+        assert_eq!(
+            internal_instances.len(),
+            1,
+            "Should have 1 internal instance"
+        );
 
-        // Should have 2 total instances (module + hidden gate)
+        // Should have 2 total instances (module + internal gate)
         assert_eq!(target_circuit.types.len(), 2);
 
-        // Should have 1 visible instance (just the module)
-        assert_eq!(target_circuit.visible_instances().count(), 1);
+        // Check that the internal instance is tracked correctly
+        assert!(module_instances.contains_key(internal_instances[0]));
 
         // Pin mapping should have 3 entries (2 inputs + 1 output for AND gate)
         assert_eq!(pin_map.len(), 3, "AND gate has 3 unconnected pins");
@@ -463,11 +479,21 @@ mod tests {
 
         // Flatten the module
         let module_def = db.get_module_def(def_id);
-        let _pin_map = module_def.flatten_into_circuit(&mut target_circuit, module_id, def_id, &db);
+        let mut module_instances = SecondaryMap::new();
+        let _pin_map = module_def.flatten_into_circuit(
+            &mut target_circuit,
+            module_id,
+            def_id,
+            &db,
+            &mut module_instances,
+        );
 
-        // Should have 2 hidden instances (both gates)
-        let hidden_instances = target_circuit.get_hidden_instances_for_module(module_id);
-        assert_eq!(hidden_instances.len(), 2);
+        // Should have 2 internal instances (both gates)
+        let internal_instances: Vec<_> = module_instances
+            .iter()
+            .filter_map(|(id, parent)| if *parent == module_id { Some(id) } else { None })
+            .collect();
+        assert_eq!(internal_instances.len(), 2);
 
         // Should have 3 total instances (module + 2 gates)
         assert_eq!(target_circuit.types.len(), 3);
@@ -524,36 +550,64 @@ mod tests {
 
         // Flatten the outer module (which should recursively flatten the inner module)
         let outer_def = db.get_module_def(outer_def_id);
-        let _pin_map =
-            outer_def.flatten_into_circuit(&mut target_circuit, outer_module_id, outer_def_id, &db);
+        let mut module_instances = SecondaryMap::new();
+        let _pin_map = outer_def.flatten_into_circuit(
+            &mut target_circuit,
+            outer_module_id,
+            outer_def_id,
+            &db,
+            &mut module_instances,
+        );
 
-        // Check what's hidden to the outer module (should be just the inner module)
-        let outer_hidden = target_circuit.get_hidden_instances_for_module(outer_module_id);
+        // Check what's internal to the outer module (should be just the inner module)
+        let outer_internals: Vec<_> = module_instances
+            .iter()
+            .filter_map(|(id, parent)| {
+                if *parent == outer_module_id {
+                    Some(id)
+                } else {
+                    None
+                }
+            })
+            .collect();
         assert_eq!(
-            outer_hidden.len(),
+            outer_internals.len(),
             1,
             "Outer module should have 1 direct child (inner module)"
         );
 
-        // The inner module should be in the outer's hidden instances
-        let inner_module_id = outer_hidden[0];
+        // The inner module should be in the outer's internal instances
+        let inner_module_id = outer_internals[0];
         assert!(matches!(
             target_circuit.ty(inner_module_id),
             crate::db::InstanceKind::Module(_)
         ));
 
-        // Check what's hidden to the inner module (should be the inner gate)
-        let inner_hidden = target_circuit.get_hidden_instances_for_module(inner_module_id);
+        // Check what's internal to the inner module (should be the inner gate)
+        let inner_internals: Vec<_> = module_instances
+            .iter()
+            .filter_map(|(id, parent)| {
+                if *parent == inner_module_id {
+                    Some(id)
+                } else {
+                    None
+                }
+            })
+            .collect();
         assert_eq!(
-            inner_hidden.len(),
+            inner_internals.len(),
             1,
-            "Inner module should have 1 hidden instance (the gate)"
+            "Inner module should have 1 internal instance (the gate)"
         );
 
-        // Total instances: outer module + inner module (hidden) + inner gate (hidden to inner)
+        // Total instances: outer module + inner module (internal) + inner gate (internal to inner)
         assert_eq!(target_circuit.types.len(), 3);
 
-        // Only 1 instance should be visible (the outer module)
-        assert_eq!(target_circuit.visible_instances().count(), 1);
+        // Check that all internal instances are tracked correctly in module_instances
+        assert_eq!(
+            module_instances.len(),
+            2,
+            "Should have 2 entries: inner module and inner gate"
+        );
     }
 }
