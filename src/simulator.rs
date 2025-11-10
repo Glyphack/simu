@@ -321,47 +321,29 @@ impl Simulator {
     }
 }
 
-pub fn gate_inp_n(id: InstanceId, n: u32) -> Pin {
-    assert!(n < 2, "Gates only have 2 inputs (0 and 1)");
-    Pin::new(id, if n == 0 { 0 } else { 2 }, PinKind::Input)
-}
-
 pub fn gate_output_n(id: InstanceId, n: u32) -> Pin {
     assert!(n == 0, "Gates only have 1 output");
-    Pin::new(id, 1, PinKind::Output)
+    Pin::new(id, 2, PinKind::Output)
 }
 
 pub fn gate_inp1(id: InstanceId) -> Pin {
-    gate_inp_n(id, 0)
+    Pin::new(id, 0, PinKind::Input)
 }
 
 pub fn gate_inp2(id: InstanceId) -> Pin {
-    gate_inp_n(id, 1)
+    Pin::new(id, 1, PinKind::Input)
 }
 
 pub fn gate_output(id: InstanceId) -> Pin {
     gate_output_n(id, 0)
 }
 
-pub fn wire_pin_n(id: InstanceId, n: u32) -> Pin {
-    assert!(n < 2, "Wires only have 2 pins (0 and 1)");
-    Pin::new(
-        id,
-        n,
-        if n == 0 {
-            PinKind::Input
-        } else {
-            PinKind::Output
-        },
-    )
-}
-
 pub fn wire_start(id: InstanceId) -> Pin {
-    wire_pin_n(id, 0)
+    Pin::new(id, 0, PinKind::Input)
 }
 
 pub fn wire_end(id: InstanceId) -> Pin {
-    wire_pin_n(id, 1)
+    Pin::new(id, 1, PinKind::Output)
 }
 
 pub fn power_output(id: InstanceId) -> Pin {
@@ -522,6 +504,7 @@ mod tests {
         let module_pins = db.circuit.pins_of(module_id, &db);
         assert_eq!(module_pins.len(), 3, "Module should have 3 pins");
 
+        // TODO: Create a helper to access module pins
         // Connect power1 to module input 0
         let module_in0 = module_pins
             .iter()
@@ -534,7 +517,7 @@ mod tests {
         // Connect power2 to module input 2 (second input of AND gate)
         let module_in1 = module_pins
             .iter()
-            .find(|p| p.index == 2 && p.kind == PinKind::Input)
+            .find(|p| p.index == 1 && p.kind == PinKind::Input)
             .expect("module should have input pin 2");
         db.circuit
             .connections
