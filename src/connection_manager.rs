@@ -8,20 +8,44 @@ use std::collections::{HashMap, HashSet};
 
 const SPATIAL_INDEX_GRID_SIZE: f32 = 100.0;
 
+#[derive(serde::Deserialize, serde::Serialize, Copy, PartialEq, Eq, Debug, Clone)]
+pub enum ConnectionKind {
+    SINGLE,
+    // Bi directional connection is a special kind where both ends can be input or output.
+    BI,
+}
+
 // A normalized, order-independent connection between two pins
 #[derive(serde::Deserialize, serde::Serialize, Copy, Debug, Clone)]
 pub struct Connection {
     pub a: Pin,
     pub b: Pin,
+    pub kind: ConnectionKind,
 }
 
 impl Connection {
     pub fn new(p1: Pin, p2: Pin) -> Self {
-        Self { a: p2, b: p1 }
+        Self {
+            a: p2,
+            b: p1,
+            kind: ConnectionKind::SINGLE,
+        }
+    }
+
+    pub fn new_bi(p1: Pin, p2: Pin) -> Self {
+        Self {
+            a: p2,
+            b: p1,
+            kind: ConnectionKind::BI,
+        }
     }
 
     pub fn involves_instance(&self, id: InstanceId) -> bool {
         self.a.ins == id || self.b.ins == id
+    }
+
+    pub fn involves_pin(&self, pin: &Pin) -> bool {
+        self.a == *pin || self.b == *pin
     }
 
     pub fn display(&self, circuit: &Circuit) -> String {
@@ -32,6 +56,24 @@ impl Connection {
         )
     }
 
+    /// Short display for connection list: "And[0v1].pin#0 -> Lamp[1v1].pin#0"
+    pub fn display_short(&self, circuit: &Circuit, db: &DB) -> String {
+        if self.kind == ConnectionKind::SINGLE {
+            format!(
+                "{} -> {}",
+                self.a.display_short(circuit, db),
+                self.b.display_short(circuit, db)
+            )
+        } else {
+            format!(
+                "{} <-> {}",
+                self.a.display_short(circuit, db),
+                self.b.display_short(circuit, db)
+            )
+        }
+    }
+
+    // Returns a tuple with the given pin first and then second pin
     pub fn get_pin_first(&self, pin: Pin) -> Option<(Pin, Pin)> {
         if self.a == pin {
             Some((self.a, self.b))
@@ -39,6 +81,17 @@ impl Connection {
             Some((self.b, self.a))
         } else {
             None
+        }
+    }
+
+    // Returns a tuple with the given pin first and then second pin
+    pub fn get_other_pin(&self, pin: Pin) -> Pin {
+        if self.a == pin {
+            self.b
+        } else if self.b == pin {
+            self.a
+        } else {
+            unreachable!();
         }
     }
 }
@@ -326,6 +379,16 @@ impl ConnectionManager {
 
         let mut connections_to_keep = HashSet::new();
         for connection in &db.circuit.connections {
+            let is_module_connection = {
+                db.get_module_owner(connection.a.ins).is_some()
+                    || db.get_module_owner(connection.b.ins).is_some()
+            };
+            // Keep module connections always, as they're structural user cannot remove them.
+            if is_module_connection {
+                connections_to_keep.insert(*connection);
+                continue;
+            }
+
             let keep_connection = !self.dirty_instances.contains(&connection.a.ins)
                 && !self.dirty_instances.contains(&connection.b.ins);
 

@@ -297,7 +297,11 @@ impl App {
                         sel.insert(id);
                     }
                 }
-                self.selected = sel;
+                self.selected = sel
+                    .iter()
+                    .filter(|i| !self.db.is_hidden(**i))
+                    .copied()
+                    .collect();
             }
             Drag::Resize { id, start: _ } => {
                 self.connection_manager.mark_instance_dirty(id);

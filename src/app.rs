@@ -18,7 +18,6 @@ use crate::{
     config::CanvasConfig,
     connection_manager::{Connection, ConnectionManager},
     drag::Drag,
-    module::Module,
 };
 
 pub const PANEL_BUTTON_MAX_HEIGHT: f32 = 50.0;
@@ -538,10 +537,7 @@ impl App {
                 InstanceKind::Wire => self.db.circuit.new_wire(Wire::new_at(pos)),
                 InstanceKind::Lamp => self.db.circuit.new_lamp(Lamp { pos }),
                 InstanceKind::Clock => self.db.circuit.new_clock(Clock { pos }),
-                InstanceKind::Module(c) => self.db.new_module_with_flattening(Module {
-                    pos,
-                    definition_index: c,
-                }),
+                InstanceKind::Module(c) => self.db.new_module(c, pos),
             };
             self.set_drag(Drag::Canvas(crate::drag::CanvasDrag::Single {
                 id,
@@ -556,7 +552,7 @@ impl App {
         {
             let mut ids = Vec::new();
             for (id, m) in &self.circuit().modules {
-                if m.definition_index == i {
+                if m.definition_id == i {
                     ids.push(id);
                 }
             }
@@ -1077,18 +1073,19 @@ impl App {
     fn draw_module(&mut self, ui: &mut Ui, id: InstanceId) {
         let (pos, definition_index) = {
             let module = self.db.circuit.get_module(id);
-            (module.pos, module.definition_index)
+            (module.pos, module.definition_id)
         };
         let screen_center = pos - self.viewport_offset;
 
         let (name, pins, pin_offsets) = {
             let definition = self.db.circuit.get_module(id).definition(&self.db);
             let name = definition.name.clone();
-            let pins = definition.get_unconnected_pins(&self.db, id);
-
+            let pins = self.db.circuit.get_module(id).pins();
             let pin_offsets: Vec<Vec2> = pins
                 .iter()
-                .map(|pin| definition.calculate_pin_offset(&self.db, pin, &self.canvas_config))
+                .map(|pin| {
+                    definition.calculate_pin_offset(&self.db, &pins, pin, &self.canvas_config)
+                })
                 .collect();
 
             (name, pins, pin_offsets)
@@ -1128,7 +1125,7 @@ impl App {
             }));
         }
 
-        for (pin_index, (&pin, &pin_offset)) in pins.iter().zip(pin_offsets.iter()).enumerate() {
+        for (&pin, &pin_offset) in pins.iter().zip(pin_offsets.iter()) {
             let pin_pos_world = pos + pin_offset;
             let pin_screen_pos = self.adjusted_pos(pin_pos_world);
 
@@ -1140,7 +1137,7 @@ impl App {
             ui.painter()
                 .circle_filled(pin_screen_pos, self.canvas_config.base_pin_size, pin_color);
 
-            let has_current = self.is_on(Pin::new(id, pin_index as u32, pin.kind));
+            let has_current = self.is_on(pin);
 
             if has_current {
                 ui.painter().circle_stroke(
@@ -1155,15 +1152,12 @@ impl App {
                 Vec2::splat(self.canvas_config.base_pin_size + PIN_HOVER_THRESHOLD),
             );
             let pin_resp = ui.allocate_rect(pin_rect, Sense::drag());
-            let pin_obj = Pin::new(id, pin_index as u32, pin.kind);
             if pin_resp.hovered() {
-                self.hovered = Some(Hover::Pin(pin_obj));
+                self.hovered = Some(Hover::Pin(pin));
             }
             if pin_resp.dragged() {
                 self.selected.clear();
-                self.set_drag(Drag::PinToWire {
-                    source_pin: pin_obj,
-                });
+                self.set_drag(Drag::PinToWire { source_pin: pin });
             }
         }
     }
@@ -1551,30 +1545,31 @@ impl App {
 
     fn debug_string(&self, ui: &Ui) -> String {
         let mut out = String::new();
+
+        // App state (compact)
+        writeln!(out, "======================================").ok();
+        writeln!(out, "  APP STATE").ok();
+        writeln!(out, "======================================").ok();
         let mouse_pos_world = self.mouse_pos_world(ui);
         writeln!(out, "mouse: {mouse_pos_world:?}").ok();
-
         writeln!(out, "hovered: {:?}", self.hovered).ok();
         writeln!(out, "drag: {:?}", self.drag).ok();
-        writeln!(out, "viewport_offset: {:?}", self.viewport_offset).ok();
-        writeln!(out, "potential_conns: {}", self.potential_connections.len()).ok();
-        writeln!(out, "clipboard: {:?}", self.clipboard).ok();
         writeln!(out, "selected: {:?}", self.selected).ok();
-        writeln!(out, "editing_label: {:?}", self.editing_label).ok();
-        writeln!(out, "label_edit_buffer: {}", self.label_edit_buffer).ok();
         writeln!(out, "viewing_module: {:?}", self.viewing_module).ok();
 
         // Simulation status
-        writeln!(out, "\n=== Simulation Status ===").ok();
-        writeln!(out, "needs update {}", self.current_dirty).ok();
+        writeln!(out).ok();
+        writeln!(out, "======================================").ok();
+        writeln!(out, "  SIMULATION").ok();
+        writeln!(out, "======================================").ok();
         match self.simulator.status {
             SimulationStatus::Stable { iterations } => {
-                writeln!(out, "Status: STABLE (after {iterations} iterations)").ok();
+                writeln!(out, "Status: STABLE ({iterations} iters)").ok();
             }
             SimulationStatus::Unstable { max_reached } => {
                 if max_reached {
                     let iters = self.simulator.last_iterations;
-                    writeln!(out, "Status: UNSTABLE (max iterations: {iters})").ok();
+                    writeln!(out, "Status: UNSTABLE (max: {iters})").ok();
                 } else {
                     writeln!(out, "Status: UNSTABLE").ok();
                 }
@@ -1583,44 +1578,31 @@ impl App {
                 writeln!(out, "Status: RUNNING...").ok();
             }
         }
-        let iters = self.simulator.last_iterations;
-        writeln!(out, "Iterations: {iters}").ok();
-
-        // Clock controller state
-        writeln!(out, "\n--- Clock Controller ---").ok();
-        writeln!(out, "State: {:?}", self.clock_controller.state).ok();
         writeln!(
             out,
-            "Tick interval: {:.2}s",
-            self.clock_controller.tick_interval
+            "Clock: {:?}, interval: {:.2}s",
+            self.clock_controller.state, self.clock_controller.tick_interval
         )
         .ok();
-        writeln!(out, "Voltage: {}", self.clock_controller.voltage).ok();
 
-        if self.potential_connections.is_empty() {
-            writeln!(out, "\nPotential Connections: none").ok();
-        } else {
-            writeln!(out, "\nPotential Connections:").ok();
-            for c in &self.potential_connections {
-                writeln!(out, "  {}", c.display(self.circuit())).ok();
-            }
-        }
+        // Circuit instances (main content)
+        writeln!(out).ok();
+        out.write_str(&self.circuit().display(&self.db, Some(&self.simulator)))
+            .ok();
 
-        writeln!(out, "\n{}", self.connection_manager.debug_info()).ok();
-
-        writeln!(out, "\n").ok();
-
-        out.write_str(&self.circuit().display(&self.db)).ok();
-
+        // Module definitions (at the bottom, summary only)
         if !self.db.module_definitions.is_empty() {
-            writeln!(out, "\nModule Def:").ok();
-            let mut iter = self.db.module_definitions.iter();
-            if let Some((id, first)) = iter.next() {
-                writeln!(out, "  {}", first.display_definition(&self.db, id)).ok();
-            }
-            for (id, m) in iter {
-                writeln!(out).ok();
-                writeln!(out, "  {}", m.display_definition(&self.db, id)).ok();
+            writeln!(out).ok();
+            writeln!(out, "======================================").ok();
+            writeln!(
+                out,
+                "  MODULE DEFINITIONS ({} total)",
+                self.db.module_definitions.len()
+            )
+            .ok();
+            writeln!(out, "======================================").ok();
+            for (id, m) in &self.db.module_definitions {
+                writeln!(out, "{}", m.display_definition(&self.db, id)).ok();
             }
         }
 
@@ -1691,7 +1673,7 @@ impl App {
                 }
                 InstanceKind::Module(_) => {
                     let cc = self.db.circuit.get_module(id);
-                    object_pos.push(ClipBoardItem::Module(cc.definition_index, center - cc.pos));
+                    object_pos.push(ClipBoardItem::Module(cc.definition_id, center - cc.pos));
                 }
             }
         }
@@ -1742,12 +1724,13 @@ impl App {
                     self.selected.insert(id);
                 }
                 ClipBoardItem::Module(def_index, offset) => {
-                    let id = self.db.new_module_with_flattening(Module {
-                        pos: mouse - offset,
-                        definition_index: def_index,
-                    });
-                    self.connection_manager.mark_instance_dirty(id);
-                    self.selected.insert(id);
+                    // TODO: Modules
+                    // let id = self.db.new_module_with_flattening(Module {
+                    //     pos: mouse - offset,
+                    //     definition_index: def_index,
+                    // });
+                    // self.connection_manager.mark_instance_dirty(id);
+                    // self.selected.insert(id);
                 }
                 ClipBoardItem::Lamp(offset) => {
                     let id = self.db.circuit.new_lamp(Lamp {
