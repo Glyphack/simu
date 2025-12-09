@@ -324,6 +324,7 @@ impl App {
     }
 
     fn is_on(&self, pin: Pin) -> bool {
+        let pin = pin.is_passthrough(&self.db).unwrap_or(pin);
         let Some(v) = self.simulator.current.get(&pin) else {
             return false;
         };
@@ -448,6 +449,7 @@ impl App {
                 self.draw_panel_button(ui, InstanceKind::Gate(GateKind::Nor));
                 self.draw_panel_button(ui, InstanceKind::Gate(GateKind::Xor));
                 self.draw_panel_button(ui, InstanceKind::Gate(GateKind::Xnor));
+                self.draw_panel_button(ui, InstanceKind::Gate(GateKind::Not));
                 self.draw_panel_button(ui, InstanceKind::Power);
                 self.draw_panel_button(ui, InstanceKind::Lamp);
                 self.draw_panel_button(ui, InstanceKind::Clock);
@@ -726,7 +728,7 @@ impl App {
         Self::draw_grid(ui, canvas_rect, self.viewport_offset);
 
         let mouse_clicked_canvas = resp.clicked();
-        let mouse_dragging_canvas = resp.dragged();
+        let mouse_dragging_canvas = resp.dragged_by(egui::PointerButton::Primary);
         let double_clicked = ui.input(|i| {
             i.pointer
                 .button_double_clicked(egui::PointerButton::Primary)
@@ -949,7 +951,7 @@ impl App {
         }
     }
 
-    fn draw_instance_graphics_new(
+    fn draw_instance_graphics(
         &mut self,
         ui: &mut Ui,
         graphics: assets::InstanceGraphics,
@@ -1024,7 +1026,7 @@ impl App {
             let gate = self.db.circuit.get_gate(id);
             (gate.pos, gate.kind)
         };
-        self.draw_instance_graphics_new(ui, kind.graphics(), self.adjusted_pos(pos), id);
+        self.draw_instance_graphics(ui, kind.graphics(), self.adjusted_pos(pos), id);
     }
 
     fn draw_power(&mut self, ui: &mut Ui, id: InstanceId) {
@@ -1032,7 +1034,7 @@ impl App {
             let power = self.db.circuit.get_power(id);
             (power.pos, power.graphics())
         };
-        self.draw_instance_graphics_new(ui, graphics, self.adjusted_pos(pos), id);
+        self.draw_instance_graphics(ui, graphics, self.adjusted_pos(pos), id);
     }
 
     fn draw_lamp(&mut self, ui: &mut Ui, id: InstanceId) {
@@ -1058,7 +1060,7 @@ impl App {
             }
         }
 
-        self.draw_instance_graphics_new(ui, graphics, pos, id);
+        self.draw_instance_graphics(ui, graphics, pos, id);
     }
 
     fn draw_clock(&mut self, ui: &mut Ui, id: InstanceId) {
@@ -1067,7 +1069,7 @@ impl App {
             (clock.pos, clock.graphics())
         };
         let pos = self.adjusted_pos(pos);
-        self.draw_instance_graphics_new(ui, graphics, pos, id);
+        self.draw_instance_graphics(ui, graphics, pos, id);
     }
 
     fn draw_module(&mut self, ui: &mut Ui, id: InstanceId) {
@@ -1253,7 +1255,7 @@ impl App {
                 && let Some(split_point) = self.wire_branching_action_point(mouse, id)
             {
                 ui.painter().circle_filled(
-                    split_point,
+                    self.adjusted_pos(split_point),
                     PIN_HOVER_THRESHOLD,
                     COLOR_HOVER_PIN_TO_WIRE,
                 );
@@ -1267,7 +1269,7 @@ impl App {
                     && let Some(split_point) = self.wire_branching_action_point(mouse, id)
                 {
                     ui.painter().circle_filled(
-                        split_point,
+                        self.adjusted_pos(split_point),
                         PIN_HOVER_THRESHOLD,
                         COLOR_HOVER_PIN_TO_WIRE,
                     );
@@ -1869,7 +1871,7 @@ impl App {
         pos - self.viewport_offset
     }
 
-    fn mouse_pos_world(&self, ui: &Ui) -> Option<Pos2> {
+    pub fn mouse_pos_world(&self, ui: &Ui) -> Option<Pos2> {
         ui.ctx()
             .pointer_interact_pos()
             .map(|p| p + self.viewport_offset)

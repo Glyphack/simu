@@ -4,11 +4,10 @@ use log;
 
 use crate::{
     assets::PinKind,
-    connection_manager::ConnectionKind,
     db::{Circuit, DB, GateKind, InstanceId, InstanceKind, Pin},
 };
 
-const MAX_ITERATIONS: usize = 1000;
+const MAX_ITERATIONS: usize = 10;
 const STABILIZATION_THRESHOLD: usize = 3;
 
 #[derive(serde::Deserialize, serde::Serialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -223,6 +222,16 @@ impl Simulator {
             return;
         };
 
+        // Not has one input so handle specially
+        if matches!(kind, GateKind::Not) {
+            let inp1 = gate_inp1(id);
+            let out = Pin::new(id, 1, PinKind::Output);
+            let a = self.get_pin_value(db, circuit, inp1);
+            let out_val = a.not();
+            self.current.insert(out, out_val);
+            return;
+        }
+
         let inp1 = gate_inp1(id);
         let inp2 = gate_inp2(id);
         let out = gate_output(id);
@@ -237,6 +246,7 @@ impl Simulator {
             GateKind::Nor => a.or(b).not(),
             GateKind::Xor => a.xor(b),
             GateKind::Xnor => a.xnor(b),
+            GateKind::Not => unreachable!("Handled above"),
         };
 
         self.current.insert(out, out_val);
@@ -249,16 +259,17 @@ impl Simulator {
     }
 
     fn get_pin_value(&self, db: &DB, circuit: &Circuit, pin: Pin) -> Value {
+        let pin = pin.is_passthrough(db).unwrap_or(pin);
         let conns = circuit.connections_containing(pin);
 
         let mut result = Value::Zero;
         for conn in conns {
-            let other = conn.get_other_pin(pin);
-            if other.kind != PinKind::Output && conn.kind != ConnectionKind::BI {
+            let connected_pin = conn.get_other_pin(pin);
+            if connected_pin.kind != PinKind::Output {
                 continue;
             }
 
-            if let Some(&val) = self.current.get(&other) {
+            if let Some(&val) = self.current.get(&connected_pin) {
                 result = result.or(val);
             }
         }

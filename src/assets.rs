@@ -141,6 +141,20 @@ pub static XNOR_GRAPHICS: InstanceGraphics = InstanceGraphics {
     ],
 };
 
+pub static NOT_GRAPHICS: InstanceGraphics = InstanceGraphics {
+    svg: include_image!("../assets/not.svg"),
+    pins: &[
+        PinGraphics {
+            kind: PinKind::Input,
+            offset: Vec2::new(-40.0, 0.0),
+        },
+        PinGraphics {
+            kind: PinKind::Output,
+            offset: Vec2::new(40.0, 0.0),
+        },
+    ],
+};
+
 pub static POWER_ON_GRAPHICS: InstanceGraphics = InstanceGraphics {
     svg: include_image!("../assets/switch-on.svg"),
     pins: &[PinGraphics {

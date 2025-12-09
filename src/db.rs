@@ -6,6 +6,7 @@ use egui::{Pos2, Vec2, pos2};
 use slotmap::{SecondaryMap, SlotMap};
 
 use crate::assets::PinKind;
+use crate::connection_manager::ConnectionKind;
 use crate::{
     assets::{self},
     config::CanvasConfig,
@@ -296,6 +297,82 @@ impl Circuit {
                     cont, pin_branch, pin.index, kind_str, arrow, conn_str, state_str
                 )
                 .ok();
+            }
+
+            // Show instance members for modules with indentation
+            if let InstanceKind::Module(_) = kind {
+                let module = self.get_module(*id);
+                let member_count = module.instance_members.len();
+                for (member_idx, member_id) in module.instance_members.iter().enumerate() {
+                    let is_last_member = member_idx == member_count - 1;
+                    let member_branch = if is_last_member { "`-" } else { "|-" };
+                    let member_cont = if is_last_member {
+                        format!("{cont}   ")
+                    } else {
+                        format!("{cont}|  ")
+                    };
+
+                    // Member header
+                    let member_kind = self.ty(*member_id);
+                    let member_header = self.instance_header(*member_id, member_kind, db);
+                    writeln!(out, "{cont}{member_branch} {member_header}").ok();
+
+                    // Get pins for this member
+                    let member_pins = self.pins_of(*member_id, db);
+                    let member_pin_count = member_pins.len();
+
+                    for (member_pin_idx, member_pin) in member_pins.iter().enumerate() {
+                        let is_last_member_pin = member_pin_idx == member_pin_count - 1;
+                        let member_pin_branch = if is_last_member_pin { "`-" } else { "|-" };
+
+                        // Get connections for this member pin
+                        let member_connected = self.connected_pins(*member_pin);
+                        let member_kind_str = match member_pin.kind {
+                            PinKind::Input => "In",
+                            PinKind::Output => "Out",
+                        };
+                        let member_arrow = match member_pin.kind {
+                            PinKind::Input => "<-",
+                            PinKind::Output => "->",
+                        };
+
+                        let member_conn_str = if member_connected.is_empty() {
+                            "(unconnected)".to_owned()
+                        } else {
+                            member_connected
+                                .iter()
+                                .map(|p| p.display_short(self, db))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        };
+
+                        // Get pin state if simulator is available
+                        let member_state_str = if let Some(sim) = simulator {
+                            if let Some(&value) = sim.current.get(member_pin) {
+                                match value {
+                                    crate::simulator::Value::One => " O",
+                                    crate::simulator::Value::Zero => " N",
+                                    crate::simulator::Value::X => " X",
+                                }
+                            } else {
+                                ""
+                            }
+                        } else {
+                            ""
+                        };
+
+                        writeln!(
+                            out,
+                            "{member_cont}{member_pin_branch} #{} ({})  {} {}{}",
+                            member_pin.index,
+                            member_kind_str,
+                            member_arrow,
+                            member_conn_str,
+                            member_state_str
+                        )
+                        .ok();
+                    }
+                }
             }
         }
 
@@ -873,6 +950,7 @@ pub enum GateKind {
     Nor,
     Xor,
     Xnor,
+    Not,
 }
 
 #[derive(serde::Deserialize, serde::Serialize, Copy, Debug, Clone)]
@@ -890,6 +968,7 @@ impl GateKind {
             Self::Nor => assets::NOR_GRAPHICS.clone(),
             Self::Xor => assets::XOR_GRAPHICS.clone(),
             Self::Xnor => assets::XNOR_GRAPHICS.clone(),
+            Self::Not => assets::NOT_GRAPHICS.clone(),
         }
     }
 }
@@ -1109,5 +1188,18 @@ impl Pin {
 
     pub fn new(ins: InstanceId, index: u32, kind: PinKind) -> Self {
         Self { ins, index, kind }
+    }
+
+    pub fn is_passthrough(&self, db: &DB) -> Option<Self> {
+        let conns = db.circuit.connections_containing(*self);
+
+        for conn in conns {
+            if conn.kind != ConnectionKind::BI {
+                continue;
+            }
+            let connected_pin = conn.get_other_pin(*self);
+            return Some(connected_pin);
+        }
+        None
     }
 }

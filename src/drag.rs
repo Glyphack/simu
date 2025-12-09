@@ -4,6 +4,7 @@ use egui::{CornerRadius, Pos2, Rect, Stroke, StrokeKind, Ui, Vec2, pos2};
 
 use crate::app::{App, COLOR_HOVER_PIN_TO_WIRE, COLOR_SELECTION_BOX, MIN_WIRE_SIZE};
 
+use crate::assets::PinKind;
 use crate::db::{InstanceId, InstanceKind, LabelId, Pin, Wire};
 
 #[derive(serde::Deserialize, serde::Serialize, Debug, Clone, Copy)]
@@ -172,26 +173,33 @@ impl App {
                     self.connection_manager.mark_instance_dirty(id);
                 }
             }
-            // TODO: There is an issue with non zero viewport_offset. It causes the wire to start
-            // from wrong place and distance to calculate wrong
             Some(Drag::PinToWire { source_pin }) => {
-                let start = self.adjusted_pos(source_pin.pos(&self.db, &self.canvas_config));
+                let start = source_pin.pos(&self.db, &self.canvas_config);
                 let end_abs = mouse;
                 let drag_distance = start.distance(end_abs);
 
                 if drag_distance >= MIN_WIRE_SIZE {
-                    let wire = Wire::new(start, mouse);
+                    // Start is input so if the current pin is input we need to reverse the wire
+                    let (new_w_start, new_w_end) = if source_pin.kind == PinKind::Input {
+                        (mouse, start)
+                    } else {
+                        (start, mouse)
+                    };
+                    let wire = Wire::new(new_w_start, new_w_end);
                     let wire_id = self.db.circuit.new_wire(wire);
 
                     self.drag = Some(Drag::Resize {
                         id: wire_id,
-                        start: false,
+                        start: source_pin.kind == PinKind::Input,
                     });
 
                     self.connection_manager.mark_instance_dirty(wire_id);
                 } else {
-                    ui.painter()
-                        .line_segment([start, mouse], Stroke::new(2.0, COLOR_HOVER_PIN_TO_WIRE));
+                    // TODO: There is an issue with non zero viewport_offset.
+                    ui.painter().line_segment(
+                        [self.adjusted_pos(start), self.adjusted_pos(mouse)],
+                        Stroke::new(2.0, COLOR_HOVER_PIN_TO_WIRE),
+                    );
                 }
             }
             Some(Drag::BranchWire {
