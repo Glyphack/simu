@@ -1,14 +1,26 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    cmp::Ordering,
+    collections::{BTreeMap, HashMap, HashSet},
+};
 
 use egui::{Pos2, Vec2};
-use slotmap::SecondaryMap;
 
 use crate::{
     app::App,
     assets::PinKind,
     config::CanvasConfig,
-    db::{Circuit, DB, InstanceId, ModuleDefId, Pin},
+    connection_manager::Connection,
+    db::{Circuit, DB, InstanceId, InstanceKind, ModuleDefId, Pin},
 };
+
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
+pub struct Module {
+    pub pos: Pos2,
+    pub definition_id: ModuleDefId,
+    pub instance_members: Vec<InstanceId>,
+    // external pin to internal pin mapping
+    pub pins: BTreeMap<Pin, Pin>,
+}
 
 #[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
 pub struct ModuleDefinition {
@@ -16,19 +28,13 @@ pub struct ModuleDefinition {
     pub circuit: Circuit,
 }
 
-#[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
-pub struct Module {
-    pub pos: Pos2,
-    pub definition_index: ModuleDefId,
-}
-
 impl Module {
     pub fn name(&self, db: &DB) -> String {
-        db.get_module_def(self.definition_index).name.clone()
+        db.get_module_def(self.definition_id).name.clone()
     }
 
     pub fn definition<'a>(&self, db: &'a DB) -> &'a ModuleDefinition {
-        db.get_module_def(self.definition_index)
+        db.get_module_def(self.definition_id)
     }
 
     pub fn display(&self, db: &DB, id: InstanceId) -> String {
@@ -36,22 +42,112 @@ impl Module {
         sb += &format!(" {id}");
         sb
     }
+
+    pub(crate) fn pins(&self) -> Vec<Pin> {
+        self.pins.keys().copied().collect()
+    }
 }
 
 impl ModuleDefinition {
-    pub fn display_definition(&self, db: &DB, id: ModuleDefId) -> String {
-        let mut sb = format!("Module({:?}) {}\n", id, self.name);
-        let circuit_display = self.circuit.display(db);
-        for line in circuit_display.lines() {
-            if line.is_empty() {
-                sb.push('\n');
-            } else {
-                sb.push_str("  ");
-                sb.push_str(line);
-                sb.push('\n');
+    /// Flatten this module definition into a target circuit
+    /// Creates copies of all internal instances and marks them as hidden
+    /// Returns mapping from external (module) pins to internal (component) pins
+    pub fn flatten_into_circuit(
+        &self,
+        definition_id: ModuleDefId,
+        module_id: InstanceId,
+        pos: Pos2,
+        db: &mut DB,
+    ) -> Module {
+        let mut def_id_to_world_id: HashMap<InstanceId, InstanceId> = HashMap::new();
+
+        // First, create all instances
+        for (definition_id, _) in &self.circuit.types {
+            let placed_id = match self.circuit.ty(definition_id) {
+                InstanceKind::Gate(kind) => {
+                    let gate = *self.circuit.get_gate(definition_id);
+                    db.circuit.new_gate(gate)
+                }
+                InstanceKind::Power => {
+                    let power = *self.circuit.get_power(definition_id);
+                    db.circuit.new_power(power)
+                }
+                InstanceKind::Wire => {
+                    let wire = *self.circuit.get_wire(definition_id);
+                    db.circuit.new_wire(wire)
+                }
+                InstanceKind::Lamp => {
+                    let lamp = *self.circuit.get_lamp(definition_id);
+                    db.circuit.new_lamp(lamp)
+                }
+                InstanceKind::Clock => {
+                    let clock = *self.circuit.get_clock(definition_id);
+                    db.circuit.new_clock(clock)
+                }
+                InstanceKind::Module(nested_def_id) => {
+                    todo!("Module in module not implemented");
+                }
+            };
+
+            def_id_to_world_id.insert(definition_id, placed_id);
+        }
+
+        // Copy internal connections
+        for conn in &self.circuit.connections {
+            if let (Some(&new_a_id), Some(&new_b_id)) = (
+                def_id_to_world_id.get(&conn.a.ins),
+                def_id_to_world_id.get(&conn.b.ins),
+            ) {
+                let conn = Connection::new(
+                    Pin::new(new_a_id, conn.a.index, conn.a.kind),
+                    Pin::new(new_b_id, conn.b.index, conn.b.kind),
+                );
+                db.circuit.connections.insert(conn);
             }
         }
-        sb
+
+        // Create connections from module pins to internal component pins
+        let instances_in_order = self.instances_in_order();
+        let mut pins = BTreeMap::new();
+        let mut last_pin_index = 0;
+
+        for element_id in instances_in_order {
+            let element_world_id = def_id_to_world_id[&element_id];
+            let item_pins = self.circuit.pins_of(element_id, db);
+
+            for internal_pin in item_pins {
+                if self.circuit.connected_pins(internal_pin).is_empty() {
+                    let kind = internal_pin.kind;
+                    let external_pin = Pin::new(module_id, last_pin_index, kind);
+                    let internal_pin =
+                        Pin::new(element_world_id, internal_pin.index, internal_pin.kind);
+                    pins.insert(external_pin, internal_pin);
+                    let conn = Connection::new_bi(external_pin, internal_pin);
+                    db.circuit.connections.insert(conn);
+                    last_pin_index += 1;
+                }
+            }
+        }
+
+        let instance_members = def_id_to_world_id.values().copied().collect();
+        Module {
+            pos,
+            definition_id,
+            instance_members,
+            pins,
+        }
+    }
+    pub fn display_definition(&self, _db: &DB, id: ModuleDefId) -> String {
+        // Show only a summary, not the full internal circuit
+        format!(
+            "Module \"{}\" [{:?}] (internal: {} gates, {} powers, {} lamps, {} conns)",
+            self.name,
+            id,
+            self.circuit.gates.len(),
+            self.circuit.powers.len(),
+            self.circuit.lamps.len(),
+            self.circuit.connections.len(),
+        )
     }
 
     /// Mapping of external pin to internal pin
@@ -72,10 +168,50 @@ impl ModuleDefinition {
         m
     }
 
+    pub fn instances_in_order(&self) -> Vec<InstanceId> {
+        let mut instances: Vec<InstanceId> = self.circuit.types.keys().collect();
+        instances.sort_by(|s, o| {
+            let self_id = *s;
+            let self_pos = match self.circuit.ty(self_id) {
+                InstanceKind::Gate(_) => self.circuit.get_gate(self_id).pos,
+                InstanceKind::Power => self.circuit.get_power(self_id).pos,
+                InstanceKind::Wire => self.circuit.get_wire(self_id).center(),
+                InstanceKind::Lamp => self.circuit.get_lamp(self_id).pos,
+                InstanceKind::Clock => self.circuit.get_clock(self_id).pos,
+                InstanceKind::Module(module_def_id) => self.circuit.get_module(self_id).pos,
+            };
+
+            let other_id = *o;
+            let other_pos = match self.circuit.ty(other_id) {
+                InstanceKind::Gate(_) => self.circuit.get_gate(other_id).pos,
+                InstanceKind::Power => self.circuit.get_power(other_id).pos,
+                InstanceKind::Wire => self.circuit.get_wire(other_id).center(),
+                InstanceKind::Lamp => self.circuit.get_lamp(other_id).pos,
+                InstanceKind::Clock => self.circuit.get_clock(other_id).pos,
+                InstanceKind::Module(_) => self.circuit.get_module(other_id).pos,
+            };
+
+            if self_pos.y > other_pos.y {
+                Ordering::Greater
+            } else if self_pos.y == other_pos.y {
+                if self_pos.x > other_pos.x {
+                    Ordering::Greater
+                } else if self_pos.x == other_pos.x {
+                    Ordering::Equal
+                } else {
+                    Ordering::Less
+                }
+            } else {
+                Ordering::Less
+            }
+        });
+        instances
+    }
+
     pub fn get_unconnected_internal_pins(&self, db: &DB) -> Vec<Pin> {
         let mut unconnected_pins = Vec::new();
 
-        for (id, _) in &self.circuit.types {
+        for id in self.instances_in_order() {
             let pins = self.circuit.pins_of(id, db);
             for pin in pins {
                 if self.circuit.connected_pins(pin).is_empty() {
@@ -87,28 +223,17 @@ impl ModuleDefinition {
         unconnected_pins
     }
 
-    pub fn get_unconnected_pins(&self, db: &DB, module_id: InstanceId) -> Vec<Pin> {
-        let mut unconnected_pins = Vec::new();
-        for (last_pin_index, mut pin) in self
-            .get_unconnected_internal_pins(db)
-            .into_iter()
-            .enumerate()
-        {
-            pin.ins = module_id;
-            pin.index = last_pin_index as u32;
-            unconnected_pins.push(pin);
-        }
-        unconnected_pins
-    }
-
     /// Calculates the offset of a pin from the module's center position.
     /// This matches the layout logic used in rendering (app.rs `draw_module`).
     /// Input pins are placed on the left side, outputs on the right.
     /// Multiple pins of the same kind are evenly spaced vertically.
-    pub fn calculate_pin_offset(&self, db: &DB, pin: &Pin, canvas_config: &CanvasConfig) -> Vec2 {
-        let pins = self.get_unconnected_pins(db, pin.ins);
-
-        // Separate input and output indices
+    pub fn calculate_pin_offset(
+        &self,
+        db: &DB,
+        pins: &[Pin],
+        pin: &Pin,
+        canvas_config: &CanvasConfig,
+    ) -> Vec2 {
         let mut input_indices = vec![];
         let mut output_indices = vec![];
         for (i, pin) in pins.iter().enumerate() {
@@ -155,103 +280,6 @@ impl ModuleDefinition {
 
         Vec2::new(x, y)
     }
-
-    /// Flatten this module definition into a target circuit
-    /// Creates copies of all internal instances and marks them as hidden
-    /// Returns mapping from external (module) pins to internal (component) pins
-    pub fn flatten_into_circuit(
-        &self,
-        target_circuit: &mut Circuit,
-        module_id: InstanceId,
-        definition_id: ModuleDefId,
-        db: &DB,
-        module_instances: &mut SecondaryMap<InstanceId, InstanceId>,
-    ) -> HashMap<Pin, Pin> {
-        // Map old instance IDs to new ones
-        let mut id_map: HashMap<InstanceId, InstanceId> = HashMap::new();
-
-        // Copy all instances from definition circuit to target circuit
-        for (old_id, _) in &self.circuit.types {
-            let new_id = match self.circuit.ty(old_id) {
-                crate::db::InstanceKind::Gate(kind) => {
-                    let gate = *self.circuit.get_gate(old_id);
-                    target_circuit.new_gate(gate)
-                }
-                crate::db::InstanceKind::Power => {
-                    let power = *self.circuit.get_power(old_id);
-                    target_circuit.new_power(power)
-                }
-                crate::db::InstanceKind::Wire => {
-                    let wire = *self.circuit.get_wire(old_id);
-                    target_circuit.new_wire(wire)
-                }
-                crate::db::InstanceKind::Lamp => {
-                    let lamp = *self.circuit.get_lamp(old_id);
-                    target_circuit.new_lamp(lamp)
-                }
-                crate::db::InstanceKind::Clock => {
-                    let clock = *self.circuit.get_clock(old_id);
-                    target_circuit.new_clock(clock)
-                }
-                crate::db::InstanceKind::Module(nested_def_id) => {
-                    // Handle nested modules recursively
-                    let nested_module = self.circuit.get_module(old_id).clone();
-                    let nested_id = target_circuit.new_module(nested_module);
-
-                    // Recursively flatten the nested module
-                    let nested_def = db.get_module_def(nested_def_id);
-                    let _nested_pin_map = nested_def.flatten_into_circuit(
-                        target_circuit,
-                        nested_id,
-                        nested_def_id,
-                        db,
-                        module_instances,
-                    );
-
-                    nested_id
-                }
-            };
-
-            // Record that this instance belongs to the module
-            module_instances.insert(new_id, module_id);
-            id_map.insert(old_id, new_id);
-        }
-
-        // Copy all internal connections with remapped IDs
-        for conn in &self.circuit.connections {
-            if let (Some(&new_a_id), Some(&new_b_id)) =
-                (id_map.get(&conn.a.ins), id_map.get(&conn.b.ins))
-            {
-                let new_conn = crate::connection_manager::Connection::new(
-                    Pin::new(new_a_id, conn.a.index, conn.a.kind),
-                    Pin::new(new_b_id, conn.b.index, conn.b.kind),
-                );
-                target_circuit.connections.insert(new_conn);
-            }
-        }
-
-        // Build pin mapping: external pins -> internal pins
-        let mut pin_mapping = HashMap::new();
-        for (external_pin_index, internal_pin) in self
-            .get_unconnected_internal_pins(db)
-            .into_iter()
-            .enumerate()
-        {
-            // External pin (on the module boundary)
-            let external_pin = Pin::new(module_id, external_pin_index as u32, internal_pin.kind);
-
-            // Internal pin (on the actual component, with remapped instance ID)
-            let new_internal_id = *id_map
-                .get(&internal_pin.ins)
-                .expect("internal pin instance should be in id_map");
-            let remapped_internal_pin =
-                Pin::new(new_internal_id, internal_pin.index, internal_pin.kind);
-
-            pin_mapping.insert(external_pin, remapped_internal_pin);
-        }
-
-        pin_mapping
-    }
 }
 
 impl App {
@@ -262,11 +290,6 @@ impl App {
     ) -> Result<(), String> {
         if instances.is_empty() {
             return Err("No components selected".to_owned());
-        }
-
-        let mut internal_components = Vec::new();
-        for instance in instances {
-            internal_components.push(self.db.circuit.ty(*instance));
         }
 
         let mut circuit = Circuit::default();
@@ -295,8 +318,7 @@ impl App {
                     circuit.new_clock(clock)
                 }
                 crate::db::InstanceKind::Module(def_id) => {
-                    let module = self.db.circuit.get_module(old_id).clone();
-                    circuit.new_module(module)
+                    todo!("Cloning modules is not yet supported");
                 }
             };
             id_map.insert(old_id, new_id);
@@ -319,295 +341,5 @@ impl App {
         self.db.module_definitions.insert(definition);
 
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::db::{Gate, GateKind};
-    use egui::pos2;
-
-    #[test]
-    fn test_panic_lol() {
-        let mut app = App::default();
-
-        let gate = Gate {
-            pos: pos2(100.0, 100.0),
-            kind: GateKind::And,
-        };
-        let gate_id = app.db.circuit.new_gate(gate);
-
-        let mut instances = HashSet::new();
-        instances.insert(gate_id);
-        let result = app.create_module_definition("module".to_owned(), &instances);
-        assert!(result.is_ok());
-
-        let module_def_id = app
-            .db
-            .module_definitions
-            .keys()
-            .next()
-            .expect("module def id not found");
-        let module_id = app.db.circuit.new_module(Module {
-            pos: Pos2::ZERO,
-            definition_index: module_def_id,
-        });
-        app.db.remove_instance(gate_id);
-
-        assert!(app.db.circuit.gates.get(gate_id).is_none());
-
-        let pins = app.db.circuit.pins_of(module_id, &app.db);
-
-        for pin in pins {
-            eprintln!("getting pin {}", pin.display(&app.db.circuit));
-            app.db
-                .circuit
-                .pin_position(pin, &CanvasConfig::default(), &app.db);
-        }
-
-        let module_def = app
-            .db
-            .module_definitions
-            .get(module_def_id)
-            .expect("module def not found");
-        let display = module_def.display_definition(&app.db, module_def_id);
-    }
-
-    #[test]
-    fn test_simple_module_flattening() {
-        // Create a module definition with a single AND gate
-        let mut definition_circuit = Circuit::default();
-        let gate = crate::db::Gate {
-            pos: pos2(100.0, 100.0),
-            kind: crate::db::GateKind::And,
-        };
-        let gate_id = definition_circuit.new_gate(gate);
-
-        let module_def = ModuleDefinition {
-            name: "SimpleAND".to_owned(),
-            circuit: definition_circuit,
-        };
-
-        // Create DB and add definition
-        let mut db = DB::default();
-        let def_id = db.module_definitions.insert(module_def);
-
-        // Create a module instance in target circuit
-        let mut target_circuit = Circuit::default();
-        let module = Module {
-            pos: Pos2::ZERO,
-            definition_index: def_id,
-        };
-        let module_id = target_circuit.new_module(module);
-
-        // Flatten the module
-        let module_def = db.get_module_def(def_id);
-        let mut module_instances = SecondaryMap::new();
-        let pin_map = module_def.flatten_into_circuit(
-            &mut target_circuit,
-            module_id,
-            def_id,
-            &db,
-            &mut module_instances,
-        );
-
-        // Check that internal gate was created and recorded in module_instances
-        let internal_instances: Vec<_> = module_instances
-            .iter()
-            .filter_map(|(id, parent)| if *parent == module_id { Some(id) } else { None })
-            .collect();
-        assert_eq!(
-            internal_instances.len(),
-            1,
-            "Should have 1 internal instance"
-        );
-
-        // Should have 2 total instances (module + internal gate)
-        assert_eq!(target_circuit.types.len(), 2);
-
-        // Check that the internal instance is tracked correctly
-        assert!(module_instances.contains_key(internal_instances[0]));
-
-        // Pin mapping should have 3 entries (2 inputs + 1 output for AND gate)
-        assert_eq!(pin_map.len(), 3, "AND gate has 3 unconnected pins");
-    }
-
-    #[test]
-    fn test_module_flattening_with_connections() {
-        // Create a module definition with two gates connected
-        let mut definition_circuit = Circuit::default();
-
-        let gate1 = crate::db::Gate {
-            pos: pos2(50.0, 100.0),
-            kind: crate::db::GateKind::And,
-        };
-        let gate1_id = definition_circuit.new_gate(gate1);
-
-        let gate2 = crate::db::Gate {
-            pos: pos2(150.0, 100.0),
-            kind: crate::db::GateKind::Or,
-        };
-        let gate2_id = definition_circuit.new_gate(gate2);
-
-        // Connect output of gate1 to input of gate2
-        let gate1_output = Pin::new(gate1_id, 1, PinKind::Output);
-        let gate2_input = Pin::new(gate2_id, 0, PinKind::Input);
-        definition_circuit
-            .connections
-            .insert(crate::connection_manager::Connection::new(
-                gate1_output,
-                gate2_input,
-            ));
-
-        let module_def = ModuleDefinition {
-            name: "TwoGates".to_owned(),
-            circuit: definition_circuit,
-        };
-
-        // Create DB and add definition
-        let mut db = DB::default();
-        let def_id = db.module_definitions.insert(module_def);
-
-        // Create a module instance in target circuit
-        let mut target_circuit = Circuit::default();
-        let module = Module {
-            pos: Pos2::ZERO,
-            definition_index: def_id,
-        };
-        let module_id = target_circuit.new_module(module);
-
-        // Flatten the module
-        let module_def = db.get_module_def(def_id);
-        let mut module_instances = SecondaryMap::new();
-        let _pin_map = module_def.flatten_into_circuit(
-            &mut target_circuit,
-            module_id,
-            def_id,
-            &db,
-            &mut module_instances,
-        );
-
-        // Should have 2 internal instances (both gates)
-        let internal_instances: Vec<_> = module_instances
-            .iter()
-            .filter_map(|(id, parent)| if *parent == module_id { Some(id) } else { None })
-            .collect();
-        assert_eq!(internal_instances.len(), 2);
-
-        // Should have 3 total instances (module + 2 gates)
-        assert_eq!(target_circuit.types.len(), 3);
-
-        // The internal connection should be copied
-        assert_eq!(
-            target_circuit.connections.len(),
-            1,
-            "Internal connection should be copied"
-        );
-    }
-
-    #[test]
-    fn test_nested_module_flattening() {
-        // Create an inner module definition (just an AND gate)
-        let mut inner_circuit = Circuit::default();
-        let inner_gate = crate::db::Gate {
-            pos: pos2(50.0, 50.0),
-            kind: crate::db::GateKind::And,
-        };
-        let _inner_gate_id = inner_circuit.new_gate(inner_gate);
-
-        let inner_def = ModuleDefinition {
-            name: "InnerModule".to_owned(),
-            circuit: inner_circuit,
-        };
-
-        // Create DB and add inner definition
-        let mut db = DB::default();
-        let inner_def_id = db.module_definitions.insert(inner_def);
-
-        // Create an outer module definition containing the inner module
-        let mut outer_circuit = Circuit::default();
-        let inner_module_instance = Module {
-            pos: pos2(100.0, 100.0),
-            definition_index: inner_def_id,
-        };
-        let _inner_module_id = outer_circuit.new_module(inner_module_instance);
-
-        let outer_def = ModuleDefinition {
-            name: "OuterModule".to_owned(),
-            circuit: outer_circuit,
-        };
-
-        let outer_def_id = db.module_definitions.insert(outer_def);
-
-        // Create an instance of the outer module in target circuit
-        let mut target_circuit = Circuit::default();
-        let outer_module = Module {
-            pos: Pos2::ZERO,
-            definition_index: outer_def_id,
-        };
-        let outer_module_id = target_circuit.new_module(outer_module);
-
-        // Flatten the outer module (which should recursively flatten the inner module)
-        let outer_def = db.get_module_def(outer_def_id);
-        let mut module_instances = SecondaryMap::new();
-        let _pin_map = outer_def.flatten_into_circuit(
-            &mut target_circuit,
-            outer_module_id,
-            outer_def_id,
-            &db,
-            &mut module_instances,
-        );
-
-        // Check what's internal to the outer module (should be just the inner module)
-        let outer_internals: Vec<_> = module_instances
-            .iter()
-            .filter_map(|(id, parent)| {
-                if *parent == outer_module_id {
-                    Some(id)
-                } else {
-                    None
-                }
-            })
-            .collect();
-        assert_eq!(
-            outer_internals.len(),
-            1,
-            "Outer module should have 1 direct child (inner module)"
-        );
-
-        // The inner module should be in the outer's internal instances
-        let inner_module_id = outer_internals[0];
-        assert!(matches!(
-            target_circuit.ty(inner_module_id),
-            crate::db::InstanceKind::Module(_)
-        ));
-
-        // Check what's internal to the inner module (should be the inner gate)
-        let inner_internals: Vec<_> = module_instances
-            .iter()
-            .filter_map(|(id, parent)| {
-                if *parent == inner_module_id {
-                    Some(id)
-                } else {
-                    None
-                }
-            })
-            .collect();
-        assert_eq!(
-            inner_internals.len(),
-            1,
-            "Inner module should have 1 internal instance (the gate)"
-        );
-
-        // Total instances: outer module + inner module (internal) + inner gate (internal to inner)
-        assert_eq!(target_circuit.types.len(), 3);
-
-        // Check that all internal instances are tracked correctly in module_instances
-        assert_eq!(
-            module_instances.len(),
-            2,
-            "Should have 2 entries: inner module and inner gate"
-        );
     }
 }

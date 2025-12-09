@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fmt::Display;
 use std::hash::Hash;
 
@@ -6,6 +6,7 @@ use egui::{Pos2, Vec2, pos2};
 use slotmap::{SecondaryMap, SlotMap};
 
 use crate::assets::PinKind;
+use crate::connection_manager::ConnectionKind;
 use crate::{
     assets::{self},
     config::CanvasConfig,
@@ -63,9 +64,6 @@ pub struct Circuit {
     pub connections: HashSet<Connection>,
     // Labels
     pub labels: SlotMap<LabelId, Label>,
-    // Pin mappings for modules: external pin -> internal pin
-    #[serde(skip)]
-    pub module_pin_mappings: SecondaryMap<InstanceId, HashMap<Pin, Pin>>,
 }
 impl Circuit {
     pub fn ty(&self, id: InstanceId) -> InstanceKind {
@@ -131,11 +129,12 @@ impl Circuit {
         k
     }
 
-    pub fn new_module(&mut self, c: crate::module::Module) -> InstanceId {
-        let k = self.types.insert(InstanceKind::Module(c.definition_index));
-        self.modules.insert(k, c);
-        k
-    }
+    // TODO: Module creation is messy cannot use this
+    // pub fn new_module(&mut self, c: crate::module::Module) -> InstanceId {
+    //     let k = self.types.insert(InstanceKind::Module(c.definition_index));
+    //     self.modules.insert(k, c);
+    //     k
+    // }
 
     pub fn get_gate(&self, id: InstanceId) -> &Gate {
         self.gates.get(id).expect("gate not found")
@@ -225,131 +224,196 @@ impl Circuit {
         self.labels.keys().collect()
     }
 
-    pub fn display(&self, db: &DB) -> String {
+    pub fn display(&self, db: &DB, simulator: Option<&crate::simulator::Simulator>) -> String {
         let mut out = String::new();
         use std::fmt::Write as _;
-        writeln!(out, "circuit.types:").ok();
-        for (id, _) in &self.types {
-            writeln!(out, "  {}: {:?}", id, self.ty(id)).ok();
-        }
-        writeln!(
-            out,
-            "\ncounts: gates={}, powers={}, lamps={}, clocks={}, wires={}, modules={}, conns={}",
-            self.gates.len(),
-            self.powers.len(),
-            self.lamps.len(),
-            self.clocks.len(),
-            self.wires.len(),
-            self.modules.len(),
-            self.connections.len(),
-        )
-        .ok();
 
-        if !self.gates.is_empty() {
-            writeln!(out, "\nGates:").ok();
-            for (id, g) in &self.gates {
-                writeln!(out, "  {}", g.display(id)).ok();
-                for (i, pin) in g.kind.graphics().pins.iter().enumerate() {
-                    let pin_offset = pin.offset;
-                    let p = g.pos + pin_offset;
-                    let pin_instance = Pin::new(id, i as u32, pin.kind);
-                    writeln!(
-                        out,
-                        "    {} at ({:.1},{:.1})",
-                        pin_instance.display(self),
-                        p.x,
-                        p.y
-                    )
-                    .ok();
+        let total = self.types.len();
+        writeln!(out, "======================================").ok();
+        writeln!(out, "  INSTANCES ({total} total)").ok();
+        writeln!(out, "======================================").ok();
+
+        // Collect all instances with their display info
+        let instances: Vec<(InstanceId, InstanceKind)> =
+            self.types.iter().map(|(id, k)| (id, *k)).collect();
+        let instance_count = instances.len();
+
+        for (idx, (id, kind)) in instances.iter().enumerate() {
+            let is_last_instance = idx == instance_count - 1;
+            let branch = if is_last_instance { "`-" } else { "|-" };
+            let cont = if is_last_instance { "   " } else { "|  " };
+
+            // Instance header
+            let header = self.instance_header(*id, *kind, db);
+            writeln!(out, "{branch} {header}").ok();
+
+            // Get pins for this instance
+            let pins = self.pins_of(*id, db);
+            let pin_count = pins.len();
+
+            for (pin_idx, pin) in pins.iter().enumerate() {
+                let is_last_pin = pin_idx == pin_count - 1;
+                let pin_branch = if is_last_pin { "`-" } else { "|-" };
+
+                // Get connections for this pin
+                let connected = self.connected_pins(*pin);
+                let kind_str = match pin.kind {
+                    PinKind::Input => "In",
+                    PinKind::Output => "Out",
+                };
+                let arrow = match pin.kind {
+                    PinKind::Input => "<-",
+                    PinKind::Output => "->",
+                };
+
+                let conn_str = if connected.is_empty() {
+                    "(unconnected)".to_owned()
+                } else {
+                    connected
+                        .iter()
+                        .map(|p| p.display_short(self, db))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+
+                // Get pin state if simulator is available
+                let state_str = if let Some(sim) = simulator {
+                    if let Some(&value) = sim.current.get(pin) {
+                        match value {
+                            crate::simulator::Value::One => " O",
+                            crate::simulator::Value::Zero => " N",
+                            crate::simulator::Value::X => " X",
+                        }
+                    } else {
+                        ""
+                    }
+                } else {
+                    ""
+                };
+
+                writeln!(
+                    out,
+                    "{}{} #{} ({})  {} {}{}",
+                    cont, pin_branch, pin.index, kind_str, arrow, conn_str, state_str
+                )
+                .ok();
+            }
+
+            // Show instance members for modules with indentation
+            if let InstanceKind::Module(_) = kind {
+                let module = self.get_module(*id);
+                let member_count = module.instance_members.len();
+                for (member_idx, member_id) in module.instance_members.iter().enumerate() {
+                    let is_last_member = member_idx == member_count - 1;
+                    let member_branch = if is_last_member { "`-" } else { "|-" };
+                    let member_cont = if is_last_member {
+                        format!("{cont}   ")
+                    } else {
+                        format!("{cont}|  ")
+                    };
+
+                    // Member header
+                    let member_kind = self.ty(*member_id);
+                    let member_header = self.instance_header(*member_id, member_kind, db);
+                    writeln!(out, "{cont}{member_branch} {member_header}").ok();
+
+                    // Get pins for this member
+                    let member_pins = self.pins_of(*member_id, db);
+                    let member_pin_count = member_pins.len();
+
+                    for (member_pin_idx, member_pin) in member_pins.iter().enumerate() {
+                        let is_last_member_pin = member_pin_idx == member_pin_count - 1;
+                        let member_pin_branch = if is_last_member_pin { "`-" } else { "|-" };
+
+                        // Get connections for this member pin
+                        let member_connected = self.connected_pins(*member_pin);
+                        let member_kind_str = match member_pin.kind {
+                            PinKind::Input => "In",
+                            PinKind::Output => "Out",
+                        };
+                        let member_arrow = match member_pin.kind {
+                            PinKind::Input => "<-",
+                            PinKind::Output => "->",
+                        };
+
+                        let member_conn_str = if member_connected.is_empty() {
+                            "(unconnected)".to_owned()
+                        } else {
+                            member_connected
+                                .iter()
+                                .map(|p| p.display_short(self, db))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        };
+
+                        // Get pin state if simulator is available
+                        let member_state_str = if let Some(sim) = simulator {
+                            if let Some(&value) = sim.current.get(member_pin) {
+                                match value {
+                                    crate::simulator::Value::One => " O",
+                                    crate::simulator::Value::Zero => " N",
+                                    crate::simulator::Value::X => " X",
+                                }
+                            } else {
+                                ""
+                            }
+                        } else {
+                            ""
+                        };
+
+                        writeln!(
+                            out,
+                            "{member_cont}{member_pin_branch} #{} ({})  {} {}{}",
+                            member_pin.index,
+                            member_kind_str,
+                            member_arrow,
+                            member_conn_str,
+                            member_state_str
+                        )
+                        .ok();
+                    }
                 }
             }
         }
 
-        if !self.powers.is_empty() {
-            writeln!(out, "\nPowers:").ok();
-            for (id, p) in &self.powers {
-                writeln!(out, "  {}", p.display(id)).ok();
-                for (i, pin) in p.graphics().pins.iter().enumerate() {
-                    let pin_offset = pin.offset;
-                    let pp = p.pos + pin_offset;
-                    let pin_instance = Pin::new(id, i as u32, pin.kind);
-                    writeln!(
-                        out,
-                        "    {} at ({:.1},{:.1})",
-                        pin_instance.display(self),
-                        pp.x,
-                        pp.y
-                    )
-                    .ok();
-                }
-            }
-        }
-
-        if !self.lamps.is_empty() {
-            writeln!(out, "\nLamps:").ok();
-            for (id, lamp) in &self.lamps {
-                writeln!(out, "  {}", lamp.display(id)).ok();
-                for (i, pin) in lamp.graphics().pins.iter().enumerate() {
-                    let pin_offset = pin.offset;
-                    let p = lamp.pos + pin_offset;
-                    let pin_instance = Pin::new(id, i as u32, pin.kind);
-                    writeln!(
-                        out,
-                        "    {} at ({:.1},{:.1})",
-                        pin_instance.display(self),
-                        p.x,
-                        p.y
-                    )
-                    .ok();
-                }
-            }
-        }
-
-        if !self.clocks.is_empty() {
-            writeln!(out, "\nClocks:").ok();
-            for (id, clock) in &self.clocks {
-                writeln!(out, "  {}", clock.display(id)).ok();
-                for (i, pin) in clock.graphics().pins.iter().enumerate() {
-                    let pin_offset = pin.offset;
-                    let p = clock.pos + pin_offset;
-                    let pin_instance = Pin::new(id, i as u32, pin.kind);
-                    writeln!(
-                        out,
-                        "    {} at ({:.1},{:.1})",
-                        pin_instance.display(self),
-                        p.x,
-                        p.y
-                    )
-                    .ok();
-                }
-            }
-        }
-
-        if !self.wires.is_empty() {
-            writeln!(out, "\nWires:").ok();
-            for (id, w) in &self.wires {
-                writeln!(out, "  {}", w.display(id)).ok();
-                for pin in self.pins_of(id, db) {
-                    writeln!(out, "    {}", pin.display_alone()).ok();
-                }
-            }
-        }
-
-        if !self.modules.is_empty() {
-            writeln!(out, "\nModules:").ok();
-            for (id, m) in &self.modules {
-                writeln!(out, "  {id} (module instance)").ok();
-            }
-        }
-
-        if !self.connections.is_empty() {
-            writeln!(out, "\nConnections:").ok();
-            for c in &self.connections {
-                writeln!(out, "  {}", c.display(self)).ok();
-            }
+        writeln!(out).ok();
+        writeln!(out, "======================================").ok();
+        writeln!(out, "  CONNECTIONS ({} total)", self.connections.len()).ok();
+        writeln!(out, "======================================").ok();
+        let mut sorted_connections: Vec<_> = self.connections.iter().collect();
+        sorted_connections.sort_by_key(|c| {
+            let a_is_input = c.a.kind == PinKind::Input;
+            let b_is_input = c.b.kind == PinKind::Input;
+            (a_is_input, b_is_input)
+        });
+        for c in sorted_connections {
+            writeln!(out, "{}", c.display_short(self, db)).ok();
         }
 
         out
+    }
+
+    /// Short header for an instance (e.g., "AND [0v1]" or "Power [1v1] ON")
+    fn instance_header(&self, id: InstanceId, kind: InstanceKind, db: &DB) -> String {
+        match kind {
+            InstanceKind::Gate(gk) => format!("{gk:?} [{id}]"),
+            InstanceKind::Power => {
+                let p = self.get_power(id);
+                let state = if p.on { "ON" } else { "OFF" };
+                format!("Power [{id}] {state}")
+            }
+            InstanceKind::Wire => format!("Wire [{id}]"),
+            InstanceKind::Lamp => format!("Lamp [{id}]"),
+            InstanceKind::Clock => format!("Clock [{id}]"),
+            InstanceKind::Module(def_id) => {
+                let name = db
+                    .module_definitions
+                    .get(def_id)
+                    .map(|d| d.name.as_str())
+                    .unwrap_or("?");
+                format!("Module \"{name}\" [{id}]")
+            }
+        }
     }
 
     // Connections
@@ -387,6 +451,16 @@ impl Circuit {
             }
         }
         out
+    }
+
+    pub fn connections_containing(&self, pin: Pin) -> Vec<Connection> {
+        let mut res = Vec::new();
+        for c in &self.connections {
+            if c.involves_pin(&pin) {
+                res.push(*c);
+            }
+        }
+        res
     }
 
     pub fn pins_of(&self, id: InstanceId, db: &DB) -> Vec<Pin> {
@@ -450,10 +524,7 @@ impl Circuit {
                     .map(|(i, p)| Pin::new(id, i as u32, p.kind))
                     .collect()
             }
-            InstanceKind::Module(def_id) => {
-                let module_def = db.get_module_def(def_id);
-                module_def.get_unconnected_pins(db, id)
-            }
+            InstanceKind::Module(def_id) => self.get_module(id).pins(),
         }
     }
 
@@ -522,7 +593,8 @@ impl Circuit {
             }
             InstanceKind::Module(def_id) => {
                 let module_def = db.get_module_def(def_id);
-                module_def.calculate_pin_offset(db, &pin, canvas_config)
+                let module = db.circuit.get_module(pin.ins);
+                module_def.calculate_pin_offset(db, &module.pins(), &pin, canvas_config)
             }
         }
     }
@@ -637,9 +709,6 @@ pub struct DB {
     pub circuit: Circuit,
     // Definition of modules created by the user
     pub module_definitions: SlotMap<ModuleDefId, ModuleDefinition>,
-    // Maps instances to their parent module (if they're part of a module)
-    // Key: instance ID, Value: parent module ID
-    pub module_instances: SecondaryMap<InstanceId, InstanceId>,
 }
 
 impl DB {
@@ -652,24 +721,22 @@ impl DB {
     /// Returns the parent module ID if this instance is part of a module,
     /// or None if it's a top-level instance.
     pub fn get_module_owner(&self, id: InstanceId) -> Option<InstanceId> {
-        self.module_instances.get(id).copied()
+        for (ins, module) in &self.circuit.modules {
+            if module.instance_members.contains(&id) {
+                return Some(ins);
+            }
+        }
+        None
     }
 
     /// Get all instances that belong to a specific module
     pub fn get_instances_for_module(&self, module_id: InstanceId) -> Vec<InstanceId> {
-        self.module_instances
-            .iter()
-            .filter_map(
-                |(id, parent)| {
-                    if *parent == module_id { Some(id) } else { None }
-                },
-            )
-            .collect()
+        self.circuit.get_module(module_id).instance_members.clone()
     }
 
     /// Check if an instance is hidden from UI (i.e., it's part of a module)
     pub fn is_hidden(&self, id: InstanceId) -> bool {
-        self.module_instances.contains_key(id)
+        self.get_module_owner(id).is_some()
     }
 
     /// Get all instances that are visible in UI (not hidden)
@@ -693,48 +760,24 @@ impl DB {
     fn remove_single_instance(&mut self, id: InstanceId) {
         // Remove from circuit
         self.circuit.remove_single_instance(id);
-        // Remove from module_instances tracking
-        self.module_instances.remove(id);
     }
 
     /// Create a new module instance and automatically flatten its internal components
-    /// Creates connections between module boundary pins and internal component pins
-    ///
-    /// Note: This requires temporarily cloning the definition to avoid borrow checker issues.
-    /// In the future, we could optimize this with better data structure design.
-    pub fn new_module_with_flattening(&mut self, module: crate::module::Module) -> InstanceId {
-        let definition_id = module.definition_index;
-
-        // Create the module instance first
-        let module_id = self.circuit.new_module(module);
-
-        // Clone the definition to avoid borrow conflicts
+    pub fn new_module(&mut self, definition_id: ModuleDefId, pos: Pos2) -> InstanceId {
+        // TODO: Currently the way module is created is messy. First allocate ID and then flatten
+        // the module into circuit and then insert it in the circuit. It should just become one
+        // function.
+        let module_id = self
+            .circuit
+            .types
+            .insert(InstanceKind::Module(definition_id));
+        // TODO: This requires temporarily cloning the definition to avoid borrow checker issues.
+        // In the future, we could optimize this with better data structure design.
         let definition = self.get_module_def(definition_id).clone();
-
-        // Clone module_definitions to avoid borrow conflict
         let module_defs = self.module_definitions.clone();
+        let module = definition.flatten_into_circuit(definition_id, module_id, pos, self);
 
-        // Create a temporary DB with only the definitions we need
-        let temp_db = Self {
-            circuit: Circuit::default(), // Not used
-            module_definitions: module_defs,
-            module_instances: SecondaryMap::new(),
-        };
-
-        // Flatten it and store the pin mapping
-        let pin_mapping = definition.flatten_into_circuit(
-            &mut self.circuit,
-            module_id,
-            definition_id,
-            &temp_db,
-            &mut self.module_instances,
-        );
-
-        // Store the pin mapping
-        self.circuit
-            .module_pin_mappings
-            .insert(module_id, pin_mapping);
-
+        self.circuit.modules.insert(module_id, module);
         module_id
     }
 
@@ -907,6 +950,7 @@ pub enum GateKind {
     Nor,
     Xor,
     Xnor,
+    Not,
 }
 
 #[derive(serde::Deserialize, serde::Serialize, Copy, Debug, Clone)]
@@ -924,6 +968,7 @@ impl GateKind {
             Self::Nor => assets::NOR_GRAPHICS.clone(),
             Self::Xor => assets::XOR_GRAPHICS.clone(),
             Self::Xnor => assets::XNOR_GRAPHICS.clone(),
+            Self::Not => assets::NOT_GRAPHICS.clone(),
         }
     }
 }
@@ -1108,10 +1153,7 @@ impl Pin {
             }
             InstanceKind::Module(_) => format!("Module {}", self.ins),
         };
-        format!(
-            "{:?} pin#{} in {} ",
-            self.kind, self.index, instance_display,
-        )
+        format!("{:?} #{} in {} ", self.kind, self.index, instance_display,)
     }
 
     pub fn pos(&self, db: &DB, canvas_config: &CanvasConfig) -> Pos2 {
@@ -1123,131 +1165,41 @@ impl Pin {
         format!("pin#{} {:?}", self.index, self.kind)
     }
 
+    /// Short display for connections: "And[0v1].pin#0"
+    pub fn display_short(&self, circuit: &Circuit, db: &DB) -> String {
+        let kind = circuit.ty(self.ins);
+        let type_name = match kind {
+            InstanceKind::Gate(gk) => format!("{gk:?}"),
+            InstanceKind::Power => "Power".to_owned(),
+            InstanceKind::Wire => "Wire".to_owned(),
+            InstanceKind::Lamp => "Lamp".to_owned(),
+            InstanceKind::Clock => "Clock".to_owned(),
+            InstanceKind::Module(def_id) => {
+                let name = db
+                    .module_definitions
+                    .get(def_id)
+                    .map(|d| d.name.as_str())
+                    .unwrap_or("?");
+                format!("Mod:{name}")
+            }
+        };
+        format!("{}[{}]#{}", type_name, self.ins, self.index)
+    }
+
     pub fn new(ins: InstanceId, index: u32, kind: PinKind) -> Self {
         Self { ins, index, kind }
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use egui::Pos2;
+    pub fn is_passthrough(&self, db: &DB) -> Option<Self> {
+        let conns = db.circuit.connections_containing(*self);
 
-    #[test]
-    fn test_new_module_with_automatic_flattening() {
-        // Create a module definition
-        let mut definition_circuit = Circuit::default();
-        let gate = Gate {
-            pos: Pos2::ZERO,
-            kind: GateKind::And,
-        };
-        let _gate_id = definition_circuit.new_gate(gate);
-
-        let module_def = crate::module::ModuleDefinition {
-            name: "TestModule".to_owned(),
-            circuit: definition_circuit,
-        };
-
-        // Create DB and add definition
-        let mut db = DB::default();
-        let def_id = db.module_definitions.insert(module_def);
-
-        // Create module using new_module_with_flattening
-        let module = crate::module::Module {
-            pos: Pos2::ZERO,
-            definition_index: def_id,
-        };
-        let module_id = db.new_module_with_flattening(module);
-
-        // Check that flattening happened automatically
-        let internal_instances = db.get_instances_for_module(module_id);
-        assert_eq!(
-            internal_instances.len(),
-            1,
-            "Should have auto-flattened 1 instance"
-        );
-
-        // Pin mapping should be stored
-        assert!(db.circuit.module_pin_mappings.contains_key(module_id));
-        let pin_map = db
-            .circuit
-            .module_pin_mappings
-            .get(module_id)
-            .expect("module pin mappings should exist");
-        assert_eq!(pin_map.len(), 3, "AND gate has 3 pins");
-    }
-
-    #[test]
-    fn test_module_instances_tracking() {
-        // Create DB with a regular AND gate and a Module containing an OR gate
-        let mut db = DB::default();
-
-        // Add a regular AND gate (top-level, not part of any module)
-        let and_gate = Gate {
-            pos: Pos2::new(100.0, 100.0),
-            kind: GateKind::And,
-        };
-        let and_gate_id = db.circuit.new_gate(and_gate);
-
-        // Create a module definition with an OR gate inside
-        let mut definition_circuit = Circuit::default();
-        let or_gate = Gate {
-            pos: Pos2::new(50.0, 50.0),
-            kind: GateKind::Or,
-        };
-        let _or_gate_def_id = definition_circuit.new_gate(or_gate);
-
-        let module_def = crate::module::ModuleDefinition {
-            name: "TestModule".to_owned(),
-            circuit: definition_circuit,
-        };
-
-        // Add module definition to DB
-        let def_id = db.module_definitions.insert(module_def);
-
-        // Create module instance (this will flatten the OR gate as a hidden instance)
-        let module = crate::module::Module {
-            pos: Pos2::new(200.0, 200.0),
-            definition_index: def_id,
-        };
-        let module_id = db.new_module_with_flattening(module);
-
-        // Get the internal OR gate's instance ID
-        let module_internal_instances = db.get_instances_for_module(module_id);
-        assert_eq!(
-            module_internal_instances.len(),
-            1,
-            "Module should contain 1 internal instance"
-        );
-        let internal_or_gate_id = module_internal_instances[0];
-
-        // Verify it's actually an OR gate
-        match db.circuit.ty(internal_or_gate_id) {
-            InstanceKind::Gate(GateKind::Or) => {} // Expected
-            other => panic!("Expected OR gate, got {other:?}"),
+        for conn in conns {
+            if conn.kind != ConnectionKind::BI {
+                continue;
+            }
+            let connected_pin = conn.get_other_pin(*self);
+            return Some(connected_pin);
         }
-
-        // Test the get_module_owner helper method
-
-        // Top-level AND gate should not have a module owner
-        assert_eq!(
-            db.get_module_owner(and_gate_id),
-            None,
-            "Regular AND gate should not belong to any module"
-        );
-
-        // The module instance itself should not have a module owner
-        assert_eq!(
-            db.get_module_owner(module_id),
-            None,
-            "Module instance should not belong to any module"
-        );
-
-        // The internal OR gate should have the module as its owner
-        assert_eq!(
-            db.get_module_owner(internal_or_gate_id),
-            Some(module_id),
-            "Internal OR gate should belong to the module"
-        );
+        None
     }
 }

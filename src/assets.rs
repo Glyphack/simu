@@ -1,3 +1,4 @@
+/// Pins sorted in order: First input pins from top to bottom then output pins.
 use std::fmt::Display;
 
 use egui::{ImageSource, Vec2, include_image};
@@ -37,15 +38,15 @@ pub static NAND_GRAPHICS: InstanceGraphics = InstanceGraphics {
     pins: &[
         PinGraphics {
             kind: PinKind::Input,
+            offset: Vec2::new(-37.0, -14.5),
+        },
+        PinGraphics {
+            kind: PinKind::Input,
             offset: Vec2::new(-37.0, 14.5),
         },
         PinGraphics {
             kind: PinKind::Output,
             offset: Vec2::new(40.0, 0.2),
-        },
-        PinGraphics {
-            kind: PinKind::Input,
-            offset: Vec2::new(-37.0, -14.5),
         },
     ],
 };
@@ -55,15 +56,15 @@ pub static AND_GRAPHICS: InstanceGraphics = InstanceGraphics {
     pins: &[
         PinGraphics {
             kind: PinKind::Input,
+            offset: Vec2::new(-37.0, -14.5),
+        },
+        PinGraphics {
+            kind: PinKind::Input,
             offset: Vec2::new(-37.0, 14.5),
         },
         PinGraphics {
             kind: PinKind::Output,
             offset: Vec2::new(40.0, 0.2),
-        },
-        PinGraphics {
-            kind: PinKind::Input,
-            offset: Vec2::new(-37.0, -14.5),
         },
     ],
 };
@@ -73,15 +74,15 @@ pub static OR_GRAPHICS: InstanceGraphics = InstanceGraphics {
     pins: &[
         PinGraphics {
             kind: PinKind::Input,
+            offset: Vec2::new(-37.0, -14.5),
+        },
+        PinGraphics {
+            kind: PinKind::Input,
             offset: Vec2::new(-37.0, 14.5),
         },
         PinGraphics {
             kind: PinKind::Output,
             offset: Vec2::new(40.0, 0.2),
-        },
-        PinGraphics {
-            kind: PinKind::Input,
-            offset: Vec2::new(-37.0, -14.5),
         },
     ],
 };
@@ -91,15 +92,15 @@ pub static NOR_GRAPHICS: InstanceGraphics = InstanceGraphics {
     pins: &[
         PinGraphics {
             kind: PinKind::Input,
+            offset: Vec2::new(-37.0, -14.5),
+        },
+        PinGraphics {
+            kind: PinKind::Input,
             offset: Vec2::new(-37.0, 14.5),
         },
         PinGraphics {
             kind: PinKind::Output,
             offset: Vec2::new(40.0, 0.2),
-        },
-        PinGraphics {
-            kind: PinKind::Input,
-            offset: Vec2::new(-37.0, -14.5),
         },
     ],
 };
@@ -109,15 +110,15 @@ pub static XOR_GRAPHICS: InstanceGraphics = InstanceGraphics {
     pins: &[
         PinGraphics {
             kind: PinKind::Input,
+            offset: Vec2::new(-37.0, -14.5),
+        },
+        PinGraphics {
+            kind: PinKind::Input,
             offset: Vec2::new(-37.0, 14.5),
         },
         PinGraphics {
             kind: PinKind::Output,
             offset: Vec2::new(40.0, 0.2),
-        },
-        PinGraphics {
-            kind: PinKind::Input,
-            offset: Vec2::new(-37.0, -14.5),
         },
     ],
 };
@@ -127,15 +128,29 @@ pub static XNOR_GRAPHICS: InstanceGraphics = InstanceGraphics {
     pins: &[
         PinGraphics {
             kind: PinKind::Input,
+            offset: Vec2::new(-37.0, -14.5),
+        },
+        PinGraphics {
+            kind: PinKind::Input,
             offset: Vec2::new(-37.0, 14.5),
         },
         PinGraphics {
             kind: PinKind::Output,
             offset: Vec2::new(40.0, 0.2),
         },
+    ],
+};
+
+pub static NOT_GRAPHICS: InstanceGraphics = InstanceGraphics {
+    svg: include_image!("../assets/not.svg"),
+    pins: &[
         PinGraphics {
             kind: PinKind::Input,
-            offset: Vec2::new(-37.0, -14.5),
+            offset: Vec2::new(-40.0, 0.0),
+        },
+        PinGraphics {
+            kind: PinKind::Output,
+            offset: Vec2::new(40.0, 0.0),
         },
     ],
 };
