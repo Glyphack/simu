@@ -57,7 +57,6 @@ impl App {
         html_element.set_attribute("download", "circuit.json").ok();
         html_element.click();
         Url::revoke_object_url(&url).ok();
-        log::info!("Circuit saved as download");
         Ok(())
     }
 

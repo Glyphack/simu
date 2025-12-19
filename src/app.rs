@@ -74,6 +74,7 @@ impl Hover {
     }
 }
 
+// Items with their offset compared to a middle point in the rectangle
 #[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
 pub enum ClipBoardItem {
     Gate(GateKind, Vec2),
@@ -86,7 +87,7 @@ pub enum ClipBoardItem {
     Label(String, Vec2),
 }
 
-pub fn current_dirty() -> bool {
+pub fn default_true() -> bool {
     true
 }
 
@@ -124,50 +125,56 @@ pub struct ViewModule {
 #[derive(serde::Deserialize, serde::Serialize)]
 pub struct App {
     pub canvas_config: CanvasConfig,
-    pub drag: Option<Drag>,
-    pub hovered: Option<Hover>,
     pub db: DB,
-    // connection manager for handling spatial indexing and validation
     #[serde(skip)]
     pub connection_manager: ConnectionManager,
     // possible connections while dragging
     pub potential_connections: HashSet<Connection>,
-    // mark when current needs recomputation
-    #[serde(skip, default = "current_dirty")]
+
+    // Where are we in the world
+    #[serde(skip)]
+    pub viewport_offset: Vec2,
+    #[serde(skip)]
+    pub panning: bool,
+
+    #[serde(skip)]
+    pub simulator: Simulator,
+    #[serde(skip, default = "ClockController::default")]
+    pub clock_controller: ClockController,
+    // mark when simulator needs recomputation
+    #[serde(skip, default = "default_true")]
     pub current_dirty: bool,
-    pub show_debug: bool,
+
+    #[serde(skip)]
+    pub drag: Option<Drag>,
+    #[serde(skip)]
+    pub hovered: Option<Hover>,
     // selection set and move preview
     // TODO: Selection is not handling labels.
+    #[serde(skip)]
     pub selected: HashSet<InstanceId>,
-    //Copied. Items with their offset compared to a middle point in the rectangle
+    #[serde(skip)]
     pub clipboard: Vec<ClipBoardItem>,
-    // Where are we in the world
-    pub viewport_offset: Vec2,
+
+    #[serde(skip)]
+    pub show_debug: bool,
+
     // For web load functionality - stores pending JSON to load
     #[serde(skip)]
     pub pending_load_json: Option<String>,
-    #[serde(skip)]
-    pub panning: bool,
-    #[serde(skip)]
-    pub panel_width: f32,
-    // Label editing state
+
     #[serde(skip)]
     pub editing_label: Option<LabelId>,
     #[serde(skip)]
     pub label_edit_buffer: String,
-    // Module creation dialog state
+
     #[serde(skip)]
     pub creating_module: bool,
     #[serde(skip)]
     pub module_name_buffer: String,
     #[serde(skip)]
     pub module_creation_error: Option<String>,
-    // Simulation service - holds simulation state and results
-    #[serde(skip)]
-    pub simulator: Simulator,
-    // Clock controller for managing clock ticking
-    #[serde(skip, default = "ClockController::default")]
-    pub clock_controller: ClockController,
+
     #[serde(skip)]
     pub viewing_module: Option<ViewModule>,
 }
@@ -191,7 +198,6 @@ impl Default for App {
             pending_load_json: None,
             viewport_offset: Vec2::ZERO,
             panning: false,
-            panel_width: 0.0,
             editing_label: None,
             label_edit_buffer: String::new(),
             creating_module: false,
@@ -350,25 +356,20 @@ impl App {
                     ui.vertical(|ui| {
                         ui.label("Enter module name:");
                         let response = ui.text_edit_singleline(&mut self.module_name_buffer);
-
-                        // Auto-focus the text input when dialog opens
                         response.request_focus();
 
-                        // Check for Enter key to confirm
                         if ui.input(|i| i.key_pressed(egui::Key::Enter))
                             && !self.module_name_buffer.trim().is_empty()
                         {
                             self.confirm_module_creation();
                         }
 
-                        // Check for Escape key to cancel
                         if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                             self.creating_module = false;
                             self.module_name_buffer.clear();
                             self.module_creation_error = None;
                         }
 
-                        // Show error message if any
                         if let Some(error) = &self.module_creation_error {
                             ui.colored_label(egui::Color32::RED, error);
                         }
@@ -387,7 +388,7 @@ impl App {
                 });
         }
 
-        if let Some(mut view_module) = self.viewing_module.take() {
+        if let Some(view_module) = self.viewing_module.take() {
             let module_id = view_module.module_id;
             let mut is_open = true;
 
@@ -400,9 +401,9 @@ impl App {
             egui::Window::new(format!("Module View: {module_name}"))
                 .open(&mut is_open)
                 .resizable(true)
-                .default_size([800.0, 600.0])
+                .default_size([400.0, 400.0])
                 .show(ui.ctx(), |ui| {
-                    self.draw_module_view(ui, module_id, &mut view_module);
+                    self.draw_view_module(ui, module_id, &view_module);
                 });
 
             if is_open {
@@ -427,7 +428,6 @@ impl App {
                 })
                 .response
                 .rect;
-            self.panel_width = panel_rect.width();
             ui.separator();
             ui.vertical(|ui| {
                 ui.heading("Canvas");
@@ -474,7 +474,7 @@ impl App {
                     .ui(ui)
                     .clicked()
                 {
-                    self.db = DB::default();
+                    self.db.circuit = Circuit::default();
                     self.hovered = None;
                     self.selected.clear();
                     self.drag = None;
@@ -668,54 +668,125 @@ impl App {
         self.drag.take();
     }
 
-    fn draw_module_view(
-        &mut self,
-        ui: &mut Ui,
-        module_id: InstanceId,
-        view_module: &mut ViewModule,
-    ) {
-        // Get the module definition
+    fn draw_view_module(&mut self, ui: &mut Ui, module_id: InstanceId, view_module: &ViewModule) {
         let InstanceKind::Module(module_def_id) = self.circuit().ty(module_id) else {
-            return; // Not a module, shouldn't happen
+            return;
         };
+        let module = self.circuit().get_module(module_id);
 
-        // Allocate space for the canvas
         let (resp, _painter) = ui.allocate_painter(ui.available_size(), Sense::click_and_drag());
         let canvas_rect = resp.rect;
 
-        // Set clip rectangle to prevent drawing outside bounds
         ui.set_clip_rect(canvas_rect);
 
-        // Draw grid with module's viewport offset
         Self::draw_grid(ui, canvas_rect, view_module.viewport_offset);
 
-        // Handle panning with right-click drag
-        let right_down = ui.input(|i| i.pointer.secondary_down());
-        let right_released = ui.input(|i| i.pointer.secondary_released());
-        let mouse_is_visible = resp.contains_pointer();
+        let center = canvas_rect.center();
 
-        // Simple panning for module view
-        if right_down && mouse_is_visible {
-            view_module.viewport_offset += ui.input(|i| i.pointer.delta());
+        for id in module.instance_members.clone() {
+            match self.circuit().ty(id) {
+                InstanceKind::Gate(_) => {
+                    let (pos, kind) = {
+                        let gate = self.circuit().get_gate(id);
+                        (center + gate.pos.to_vec2(), gate.kind)
+                    };
+                    self.draw_instance_graphics(ui, kind.graphics(), pos, id, true);
+                }
+                InstanceKind::Power => {
+                    let (pos, graphics) = {
+                        let power = self.circuit().get_power(id);
+                        (center + power.pos.to_vec2(), power.graphics())
+                    };
+                    self.draw_instance_graphics(ui, graphics, pos, id, true);
+                }
+                InstanceKind::Lamp => {
+                    let has_current = self.is_on(lamp_input(id));
+                    let (pos, graphics) = {
+                        let lamp = self.circuit().get_lamp(id);
+                        (center + lamp.pos.to_vec2(), lamp.graphics())
+                    };
+
+                    self.draw_instance_graphics(ui, graphics, pos, id, true);
+                }
+                InstanceKind::Clock => {
+                    let (pos, graphics) = {
+                        let clock = self.circuit().get_clock(id);
+                        (center + clock.pos.to_vec2(), clock.graphics())
+                    };
+                    self.draw_instance_graphics(ui, graphics, pos, id, true);
+                }
+                InstanceKind::Wire => {
+                    let wire = *self.circuit().get_wire(id);
+                    let start = center + wire.start.to_vec2();
+                    let end = center + wire.end.to_vec2();
+                    let has_current = self.is_on(wire_start(id));
+                    self.draw_wire_with_pos(ui, id, start, end);
+                }
+                InstanceKind::Module(_) => {
+                    let (pos, definition_id) = {
+                        let module = self.circuit().get_module(id);
+                        (center + module.pos.to_vec2(), module.definition_id)
+                    };
+
+                    let (name, pins, pin_offsets) = {
+                        let definition = self.circuit().get_module(id).definition(&self.db);
+                        let name = definition.name.clone();
+                        let pins = self.circuit().get_module(id).pins();
+                        let pin_offsets: Vec<Vec2> = pins
+                            .iter()
+                            .map(|pin| {
+                                definition.calculate_pin_offset(
+                                    &self.db,
+                                    &pins,
+                                    pin,
+                                    &self.canvas_config,
+                                )
+                            })
+                            .collect();
+
+                        (name, pins, pin_offsets)
+                    };
+
+                    let rect = Rect::from_center_size(pos, self.canvas_config.base_gate_size);
+                    ui.painter().rect_filled(
+                        rect,
+                        CornerRadius::default(),
+                        egui::Color32::DARK_BLUE,
+                    );
+
+                    ui.painter().text(
+                        rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        name,
+                        egui::FontId::default(),
+                        egui::Color32::WHITE,
+                    );
+
+                    for (&pin, &pin_offset) in pins.iter().zip(pin_offsets.iter()) {
+                        let pin_color = match pin.kind {
+                            PinKind::Input => egui::Color32::LIGHT_RED,
+                            PinKind::Output => egui::Color32::LIGHT_GREEN,
+                        };
+
+                        ui.painter().circle_filled(
+                            pos + pin_offset,
+                            self.canvas_config.base_pin_size,
+                            pin_color,
+                        );
+
+                        let has_current = self.is_on(pin);
+
+                        if has_current {
+                            ui.painter().circle_stroke(
+                                pos + pin_offset,
+                                self.canvas_config.base_pin_size + 3.0,
+                                egui::Stroke::new(2.0, COLOR_PIN_POWERED_OUTLINE),
+                            );
+                        }
+                    }
+                }
+            }
         }
-
-        // Temporarily swap viewport to render with module's viewport
-        let original_viewport = self.viewport_offset;
-        self.viewport_offset = view_module.viewport_offset;
-
-        // Get instances that belong to this module
-        let module_instances = self.db.get_instances_for_module(module_id);
-        let module_instance_set: std::collections::HashSet<_> =
-            module_instances.into_iter().collect();
-
-        // Draw only the instances that belong to this module
-        // Save original hovered state and set to None to prevent interactions
-        let original_hovered = self.hovered.take();
-        self.draw_circuit_components(ui, |id| module_instance_set.contains(&id));
-        self.hovered = original_hovered;
-
-        // Restore original viewport
-        self.viewport_offset = original_viewport;
     }
 
     fn draw_canvas(&mut self, ui: &mut Ui) {
@@ -817,7 +888,6 @@ impl App {
                 self.current_dirty = true;
             }
 
-            // Right-click context menu for modules
             if right_clicked
                 && let Some(id) = self.hovered.as_ref().map(|i| i.instance())
                 && matches!(self.circuit().ty(id), InstanceKind::Module(_))
@@ -896,14 +966,13 @@ impl App {
         }
         for id in self.db.circuit.wire_ids() {
             if filter(id) {
-                let has_current = self.is_on(wire_start(id));
                 self.draw_wire(
                     ui,
                     id,
                     self.hovered
                         .as_ref()
                         .is_some_and(|f| matches!(f, Hover::Instance(_)) && f.instance() == id),
-                    has_current,
+                    false,
                 );
             }
         }
@@ -957,32 +1026,40 @@ impl App {
         graphics: assets::InstanceGraphics,
         pos: Pos2,
         id: InstanceId,
+        readonly: bool,
     ) -> Rect {
         let rect = Rect::from_center_size(pos, self.canvas_config.base_gate_size);
+        let sense = if readonly {
+            Sense::hover()
+        } else {
+            Sense::click_and_drag()
+        };
         let image = get_icon(ui, graphics.svg)
             .fit_to_exact_size(rect.size())
-            .sense(Sense::click_and_drag());
+            .sense(sense);
         let rect = rect.expand(INSTANEC_OUTLINE_EXPAND);
         let response = ui.put(rect, image);
 
-        if response.clicked() {
-            self.selected.clear();
-            self.selected.insert(id);
+        if !readonly {
+            if response.clicked() {
+                self.selected.clear();
+                self.selected.insert(id);
+            }
+            if response.dragged()
+                && let Some(mouse) = ui.ctx().pointer_interact_pos()
+            {
+                // Only clear selection if dragging an unselected item
+                if !self.selected.contains(&id) {
+                    self.selected.clear();
+                }
+                self.set_drag(Drag::Canvas(CanvasDrag::Single {
+                    id,
+                    offset: pos - mouse,
+                }));
+            }
         }
         if response.hovered() {
             self.hovered = Some(Hover::Instance(id));
-        }
-        if response.dragged()
-            && let Some(mouse) = ui.ctx().pointer_interact_pos()
-        {
-            // Only clear selection if dragging an unselected item
-            if !self.selected.contains(&id) {
-                self.selected.clear();
-            }
-            self.set_drag(Drag::Canvas(CanvasDrag::Single {
-                id,
-                offset: pos - mouse,
-            }));
         }
 
         for (i, pin) in graphics.pins.iter().enumerate() {
@@ -996,7 +1073,12 @@ impl App {
                 pin_pos,
                 Vec2::splat(self.canvas_config.base_pin_size + PIN_HOVER_THRESHOLD),
             );
-            let pin_resp = ui.allocate_rect(rect, Sense::drag());
+            let pin_sense = if readonly {
+                Sense::hover()
+            } else {
+                Sense::drag()
+            };
+            let pin_resp = ui.allocate_rect(rect, pin_sense);
             ui.painter()
                 .circle_filled(pin_pos, self.canvas_config.base_pin_size, color);
 
@@ -1005,7 +1087,7 @@ impl App {
                 self.hovered = Some(Hover::Pin(pin));
             }
 
-            if pin_resp.dragged() {
+            if !readonly && pin_resp.dragged() {
                 self.selected.clear();
                 self.set_drag(Drag::PinToWire { source_pin: pin });
             }
@@ -1026,7 +1108,7 @@ impl App {
             let gate = self.db.circuit.get_gate(id);
             (gate.pos, gate.kind)
         };
-        self.draw_instance_graphics(ui, kind.graphics(), self.adjusted_pos(pos), id);
+        self.draw_instance_graphics(ui, kind.graphics(), self.adjusted_pos(pos), id, false);
     }
 
     fn draw_power(&mut self, ui: &mut Ui, id: InstanceId) {
@@ -1034,7 +1116,7 @@ impl App {
             let power = self.db.circuit.get_power(id);
             (power.pos, power.graphics())
         };
-        self.draw_instance_graphics(ui, graphics, self.adjusted_pos(pos), id);
+        self.draw_instance_graphics(ui, graphics, self.adjusted_pos(pos), id, false);
     }
 
     fn draw_lamp(&mut self, ui: &mut Ui, id: InstanceId) {
@@ -1060,7 +1142,7 @@ impl App {
             }
         }
 
-        self.draw_instance_graphics(ui, graphics, pos, id);
+        self.draw_instance_graphics(ui, graphics, pos, id, false);
     }
 
     fn draw_clock(&mut self, ui: &mut Ui, id: InstanceId) {
@@ -1069,7 +1151,7 @@ impl App {
             (clock.pos, clock.graphics())
         };
         let pos = self.adjusted_pos(pos);
-        self.draw_instance_graphics(ui, graphics, pos, id);
+        self.draw_instance_graphics(ui, graphics, pos, id, false);
     }
 
     fn draw_module(&mut self, ui: &mut Ui, id: InstanceId) {
@@ -1164,7 +1246,27 @@ impl App {
         }
     }
 
-    pub fn draw_wire(&mut self, ui: &mut Ui, id: InstanceId, hovered: bool, has_current: bool) {
+    pub fn draw_wire_with_pos(&mut self, ui: &mut Ui, id: InstanceId, start: Pos2, end: Pos2) {
+        let has_current = self.is_on(wire_start(id));
+        let color = if has_current {
+            COLOR_WIRE_POWERED
+        } else {
+            COLOR_WIRE_IDLE
+        };
+        for (i, pin_pos) in [start, end].iter().enumerate() {
+            let pin_color = color;
+            ui.painter()
+                .circle(*pin_pos, PIN_HOVER_THRESHOLD / 2.0, pin_color, Stroke::NONE);
+        }
+
+        ui.painter().line_segment(
+            [start, end],
+            Stroke::new(self.canvas_config.wire_thickness, color),
+        );
+    }
+
+    pub fn draw_wire(&mut self, ui: &mut Ui, id: InstanceId, hovered: bool, readonly: bool) {
+        let has_current = self.is_on(wire_start(id));
         let mut color = if has_current {
             COLOR_WIRE_POWERED
         } else {
@@ -1175,6 +1277,12 @@ impl App {
         }
         let wire = *self.db.circuit.get_wire(id);
         let mut pin_interact = false;
+
+        let pin_sense = if readonly {
+            Sense::hover()
+        } else {
+            Sense::click_and_drag()
+        };
 
         for (i, pin_pos) in [wire.start, wire.end].iter().enumerate() {
             let pin_pos = self.adjusted_pos(*pin_pos);
@@ -1188,26 +1296,28 @@ impl App {
                 pin_pos,
                 Vec2::splat(self.canvas_config.base_pin_size + PIN_HOVER_THRESHOLD),
             );
-            let pin_resp = ui.allocate_rect(rect, Sense::click_and_drag());
+            let pin_resp = ui.allocate_rect(rect, pin_sense);
             if pin_resp.hovered() {
                 self.hovered = Some(Hover::Pin(pin));
                 pin_interact = true;
             }
-            if pin_resp.clicked() {
-                self.selected.clear();
-                self.selected.insert(id);
-                pin_interact = true;
-            }
-            if pin_resp.dragged() {
-                if self.selected.contains(&id) {
-                    self.set_drag(Drag::Resize {
-                        id: pin.ins,
-                        start: pin.index != 1,
-                    });
-                } else {
-                    self.set_drag(Drag::PinToWire { source_pin: pin });
+            if !readonly {
+                if pin_resp.clicked() {
+                    self.selected.clear();
+                    self.selected.insert(id);
+                    pin_interact = true;
                 }
-                pin_interact = true;
+                if pin_resp.dragged() {
+                    if self.selected.contains(&id) {
+                        self.set_drag(Drag::Resize {
+                            id: pin.ins,
+                            start: pin.index != 1,
+                        });
+                    } else {
+                        self.set_drag(Drag::PinToWire { source_pin: pin });
+                    }
+                    pin_interact = true;
+                }
             }
             let mut pin_color = if i == wire.input_index as usize {
                 Color32::RED
@@ -1557,7 +1667,6 @@ impl App {
         writeln!(out, "hovered: {:?}", self.hovered).ok();
         writeln!(out, "drag: {:?}", self.drag).ok();
         writeln!(out, "selected: {:?}", self.selected).ok();
-        writeln!(out, "viewing_module: {:?}", self.viewing_module).ok();
 
         // Simulation status
         writeln!(out).ok();
@@ -1727,12 +1836,6 @@ impl App {
                 }
                 ClipBoardItem::Module(def_index, offset) => {
                     // TODO: Modules
-                    // let id = self.db.new_module_with_flattening(Module {
-                    //     pos: mouse - offset,
-                    //     definition_index: def_index,
-                    // });
-                    // self.connection_manager.mark_instance_dirty(id);
-                    // self.selected.insert(id);
                 }
                 ClipBoardItem::Lamp(offset) => {
                     let id = self.db.circuit.new_lamp(Lamp {
@@ -1843,7 +1946,6 @@ impl App {
     }
 
     fn confirm_module_creation(&mut self) {
-        // Validate the module name and clone it to avoid borrow issues
         let name = self.module_name_buffer.trim().to_owned();
         if name.is_empty() {
             self.module_creation_error = Some("Module name cannot be empty".to_owned());
@@ -1852,9 +1954,7 @@ impl App {
 
         match self.create_module_definition(name.clone(), &self.selected.clone()) {
             Ok(()) => {
-                log::info!("module created successfully: {name}");
                 self.selected.clear();
-                // Close the dialog
                 self.creating_module = false;
                 self.module_name_buffer.clear();
                 self.module_creation_error = None;

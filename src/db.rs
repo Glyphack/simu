@@ -50,6 +50,12 @@ impl From<u32> for ModuleDefId {
     }
 }
 
+impl Display for ModuleDefId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&format!("{:?}", self.0))
+    }
+}
+
 #[derive(Default, serde::Deserialize, serde::Serialize, Debug, Clone)]
 pub struct Circuit {
     // Type registry for each instance id
@@ -129,12 +135,11 @@ impl Circuit {
         k
     }
 
-    // TODO: Module creation is messy cannot use this
-    // pub fn new_module(&mut self, c: crate::module::Module) -> InstanceId {
-    //     let k = self.types.insert(InstanceKind::Module(c.definition_index));
-    //     self.modules.insert(k, c);
-    //     k
-    // }
+    pub fn new_module_id(&mut self, m: crate::module::Module) -> InstanceId {
+        let k = self.types.insert(InstanceKind::Module(m.definition_id));
+        self.modules.insert(k, m);
+        k
+    }
 
     pub fn get_gate(&self, id: InstanceId) -> &Gate {
         self.gates.get(id).expect("gate not found")
@@ -955,6 +960,8 @@ pub enum GateKind {
 
 #[derive(serde::Deserialize, serde::Serialize, Copy, Debug, Clone)]
 pub struct Gate {
+    /// pos is the position of gate on the canvas. It's an absolute value. So it needs to be subbed
+    /// `viewport_offset` to get the relative position of this object on the screen.
     pub pos: Pos2,
     pub kind: GateKind,
 }
@@ -1190,13 +1197,21 @@ impl Pin {
         Self { ins, index, kind }
     }
 
+    // If this pin is a module pin then it's passing the current into the internal pin.
+    // This function returns that internal pin
+    // TODO: This is shit. Just make a map of external to internal pins?
     pub fn is_passthrough(&self, db: &DB) -> Option<Self> {
+        if matches!(db.circuit.ty(self.ins), InstanceKind::Module(_)) {
+            return None;
+        }
         let conns = db.circuit.connections_containing(*self);
 
-        for conn in conns {
-            if conn.kind != ConnectionKind::BI {
-                continue;
-            }
+        let bi_conns: Vec<Connection> = conns
+            .iter()
+            .filter(|c| c.kind == ConnectionKind::BI)
+            .copied()
+            .collect();
+        if let Some(conn) = bi_conns.into_iter().next() {
             let connected_pin = conn.get_other_pin(*self);
             return Some(connected_pin);
         }

@@ -182,6 +182,8 @@ impl Simulator {
                 for pin in circuit.get_module(id).pins() {
                     let v = self.get_pin_value(db, circuit, pin);
                     self.current.insert(pin, v);
+                    let mapped_pin = pin.is_passthrough(db).unwrap_or(pin);
+                    self.current.insert(mapped_pin, v);
                 }
             }
         }
@@ -259,12 +261,12 @@ impl Simulator {
     }
 
     fn get_pin_value(&self, db: &DB, circuit: &Circuit, pin: Pin) -> Value {
-        let pin = pin.is_passthrough(db).unwrap_or(pin);
-        let conns = circuit.connections_containing(pin);
+        let mapped_pin = pin.is_passthrough(db).unwrap_or(pin);
+        let conns = circuit.connections_containing(mapped_pin);
 
         let mut result = Value::Zero;
         for conn in conns {
-            let connected_pin = conn.get_other_pin(pin);
+            let connected_pin = conn.get_other_pin(mapped_pin);
             if connected_pin.kind != PinKind::Output {
                 continue;
             }

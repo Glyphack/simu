@@ -4,6 +4,7 @@ use std::{
 };
 
 use egui::{Pos2, Vec2};
+use serde::{Deserialize as _, Deserializer, Serialize as _, Serializer};
 
 use crate::{
     app::App,
@@ -13,12 +14,29 @@ use crate::{
     db::{Circuit, DB, InstanceId, InstanceKind, ModuleDefId, Pin},
 };
 
+pub fn serialize<S>(map: &BTreeMap<Pin, Pin>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    let vec: Vec<_> = map.iter().collect();
+    vec.serialize(serializer)
+}
+
+pub fn deserialize<'de, D>(deserializer: D) -> Result<BTreeMap<Pin, Pin>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let vec: Vec<(Pin, Pin)> = Vec::deserialize(deserializer)?;
+    Ok(vec.into_iter().collect())
+}
+
 #[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
 pub struct Module {
     pub pos: Pos2,
     pub definition_id: ModuleDefId,
     pub instance_members: Vec<InstanceId>,
-    // external pin to internal pin mapping
+    // external pin to internal pin mapping entry point of module
+    #[serde(serialize_with = "serialize", deserialize_with = "deserialize")]
     pub pins: BTreeMap<Pin, Pin>,
 }
 
@@ -62,34 +80,44 @@ impl ModuleDefinition {
         let mut def_id_to_world_id: HashMap<InstanceId, InstanceId> = HashMap::new();
 
         // First, create all instances
-        for (definition_id, _) in &self.circuit.types {
-            let placed_id = match self.circuit.ty(definition_id) {
+        for (member_id, _) in &self.circuit.types {
+            let placed_id = match self.circuit.ty(member_id) {
                 InstanceKind::Gate(kind) => {
-                    let gate = *self.circuit.get_gate(definition_id);
+                    let gate = *self.circuit.get_gate(member_id);
                     db.circuit.new_gate(gate)
                 }
                 InstanceKind::Power => {
-                    let power = *self.circuit.get_power(definition_id);
+                    let power = *self.circuit.get_power(member_id);
                     db.circuit.new_power(power)
                 }
                 InstanceKind::Wire => {
-                    let wire = *self.circuit.get_wire(definition_id);
+                    let wire = *self.circuit.get_wire(member_id);
                     db.circuit.new_wire(wire)
                 }
                 InstanceKind::Lamp => {
-                    let lamp = *self.circuit.get_lamp(definition_id);
+                    let lamp = *self.circuit.get_lamp(member_id);
                     db.circuit.new_lamp(lamp)
                 }
                 InstanceKind::Clock => {
-                    let clock = *self.circuit.get_clock(definition_id);
+                    let clock = *self.circuit.get_clock(member_id);
                     db.circuit.new_clock(clock)
                 }
-                InstanceKind::Module(nested_def_id) => {
-                    todo!("Module in module not implemented");
+                InstanceKind::Module(child_module_def_id) => {
+                    let child_module = self.circuit.get_module(member_id).clone();
+                    let child_module_pos = child_module.pos;
+                    let child_module_def = db.get_module_def(child_module_def_id).clone();
+                    let placed_child_module = db.circuit.new_module_id(child_module);
+                    child_module_def.flatten_into_circuit(
+                        child_module_def_id,
+                        placed_child_module,
+                        child_module_pos,
+                        db,
+                    );
+                    placed_child_module
                 }
             };
 
-            def_id_to_world_id.insert(definition_id, placed_id);
+            def_id_to_world_id.insert(member_id, placed_id);
         }
 
         // Copy internal connections
@@ -292,33 +320,60 @@ impl App {
             return Err("No components selected".to_owned());
         }
 
+        let mut sum_x = 0.0;
+        let mut sum_y = 0.0;
+        for &id in instances {
+            let pos = match self.db.circuit.ty(id) {
+                crate::db::InstanceKind::Gate(_) => self.db.circuit.get_gate(id).pos,
+                crate::db::InstanceKind::Power => self.db.circuit.get_power(id).pos,
+                crate::db::InstanceKind::Wire => self.db.circuit.get_wire(id).center(),
+                crate::db::InstanceKind::Lamp => self.db.circuit.get_lamp(id).pos,
+                crate::db::InstanceKind::Clock => self.db.circuit.get_clock(id).pos,
+                crate::db::InstanceKind::Module(_) => self.db.circuit.get_module(id).pos,
+            };
+            sum_x += pos.x;
+            sum_y += pos.y;
+        }
+        let center = Pos2::new(
+            sum_x / instances.len() as f32,
+            sum_y / instances.len() as f32,
+        );
+
         let mut circuit = Circuit::default();
         let mut id_map = std::collections::HashMap::new();
 
         for &old_id in instances {
             let new_id = match self.db.circuit.ty(old_id) {
                 crate::db::InstanceKind::Gate(kind) => {
-                    let gate = *self.db.circuit.get_gate(old_id);
+                    let mut gate = *self.db.circuit.get_gate(old_id);
+                    gate.pos -= center.to_vec2();
                     circuit.new_gate(gate)
                 }
                 crate::db::InstanceKind::Power => {
-                    let power = *self.db.circuit.get_power(old_id);
+                    let mut power = *self.db.circuit.get_power(old_id);
+                    power.pos -= center.to_vec2();
                     circuit.new_power(power)
                 }
                 crate::db::InstanceKind::Wire => {
-                    let wire = *self.db.circuit.get_wire(old_id);
+                    let mut wire = *self.db.circuit.get_wire(old_id);
+                    wire.start -= center.to_vec2();
+                    wire.end -= center.to_vec2();
                     circuit.new_wire(wire)
                 }
                 crate::db::InstanceKind::Lamp => {
-                    let lamp = *self.db.circuit.get_lamp(old_id);
+                    let mut lamp = *self.db.circuit.get_lamp(old_id);
+                    lamp.pos -= center.to_vec2();
                     circuit.new_lamp(lamp)
                 }
                 crate::db::InstanceKind::Clock => {
-                    let clock = *self.db.circuit.get_clock(old_id);
+                    let mut clock = *self.db.circuit.get_clock(old_id);
+                    clock.pos -= center.to_vec2();
                     circuit.new_clock(clock)
                 }
                 crate::db::InstanceKind::Module(def_id) => {
-                    todo!("Cloning modules is not yet supported");
+                    let mut module = self.db.circuit.get_module(old_id).clone();
+                    module.pos -= center.to_vec2();
+                    circuit.new_module_id(module)
                 }
             };
             id_map.insert(old_id, new_id);
