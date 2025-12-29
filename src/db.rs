@@ -68,9 +68,9 @@ pub struct Circuit {
     pub clocks: SecondaryMap<InstanceId, Clock>,
     pub modules: SecondaryMap<InstanceId, Module>,
     pub connections: HashSet<Connection>,
-    // Labels
     pub labels: SlotMap<LabelId, Label>,
 }
+
 impl Circuit {
     pub fn ty(&self, id: InstanceId) -> InstanceKind {
         self.types
